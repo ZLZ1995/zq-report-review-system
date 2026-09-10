@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -17,8 +18,12 @@ _PASSWORD_HASHER = PasswordHasher()
 _JWT_ALGORITHM = "HS256"
 
 
-def hash_password(password: str) -> str:
-    validate_password(password)
+def hash_password(password: str, *, customer: bool = False) -> str:
+    if customer:
+        if not re.fullmatch(r"[A-Za-z0-9]{8,16}", password) or not re.search(r"[0-9]", password):
+            raise ValueError("客户密码须为8–16位纯数字或数字与英文字母组合，区分大小写。")
+    else:
+        validate_password(password)
     return _PASSWORD_HASHER.hash(password)
 
 

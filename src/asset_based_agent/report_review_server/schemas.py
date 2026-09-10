@@ -20,18 +20,18 @@ class RefreshRequest(BaseModel):
 
 class ChangePasswordRequest(BaseModel):
     current_password: str = Field(min_length=1, max_length=256)
-    new_password: str = Field(min_length=12, max_length=256)
+    new_password: str = Field(min_length=8, max_length=256)
 
 
 class CreateUserRequest(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     display_name: str = Field(min_length=1, max_length=128)
-    temporary_password: str = Field(min_length=12, max_length=256)
+    temporary_password: str = Field(min_length=8, max_length=16)
     email: str | None = Field(default=None, max_length=320)
 
 
 class ResetPasswordRequest(BaseModel):
-    temporary_password: str = Field(min_length=12, max_length=256)
+    temporary_password: str = Field(min_length=8, max_length=256)
 
 
 class UserResponse(BaseModel):

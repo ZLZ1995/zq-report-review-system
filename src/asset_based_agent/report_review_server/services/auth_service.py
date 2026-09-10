@@ -125,7 +125,7 @@ class AuthService:
         user = db.scalar(select(User).where(User.user_id == context.user.user_id).with_for_update())
         if user is None or not verify_password(current_password, user.password_hash):
             raise ServiceError("invalid_current_password", "当前密码错误。", 400)
-        user.password_hash = hash_password(new_password)
+        user.password_hash = _account_password_hash(new_password, customer=user.role == "user")
         user.must_change_password = False
         self._revoke_user_sessions(db, user.user_id, "password_changed")
         db.commit()
@@ -144,7 +144,7 @@ class AuthService:
             username=normalized,
             display_name=display_name.strip(),
             email=email.strip().lower() if email else None,
-            password_hash=hash_password(temporary_password),
+            password_hash=_account_password_hash(temporary_password, customer=True),
             role="user",
             status="active",
             must_change_password=True,
@@ -171,7 +171,7 @@ class AuthService:
         user = db.scalar(select(User).where(User.user_id == user_id).with_for_update())
         if user is None:
             raise ServiceError("user_not_found", "用户不存在。", 404)
-        user.password_hash = hash_password(temporary_password)
+        user.password_hash = _account_password_hash(temporary_password, customer=user.role == "user")
         user.must_change_password = True
         self._revoke_user_sessions(db, user.user_id, "password_reset")
         db.commit()
@@ -265,6 +265,15 @@ def normalize_username(username: str) -> str:
     if not normalized or any(character.isspace() for character in normalized):
         raise ServiceError("invalid_username", "用户名格式无效。", 422)
     return normalized
+
+
+def _account_password_hash(password: str, *, customer: bool) -> str:
+    try:
+        return hash_password(password, customer=customer)
+    except ValueError:
+        message = ("客户密码须为8–16位纯数字或数字与英文字母组合，区分大小写。"
+                   if customer else "管理员密码须为12–256位。")
+        raise ServiceError("invalid_password", message, 422) from None
 
 
 def is_expired(value: datetime, *, now: datetime | None = None) -> bool:

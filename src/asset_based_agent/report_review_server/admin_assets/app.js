@@ -32,6 +32,7 @@ async function api(path, method = "GET", data) {
     if (response.status === 401) clearSession();
     // Do not display validation payloads: rejected inputs may contain secrets.
     throw new Error(response.status === 401 ? "登录失效或凭据错误，请重新登录。" :
+      response.status === 422 && (path === "/admin/users" || path.endsWith("/reset-password")) ? "请核对账号字段；客户密码须为8–16位纯数字或数字+英文，区分大小写。" :
       response.status === 403 ? "无管理权限，或账号需要先修改临时密码。" :
       response.status === 409 ? "记录冲突，请刷新确认是否已保存，不要重复提交。" : "操作失败，请核对输入或联系服务管理员。状态码：" + response.status);
   }
