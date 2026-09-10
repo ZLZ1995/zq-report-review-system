@@ -1,15 +1,39 @@
 """Independent control desk assets and explicitly scoped administrative reads."""
 
+import hashlib
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 
+import jwt
 from fastapi import Depends, Response
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field, SecretStr
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from .models import ModelDefinition, ProviderRoute, User, Wallet
-from .schemas import ModelAdminResponse, ProviderRouteResponse, UserResponse
+from .schemas import (
+    ModelAdminResponse,
+    ProviderRouteResponse,
+    TokenRatesRequest,
+    UserResponse,
+)
+from .services import model_discovery
 from .services.auth_service import ServiceError
 from .services.wallet_service import display_money
+
+
+class DiscoveryRequest(BaseModel):
+    base_url: str = Field(min_length=1, max_length=512)
+    api_key: SecretStr = Field(min_length=1, max_length=4096)
+
+
+class ChannelRequest(DiscoveryRequest):
+    discovery_token: str
+    provider_model: str = Field(min_length=1, max_length=128)
+    priority: int = Field(default=1, ge=1, le=10000)
+    rates: TokenRatesRequest
 
 
 def install_admin_web(app, get_context, get_db):
@@ -44,6 +68,53 @@ def install_admin_web(app, get_context, get_db):
         return asset("style.css")
 
     admin_dependency = Depends(admin)
+
+    @app.post("/api/v1/admin/channels/discover")
+    def discover(payload: DiscoveryRequest, response: Response, context=admin_dependency):
+        base, provider = model_discovery.normalize_url(payload.base_url)
+        key = payload.api_key.get_secret_value()
+        models = model_discovery.fetch_models(base, key)
+        ticket = jwt.encode({
+            "aud": "channel-discovery", "sub": context.user.user_id,
+            "exp": datetime.now(timezone.utc) + timedelta(minutes=15),
+            "fingerprint": model_discovery.fingerprint(base, key), "models": models,
+        }, app.state.settings.jwt_secret, algorithm="HS256")
+        response.headers["Cache-Control"] = "no-store"
+        return {"models": models, "base_url": base, "provider_type": provider, "discovery_token": ticket}
+
+    @app.post("/api/v1/admin/channels", status_code=201)
+    def create_channel(payload: ChannelRequest, context=admin_dependency, db=database_dependency):
+        base, provider = model_discovery.normalize_url(payload.base_url)
+        key = payload.api_key.get_secret_value()
+        try:
+            ticket = jwt.decode(payload.discovery_token, app.state.settings.jwt_secret,
+                                algorithms=["HS256"], audience="channel-discovery")
+            if (ticket["sub"] != context.user.user_id
+                    or ticket["fingerprint"] != model_discovery.fingerprint(base, key)
+                    or payload.provider_model not in ticket["models"]):
+                raise ValueError()
+        except (jwt.InvalidTokenError, KeyError, ValueError, TypeError):
+            raise ServiceError("discovery_required", "连接信息已变更、测试已过期或模型不在清单中，请重新测试连接。", 422) from None
+        # Deterministic catalog identity: no manual model precreation or orphan commits.
+        code = "auto-" + hashlib.sha256(payload.provider_model.encode()).hexdigest()[:59]
+        model = db.scalar(select(ModelDefinition).where(ModelDefinition.code == code))
+        if model is None:
+            model = ModelDefinition(code=code, display_name=payload.provider_model,
+                                    tier="standard", model_multiplier=Decimal(1),
+                                    max_output_tokens=8192, enabled=True)
+            db.add(model)
+            try:
+                db.flush()
+            except IntegrityError:
+                db.rollback()
+                raise ServiceError("model_exists", "模型正在被其他请求保存，请刷新后重试。", 409) from None
+        route = app.state.model_admin_service.create_route(
+            db, model_id=model.model_id, provider_type=provider,
+            provider_model=payload.provider_model, base_url=base, api_key=key,
+            priority=payload.priority, timeout_seconds=90,
+            rates=payload.rates.model_dump(),
+        )
+        return {"route_id": route.route_id, "model_id": model.model_id}
 
     @app.get("/api/v1/admin/overview")
     def overview(response: Response, _context=admin_dependency, db=database_dependency):

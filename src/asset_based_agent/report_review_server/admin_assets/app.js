@@ -1,5 +1,8 @@
 "use strict";
 let token = null;
+let discovery = null;
+let connectionVersion = 0;
+let testingConnection = false;
 const el = id => document.getElementById(id);
 const notice = text => { el("notice").textContent = text; };
 function clearSession() {
@@ -10,6 +13,7 @@ function clearSession() {
   for (const id of ["users", "stats", "model-list", "route-list", "model-choice"]) el(id).replaceChildren();
   document.querySelectorAll("form").forEach(form => form.reset());
   document.querySelectorAll(".user-choice").forEach(select => select.replaceChildren());
+  invalidateConnection();
 }
 async function api(path, method = "GET", data) {
   const response = await fetch("/api/v1" + path, {
@@ -18,6 +22,13 @@ async function api(path, method = "GET", data) {
     ...(data ? {body: JSON.stringify(data)} : {}),
   });
   if (!response.ok) {
+    if (path.startsWith("/admin/channels")) {
+      const result = await response.json().catch(() => ({}));
+      const code = result.error?.code;
+      if (typeof code === "string" && (code.startsWith("discovery_") || code === "route_priority_exists")) {
+        throw new Error(result.error.message);
+      }
+    }
     if (response.status === 401) clearSession();
     // Do not display validation payloads: rejected inputs may contain secrets.
     throw new Error(response.status === 401 ? "登录失效或凭据错误，请重新登录。" :
@@ -30,7 +41,7 @@ function cell(row, value) { const td = document.createElement("td"); td.textCont
 function option(select, id, name) { const opt = document.createElement("option"); opt.value = id; opt.textContent = name; select.append(opt); }
 async function refresh() {
   const data = await api("/admin/overview");
-  for (const id of ["users", "stats", "model-list", "route-list", "model-choice"]) el(id).replaceChildren();
+  for (const id of ["users", "stats", "model-list", "route-list"]) el(id).replaceChildren();
   document.querySelectorAll(".user-choice").forEach(s => s.replaceChildren());
   for (const user of data.users) {
     const row = document.createElement("tr");
@@ -42,7 +53,6 @@ async function refresh() {
     const box = document.createElement("div"); box.className = "stat"; box.textContent = title + " / " + count; el("stats").append(box);
   }
   for (const model of data.models) {
-    option(el("model-choice"), model.model_id, model.display_name);
     const p = document.createElement("p"); p.textContent = model.display_name + " · " + model.code + " · 倍率 " + model.model_multiplier; el("model-list").append(p);
   }
   for (const route of data.routes) {
@@ -60,6 +70,7 @@ function bind(id, action) {
     finally {
       form.querySelectorAll('input[type="password"]').forEach(input => { input.value = ""; });
       buttons.forEach(b => {b.disabled = false;});
+      if (id === "route") invalidateConnection();
     }
   });
 }
@@ -89,10 +100,51 @@ bind("reset", async ({user_id, temporary_password}) => {
   if (confirm("确认重置密码并使该账号已有会话失效？")) await save("/admin/users/" + encodeURIComponent(user_id) + "/reset-password", "POST", {temporary_password});
 });
 bind("multiplier", ({user_id, multiplier}) => save("/admin/users/" + encodeURIComponent(user_id) + "/billing-multiplier", "PATCH", {multiplier}));
-bind("model", data => save("/admin/models", "POST", {...data, max_output_tokens: Number(data.max_output_tokens)}));
 bind("route", data => {
-  const {model_id, input, output, cache_hit, cache_miss, reasoning, ...rest} = data;
-  return save("/admin/models/" + encodeURIComponent(model_id) + "/routes", "POST", {...rest, priority: Number(rest.priority), rates: {input, output, cache_hit, cache_miss, reasoning}});
+  if (!discovery || !el("model-choice").value) throw new Error("请先测试连接并手动选择模型。");
+  const {input, output, cache_hit, cache_miss, reasoning, ...rest} = data;
+  return save("/admin/channels", "POST", {...rest, discovery_token: discovery.discovery_token,
+    priority: Number(rest.priority), rates: {input, output, cache_hit, cache_miss, reasoning}});
+});
+function updateConnectionButtons() {
+  el("test-connection").disabled = testingConnection || !el("channel-url").value.trim() || !el("channel-key").value.trim();
+  el("save-channel").disabled = testingConnection || !discovery || !el("model-choice").value;
+}
+function invalidateConnection() {
+  connectionVersion++;
+  discovery = null;
+  el("model-choice").replaceChildren();
+  option(el("model-choice"), "", "请先测试连接");
+  el("model-choice").disabled = true;
+  el("connection-status").textContent = "连接信息变更后需重新测试；请选择返回清单中的模型。";
+  updateConnectionButtons();
+}
+for (const id of ["channel-url", "channel-key"]) el(id).addEventListener("input", invalidateConnection);
+el("model-choice").addEventListener("change", updateConnectionButtons);
+el("test-connection").addEventListener("click", async () => {
+  invalidateConnection();
+  const version = connectionVersion;
+  const session = token;
+  testingConnection = true;
+  updateConnectionButtons();
+  el("connection-status").textContent = "正在连接并获取模型清单…";
+  try {
+    const result = await api("/admin/channels/discover", "POST", {
+      base_url: el("channel-url").value.trim(), api_key: el("channel-key").value,
+    });
+    if (version !== connectionVersion || session !== token) return;
+    discovery = result;
+    el("model-choice").replaceChildren();
+    option(el("model-choice"), "", "请选择具体模型");
+    result.models.forEach(model => option(el("model-choice"), model, model));
+    el("model-choice").disabled = false;
+    el("connection-status").textContent = "连接成功，获取 " + result.models.length + " 个模型。请手动选择；本次未调用模型生成内容。";
+  } catch (error) {
+    if (version === connectionVersion && session === token) el("connection-status").textContent = error instanceof TypeError ? "网络连接失败，请稍后重试。" : error.message;
+  } finally {
+    testingConnection = false;
+    updateConnectionButtons();
+  }
 });
 el("refresh").addEventListener("click", async () => { try { await refresh(); notice("数据已刷新。"); } catch (error) { notice(error.message); } });
 el("logout").addEventListener("click", async () => {

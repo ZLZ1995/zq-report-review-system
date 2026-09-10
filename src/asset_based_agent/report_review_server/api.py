@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import Engine, text
@@ -77,6 +78,13 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.settings = actual_settings
+
+    @app.exception_handler(RequestValidationError)
+    async def safe_validation_error(_request: Request, _exc: RequestValidationError):
+        # Never echo rejected passwords, API keys, or nested request payloads.
+        return JSONResponse(status_code=422, content={
+            "error": {"code": "invalid_request", "message": "输入格式不正确，请核对必填项和取值范围。"},
+        })
     app.state.engine = actual_engine
     app.state.session_factory = session_factory
     app.state.auth_service = AuthService(actual_settings)
