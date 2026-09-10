@@ -1,0 +1,14 @@
+**/.git
+**/.venv*
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+**/node_modules
+**/build
+**/dist
+**/inputs
+**/outputs
+**/scratch
+**/temp
+**/tmp*
+**/*.pyc
