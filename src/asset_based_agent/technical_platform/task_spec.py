@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from .context import build_context
 from .release_info import local_release
-from .skills import PREFLIGHT, REVIEW, SkillSpec
+from .skills import BUILTINS, GENERATORS, REVIEW, SkillSpec
 from .store import PlatformStore
 
 
@@ -22,11 +22,21 @@ class TaskSpec:
 def build_task_spec(
     store: PlatformStore, session_id: str, user_request: str, skill: SkillSpec,
     files: list[dict], *, model: str | None = None, instructions: str = "",
+    input_roles: dict | None = None, generation_confirmed: bool = False,
 ) -> TaskSpec:
     session = store.session(session_id)
-    if skill not in (PREFLIGHT, REVIEW):
+    if skill not in BUILTINS:
         raise PermissionError("当前只允许已注册的只读审核任务")
     remote = skill.id == REVIEW.id
+    generation = skill in GENERATORS
+    if generation:
+        from .generation import bundle_fingerprint, validate_roles
+        from .project_catalog import validate_business_directory
+        if generation_confirmed is not True:
+            raise PermissionError('生成新文件需要本轮明确确认；不授予原件修改权限')
+        validate_business_directory(store.path.parent)
+        validate_roles(skill.id, files, input_roles or {})
+        instructions = bundle_fingerprint(skill.id)
     if not user_request.strip() or not files:
         raise ValueError("任务要求及选定文件不能为空")
     if len(user_request.strip()) > 12000:
@@ -51,11 +61,14 @@ def build_task_spec(
         "selected_files": [{"id": f["id"], "version": f["sha256"],
                             "sha256": f["sha256"]} for f in files],
         "context": context, "memory_ids": context["memory_ids"],
-        "mode": "remote_review" if remote else "local_preflight",
+        "mode": "local_generation" if generation else "remote_review" if remote else "local_preflight",
         "model": model if remote else None,
         "permissions": {"read_selected_files": True, "modify_originals": False,
-                        "call_model": remote, "upload_raw_files": False},
-        "acceptance_gates": ["visible_content_only", "original_hash_unchanged"],
+                        "call_model": remote, "upload_raw_files": False,
+                        **({'generate_artifacts': True} if generation else {})},
+        **({'input_roles': input_roles} if generation else {}),
+        "acceptance_gates": (["source_evidence", "output_validation", "original_hash_unchanged"]
+                             if generation else ["visible_content_only", "original_hash_unchanged"]),
     }))
 
 

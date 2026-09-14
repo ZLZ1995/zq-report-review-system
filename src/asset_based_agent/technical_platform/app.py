@@ -33,8 +33,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .skills import PREFLIGHT, REVIEW, SkillRegistry, digest
+from .skills import BUILTINS, GENERATORS, PREFLIGHT, REVIEW, SkillRegistry, digest
 from .store import PlatformStore
+from .project_catalog import ProjectCatalog
 from .release_info import CLIENT_VERSION, inspect_server, local_release
 from .task_spec import build_task_spec
 from .execution import execute_task
@@ -113,8 +114,8 @@ class PlatformWindow(QMainWindow):
         self.store = store
         self.client, self.models = client, models or []
         self.registry = SkillRegistry()
-        self.registry.register(PREFLIGHT)
-        self.registry.register(REVIEW)
+        for skill in BUILTINS:
+            self.registry.register(skill)
         self.project_id = self.session_id = self.run_id = None
         self.worker = None
         self.monitor = None
@@ -126,7 +127,7 @@ class PlatformWindow(QMainWindow):
         self.resize(1440, 900)
         self.setMinimumSize(960, 640)
         self._build()
-        self.reload_projects()
+        self.reload_projects(self.store.last_project if isinstance(self.store, ProjectCatalog) else None)
         self.server_url = SERVER_URL
 
     def button(self, title, callback, layout):
@@ -153,6 +154,7 @@ class PlatformWindow(QMainWindow):
         left.addWidget(subtitle)
         left.addSpacing(24)
         self.button("＋  新建项目", self.new_project, left).setObjectName("newProject")
+        self.button("打开已有项目 / 重新定位", self.open_project_directory, left)
         left.addSpacing(20)
         heading = QLabel("项目")
         heading.setObjectName("sectionLabel")
@@ -233,6 +235,8 @@ class PlatformWindow(QMainWindow):
         self.skill_combo.addItem("资料预检", PREFLIGHT.id)
         self.skill_combo.setToolTip("选择本次执行使用的 Skill；资料预检不调用模型")
         self.skill_combo.addItem(REVIEW.name, REVIEW.id)
+        for skill in GENERATORS:
+            self.skill_combo.addItem(skill.name, skill.id)
         if self.client is not None:
             self.skill_combo.setCurrentIndex(1)
         actions.addWidget(self.skill_combo)
@@ -339,7 +343,7 @@ class PlatformWindow(QMainWindow):
     def reload_projects(self, selected=None):
         self.projects.clear()
         for project in self.store.projects():
-            item = QListWidgetItem(project["name"])
+            item = QListWidgetItem(project["name"] + (" · 目录不可用" if project.get("unavailable") else ""))
             item.setData(Qt.ItemDataRole.UserRole, project["id"])
             self.projects.addItem(item)
             if project["id"] == selected:
@@ -351,9 +355,33 @@ class PlatformWindow(QMainWindow):
             return
         name, ok = QInputDialog.getText(self, "新建项目", "项目名称")
         if ok and name.strip():
-            identity = self.store.create_project(name)
+            try:
+                if isinstance(self.store, ProjectCatalog):
+                    selected = QFileDialog.getExistingDirectory(self, "选择非系统盘项目文件夹", "")
+                    if not selected:
+                        return
+                    identity = self.store.create_project(name, Path(selected))
+                else:
+                    identity = self.store.create_project(name)
+            except (OSError, ValueError) as exc:
+                self.status.setText(str(exc))
+                return
             self.store.create_session(identity)
             self.reload_projects(identity)
+
+    def open_project_directory(self):
+        if self.worker or not isinstance(self.store, ProjectCatalog):
+            return
+        selected = QFileDialog.getExistingDirectory(self, "打开已有项目或旧工作空间（非系统盘）", "")
+        if not selected:
+            return
+        try:
+            identities = self.store.open_directory(Path(selected))
+            self.reload_projects(identities[0] if identities else None)
+            if not identities:
+                self.status.setText("目录中没有属于当前账号的项目；不会自动认领其他账号的数据。")
+        except (OSError, ValueError, PermissionError) as exc:
+            self.status.setText(str(exc))
 
     def choose_project(self, item, _previous=None):
         self.project_id = item.data(Qt.ItemDataRole.UserRole) if item else None
@@ -363,13 +391,29 @@ class PlatformWindow(QMainWindow):
         if not self.project_id:
             self.title.setText("创建项目，开始工作")
             return
+        if isinstance(self.store, ProjectCatalog):
+            try:
+                self.store.select_project(self.project_id)
+            except (OSError, ValueError, PermissionError) as exc:
+                self.project_id = self.session_id = None
+                self.title.setText("项目目录不可用")
+                self.status.setText(str(exc))
+                self.render_messages()
+                return
         self.title.setText(self.store.project(self.project_id)["name"])
         self.status.setText("添加项目资料，选择 Skill 后执行。原始文件只读。")
         for session in self.store.sessions(self.project_id):
             row = QListWidgetItem(session["title"])
             row.setData(Qt.ItemDataRole.UserRole, session["id"])
             self.sessions.addItem(row)
-        self.sessions.setCurrentRow(max(0, self.sessions.count() - 1))
+        target_row = max(0, self.sessions.count() - 1)
+        if isinstance(self.store, ProjectCatalog):
+            remembered = self.store.last_session
+            for i in range(self.sessions.count()):
+                if self.sessions.item(i).data(Qt.ItemDataRole.UserRole) == remembered:
+                    target_row = i
+                    break
+        self.sessions.setCurrentRow(target_row)
         self.refresh_details()
 
     def new_session(self):
@@ -385,6 +429,8 @@ class PlatformWindow(QMainWindow):
         self.session_id = item.data(Qt.ItemDataRole.UserRole) if item else None
         self.render_messages()
         if self.session_id:
+            if isinstance(self.store, ProjectCatalog):
+                self.store.remember_session(self.session_id)
             runs = self.store.runs(self.session_id)
             for run in runs:
                 if run["result"]:
@@ -424,6 +470,10 @@ class PlatformWindow(QMainWindow):
         if self.session_id:
             for run in self.store.runs(self.session_id):
                 result = json.loads(run['result'] or '{}')
+                if result.get('kind') == 'generation':
+                    for index, artifact in enumerate(result.get('artifacts', [])):
+                        name = html.escape(artifact['name'])
+                        content.append(f'<p>📄 {name}　<a href="zq-artifact:{run["id"]}/{index}">打开文件</a></p>')
                 if run['state'] == 'succeeded' and result.get('kind') == 'review':
                     identity = run['id']
                     content.append(f'<p>审核任务 {html.escape(identity)}：<a href="zq-export:{identity}">生成标准Word审核报告…</a></p>')
@@ -447,6 +497,16 @@ class PlatformWindow(QMainWindow):
     def handle_report_link(self, url):
         from .report_export import export_review
         action = url.scheme()
+        if action == 'zq-artifact':
+            try:
+                from .generation import artifact_path
+                run_id, index = url.path().split('/')
+                path = artifact_path(self.store, self.session_id, run_id, int(index))
+                if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+                    raise ValueError('无法打开文件，请检查默认应用')
+            except (ValueError, OSError, KeyError, PermissionError) as exc:
+                QMessageBox.warning(self, '生成成果', str(exc))
+            return
         if action not in {'zq-export', 'zq-report', 'zq-folder'}:
             return
         try:
@@ -455,9 +515,17 @@ class PlatformWindow(QMainWindow):
             if run['session'] != self.session_id:
                 return
             if action == 'zq-export':
-                path, _ = QFileDialog.getSaveFileName(self, '保存标准审核报告', '', 'Word 文档 (*.docx)')
+                output_root = self.store.path.parent
+                if output_root.name == ".zq":
+                    output_root = output_root.parent
+                default_path = str(output_root / '审核记录.docx')
+                path, _ = QFileDialog.getSaveFileName(self, '保存标准审核报告', default_path, 'Word 文档 (*.docx)')
                 if not path:
                     return
+                if isinstance(self.store, ProjectCatalog):
+                    from .project_catalog import validate_business_directory
+
+                    validate_business_directory(Path(path).parent)
                 export_review(self.store, run_id, Path(path))
                 self.render_messages()
                 self.status.setText('标准审核报告已生成，未修改送审原文件。')
@@ -585,6 +653,24 @@ class PlatformWindow(QMainWindow):
             self.render_messages()
             return
         spec = self.registry.get(self.skill_combo.currentData())
+        generation_roles = None
+        if spec in GENERATORS:
+            from .generation import locked_template
+            try:
+                locked_template(spec.id)
+            except (ValueError, OSError, PermissionError) as exc:
+                self.composer.setPlainText(prompt)
+                self.status.setText(str(exc))
+                self.store.append(self.session_id, 'assistant', str(exc))
+                self.render_messages()
+                return
+            from .generation_dialog import GenerationDialog
+            dialog = GenerationDialog(spec, files, self.store.path.parent, self)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                self.composer.setPlainText(prompt)
+                self.render_messages()
+                return
+            generation_roles = dialog.roles
         provider = None
         if spec.id == REVIEW.id:
             from ..report_review_app.services.remote_review_llm import RemoteReviewLlm
@@ -608,6 +694,7 @@ class PlatformWindow(QMainWindow):
                 self.store, self.session_id, prompt, spec, files,
                 model=self.model_combo.currentData() if provider else None,
                 instructions=provider.skill_instructions if provider else "",
+                input_roles=generation_roles, generation_confirmed=generation_roles is not None,
             ).to_snapshot()
         except (ValueError, PermissionError) as exc:
             self.composer.setPlainText(prompt)
@@ -618,6 +705,7 @@ class PlatformWindow(QMainWindow):
         self.store.append(
             self.session_id,
             "event",
+            "计划：复制选定资料 → 本地生成 → 来源及成果校验 → 对话交付。" if spec in GENERATORS else
             "计划：只读解析 → 排除隐藏内容 → "
             + ("服务端审核 → " if provider else "")
             + "校验原件未变化。",
@@ -646,6 +734,12 @@ class PlatformWindow(QMainWindow):
 
     def completed(self, result):
         state = self.store.run(self.run_id)["state"]
+        if result.get('kind') == 'generation':
+            summary = ('任务已取消，未发布正式成果。' if state == 'cancelled' else result['feedback'])
+            self.store.append(self.store.run(self.run_id)['session'], 'assistant', summary)
+            self.status.setText('生成校验通过' if result.get('ok') else '生成未完成，详见对话反馈')
+            self.render_messages()
+            return
         summary = (
             "任务已停止，已经产生的模型用量仍按服务端记录结算。"
             if state == "cancelled"
@@ -741,7 +835,9 @@ class PlatformWindow(QMainWindow):
         if client is None:
             return False
         if payload["owner"] != self.store.owner:
-            self.store = PlatformStore(self.store.path, payload["owner"])
+            self.store = (ProjectCatalog(self.store.index_path, payload["owner"])
+                          if isinstance(self.store, ProjectCatalog)
+                          else PlatformStore(self.store.path, payload["owner"]))
             self.project_id = self.session_id = self.run_id = None
             self.composer.clear()
             self.transcript.clear()
@@ -846,6 +942,9 @@ class PlatformWindow(QMainWindow):
             self.reload_projects(identity)
 
     def manage_skills(self):
+        if isinstance(self.store, ProjectCatalog) and self.store.active is None:
+            self.status.setText("请先打开非系统盘项目；Skill 包也保存在该项目目录，不写入系统盘。")
+            return
         if self.worker is not None:
             self.status.setText("请等待当前任务结束后管理 Skill。")
             return
@@ -854,6 +953,9 @@ class PlatformWindow(QMainWindow):
         SkillManagerDialog(self.store, self).exec()
 
     def claim_legacy_project(self):
+        if isinstance(self.store, ProjectCatalog) and self.store.active is None:
+            self.status.setText("请先打开包含旧数据的项目目录。")
+            return
         if self.worker:
             return
         if self.client is None:
@@ -918,17 +1020,13 @@ def main():
         return 0
     client, payload = result
     if args.data_dir is None:
-        selected = QFileDialog.getExistingDirectory(
-            None, "选择本地平台项目数据保存目录"
-        )
-        if not selected:
-            if client is not None:
-                client.http_client.close()
-            app.setQuitOnLastWindowClosed(True)
-            return 0
-        args.data_dir = Path(selected)
+        settings = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)) / "ZQPlatform"
+        store = ProjectCatalog(settings / "project-locations.sqlite", payload["owner"])
+    else:
+        # Explicit legacy/test entry point; normal startup never creates business data here.
+        store = PlatformStore(args.data_dir / "platform.sqlite", payload["owner"])
     window = PlatformWindow(
-        PlatformStore(args.data_dir / "platform.sqlite", payload["owner"]),
+        store,
         client=client, models=payload["models"],
     )
     if client is not None:

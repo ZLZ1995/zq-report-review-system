@@ -1,0 +1,189 @@
+name: valuation-detail-workbook-fill
+version: 0.2
+type: workbook_generation
+status: executable
+skill_class: business
+routing_priority: 20
+description: Build a project-local mapping from TB/BS/journals, write the detail workbook through the summary chain, and enforce hard acceptance gates.
+use_when:
+  - 评估明细表
+  - 评估申报表
+  - 科目余额表
+  - 资产负债表
+  - 序时账
+  - 先生成项目内映射再填表
+do_not_use_when:
+  - 只读财务分析
+  - Word 资产负债表填列
+inputs:
+  trial_balance:
+    type: file
+    required: true
+  balance_sheet:
+    type: file
+    required: true
+  journal:
+    type: file
+    required: false
+  supplementary:
+    type: list
+    required: false
+  template_workbook:
+    type: file
+    required: true
+  output_dir:
+    type: path
+    required: true
+    default: "{task_dir}/outputs/valuation_detail_workbook"
+  published_workbook:
+    type: path
+    required: false
+    default: "{output_dir}/detail_workbook_published.xlsx"
+outputs:
+  project_mapping_json:
+    type: artifact
+    path: "{output_dir}/project_mapping.json"
+  formula_chain_map_json:
+    type: artifact
+    path: "{output_dir}/formula_chain_map.json"
+  sheet_layout_map_json:
+    type: artifact
+    path: "{output_dir}/sheet_layout_map.json"
+  formula_protection_report_json:
+    type: artifact
+    path: "{output_dir}/formula_protection_report.json"
+  input_cell_registry_json:
+    type: artifact
+    path: "{output_dir}/input_cell_registry.json"
+  summary_chain_input_registry_json:
+    type: artifact
+    path: "{output_dir}/summary_chain_input_registry.json"
+  completed_pages_json:
+    type: artifact
+    path: "{output_dir}/completed_pages.json"
+  placeholder_pages_json:
+    type: artifact
+    path: "{output_dir}/placeholder_pages.json"
+  validation_report_json:
+    type: artifact
+    path: "{output_dir}/validation_report.json"
+  classification_reconciliation_json:
+    type: artifact
+    path: "{output_dir}/classification_reconciliation.json"
+  delivery_check_report_json:
+    type: artifact
+    path: "{output_dir}/delivery_check_report.json"
+  generated_workbook:
+    type: file
+    path: "{published_workbook}"
+approval:
+  required: true
+  reason: 评估明细表生成会写入 Excel 文件并产出项目内映射与校验报告。
+commands:
+  build_project_mapping:
+    script: scripts/build_project_mapping.py
+    run_when: always
+    timeout_seconds: 600
+    args:
+      - flag: --trial-balance
+        input: trial_balance
+      - flag: --balance-sheet
+        input: balance_sheet
+      - flag: --journal
+        input: journal
+        optional: true
+      - flag: --output
+        artifact: project_mapping_json
+  build_formula_chain:
+    script: scripts/build_formula_chain_map.py
+    run_when: always
+    timeout_seconds: 600
+    args:
+      - flag: --template
+        input: template_workbook
+      - flag: --output
+        artifact: formula_chain_map_json
+  scan_template_structure:
+    script: scripts/scan_template_structure.py
+    run_when: always
+    timeout_seconds: 600
+    args:
+      - flag: --template
+        input: template_workbook
+      - flag: --layout-output
+        artifact: sheet_layout_map_json
+      - flag: --protection-output
+        artifact: formula_protection_report_json
+  build_input_cell_registry:
+    script: scripts/build_input_cell_registry.py
+    run_when: always
+    timeout_seconds: 600
+    args:
+      - flag: --layout-map
+        artifact: sheet_layout_map_json
+      - flag: --output
+        artifact: input_cell_registry_json
+  build_summary_chain_input_registry:
+    script: scripts/build_summary_chain_input_registry.py
+    run_when: always
+    timeout_seconds: 600
+    args:
+      - flag: --layout-map
+        artifact: sheet_layout_map_json
+      - flag: --input-cell-registry
+        artifact: input_cell_registry_json
+      - flag: --output
+        artifact: summary_chain_input_registry_json
+  generate_workbook:
+    script: scripts/run_detail_workbook_pipeline.py
+    run_when: always
+    timeout_seconds: 1200
+    args:
+      - flag: --trial-balance
+        input: trial_balance
+      - flag: --balance-sheet
+        input: balance_sheet
+      - flag: --journal
+        input: journal
+        optional: true
+      - flag: --template
+        input: template_workbook
+      - flag: --output-dir
+        input: output_dir
+      - flag: --published-workbook
+        input: published_workbook
+      - flag: --project-mapping
+        artifact: project_mapping_json
+      - flag: --formula-chain
+        artifact: formula_chain_map_json
+      - flag: --sheet-layout
+        artifact: sheet_layout_map_json
+      - flag: --formula-protection
+        artifact: formula_protection_report_json
+      - flag: --input-cell-registry
+        artifact: input_cell_registry_json
+      - flag: --summary-chain-input-registry
+        artifact: summary_chain_input_registry_json
+  validate_delivery_gates:
+    script: scripts/validate_delivery_gates.py
+    run_when: always
+    timeout_seconds: 600
+    args:
+      - flag: --workbook
+        input: published_workbook
+      - flag: --output
+        artifact: delivery_check_report_json
+      - flag: --validation-report
+        artifact: validation_report_json
+      - flag: --semantic-validation-report
+        path: "{output_dir}/semantic_validation_report.json"
+verification:
+  required:
+    - project_mapping_json exists
+    - formula_protection_report_json exists
+    - input_cell_registry_json exists
+    - summary_chain_input_registry_json exists
+    - validation_report_json exists
+    - classification_reconciliation_json exists
+    - delivery_check_report_json exists
+    - generated_workbook exists

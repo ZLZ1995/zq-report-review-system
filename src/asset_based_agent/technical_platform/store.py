@@ -16,10 +16,14 @@ def now() -> str:
 
 
 class PlatformStore:
-    def __init__(self, path: Path, owner: str) -> None:
+    def __init__(self, path: Path, owner: str, *, create: bool = True) -> None:
         if not owner.strip():
             raise ValueError("owner is required")
-        path.parent.mkdir(parents=True, exist_ok=True)
+        self.existing_only = not create
+        if create:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        elif not path.is_file():
+            raise OSError("项目数据库不存在，不会自动创建替代数据库")
         self.path, self.owner = path, owner
         with self.connect() as db:
             db.executescript("""
@@ -58,9 +62,11 @@ class PlatformStore:
 
     @contextmanager
     def connect(self):
-        db = sqlite3.connect(self.path, timeout=15)
+        db = (sqlite3.connect(self.path.resolve().as_uri() + "?mode=rw", uri=True, timeout=15)
+              if self.existing_only else sqlite3.connect(self.path, timeout=15))
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys=ON")
+        db.execute("PRAGMA temp_store=MEMORY")
         try:
             with db:
                 yield db

@@ -1,0 +1,82 @@
+name: gongshang-change-history-docx
+version: 0.1
+type: document_generation
+status: executable
+skill_class: business
+routing_priority: 25
+description: Generate Chinese 工商历史变更说明 DOCX from 工商/风鸟变更 Excel exports and validate against an optional human-corrected reference.
+use_when:
+  - 工商历史变更说明
+  - 工商或风鸟变更信息 Excel
+  - 需要按变更日期分组生成历史沿革 Word
+  - 需要生成股东出资金额及持股比例表
+do_not_use_when:
+  - 只是工商信息查询或网页检索
+  - 评估报告资产负债表填列
+  - 市场法可比公司公开数据抓取
+inputs:
+  source_excel:
+    type: file
+    required: true
+    aliases: [excel, source]
+  template:
+    type: file
+    required: true
+  output:
+    type: path
+    required: true
+  reference:
+    type: file
+    required: false
+    aliases: [standard, human_reference]
+  rules:
+    type: file
+    required: false
+    default: references/rules.md
+outputs:
+  docx:
+    type: file
+    path: "{output}"
+  structure_check_json:
+    type: artifact
+    path: "{task_dir}/checks/gongshang_structure_check.json"
+  snapshot_dir:
+    type: artifact
+    path: "{task_dir}/checks/gongshang_snapshots"
+approval:
+  required: true
+  reason: 生成 Word 文件，并可能依据参考文件进行结构/快照验证。
+commands:
+  build:
+    script: scripts/build_gongshang_docx.py
+    run_when: always
+    timeout_seconds: 600
+    args:
+      - flag: --source-excel
+        input: source_excel
+      - flag: --template
+        input: template
+      - flag: --output
+        input: output
+      - flag: --reference
+        input: reference
+        optional: true
+      - flag: --rules
+        input: rules
+        optional: true
+  compare_structure:
+    script: scripts/compare_docx_structure.py
+    run_when: reference provided
+    timeout_seconds: 300
+    args:
+      - flag: --generated
+        input: output
+      - flag: --reference
+        input: reference
+      - flag: --output
+        artifact: structure_check_json
+verification:
+  required:
+    - output docx exists
+  conditional:
+    - if reference provided then structure_check_json.diff_count == 0

@@ -4,7 +4,7 @@ import json
 from hashlib import sha256
 
 from .context import build_context, model_request
-from .skills import PREFLIGHT, REVIEW, preflight
+from .skills import BUILTINS, GENERATORS, REVIEW, preflight
 from .store import now
 from .task_spec import read_snapshot
 
@@ -26,15 +26,19 @@ def execute_task(store, run_id, cancel, progress, *, provider=None, output=None)
                 or snapshot.get("session_id") != run["session"]
                 or snapshot.get("project_id") != session["project"]):
             raise PermissionError("任务身份或归属不匹配")
-        skill = {PREFLIGHT.id: PREFLIGHT, REVIEW.id: REVIEW}.get(snapshot.get("skill_id"))
+        skill = {s.id: s for s in BUILTINS}.get(snapshot.get("skill_id"))
         if skill is None or snapshot.get("skill_version") != skill.version:
             raise PermissionError("Skill 版本不匹配，请重新提交")
         remote = skill == REVIEW
+        generation = skill in GENERATORS
         expected = {"read_selected_files": True, "modify_originals": False,
-                    "call_model": remote, "upload_raw_files": False}
+                    "call_model": remote, "upload_raw_files": False,
+                    **({'generate_artifacts': True} if generation else {})}
         if snapshot.get("permissions") != expected:
             raise PermissionError("任务权限与只读计划不匹配")
-        if snapshot.get("acceptance_gates") != ["visible_content_only", "original_hash_unchanged"]:
+        gates = (["source_evidence", "output_validation", "original_hash_unchanged"] if generation
+                 else ["visible_content_only", "original_hash_unchanged"])
+        if snapshot.get("acceptance_gates") != gates:
             raise PermissionError("任务验收门禁不完整")
         available = {f["id"]: f for f in store.files(session["project"])}
         files = snapshot.get("files", [])
@@ -65,6 +69,9 @@ def execute_task(store, run_id, cancel, progress, *, provider=None, output=None)
         if provider is not None:
             provider.user_request = model_request(snapshot["user_request"], context)
         phase = "execution"
+        if generation:
+            from .generation import execute_generation
+            return execute_generation(store, run_id, snapshot, cancel, progress)
         return preflight(store, run_id, cancel, progress, provider=provider, output=output,
                          claimed=True)
     except Exception as exc:

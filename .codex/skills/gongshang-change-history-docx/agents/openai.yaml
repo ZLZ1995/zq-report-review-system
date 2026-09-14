@@ -1,0 +1,4 @@
+interface:
+  display_name: "工商历史变更 Word"
+  short_description: "从工商变更 Excel 生成经校验逻辑筛选的 Word 历史变更说明。"
+  default_prompt: "根据工商变更 Excel 和 Word 模版生成工商历史变更说明，并按人工校对逻辑筛选、排版和验证。"

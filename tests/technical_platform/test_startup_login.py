@@ -18,7 +18,7 @@ def test_cancel_login_never_opens_workspace_or_directory(monkeypatch):
     assert platform.main() == 0
 
 
-def test_successful_login_precedes_directory_and_window(monkeypatch, tmp_path):
+def test_successful_login_opens_window_without_directory_prompt(monkeypatch, tmp_path):
     qt = QApplication.instance() or QApplication([])
     assert qt
     order = []
@@ -29,8 +29,7 @@ def test_successful_login_precedes_directory_and_window(monkeypatch, tmp_path):
         order.append("login")
         return client, payload
     def directory(*args):
-        order.append("directory")
-        return str(tmp_path)
+        raise AssertionError("startup must not request a business directory")
     class Window:
         def __init__(self, store, **kwargs):
             assert kwargs["client"] is client
@@ -41,11 +40,12 @@ def test_successful_login_precedes_directory_and_window(monkeypatch, tmp_path):
         def show(self):
             order.append("show")
     monkeypatch.setattr(platform, "authenticate", login)
+    monkeypatch.setattr(platform.QStandardPaths, "writableLocation", lambda *a: str(tmp_path))
     monkeypatch.setattr(platform.QFileDialog, "getExistingDirectory", directory)
     monkeypatch.setattr(platform, "PlatformWindow", Window)
     monkeypatch.setattr(QApplication, "exec", lambda self: 0)
     assert platform.main() == 0
-    assert order == ["login", "directory", "window", "show"]
+    assert order == ["login", "window", "show"]
 
 
 def test_authentication_uses_embedded_url_without_prompt(monkeypatch, tmp_path):

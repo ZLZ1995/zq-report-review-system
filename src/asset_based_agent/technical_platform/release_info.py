@@ -7,7 +7,7 @@ import httpx
 
 from .skills import REVIEW, digest
 
-CLIENT_VERSION = "0.2.2"
+CLIENT_VERSION = "0.2.3"
 
 
 def local_release() -> dict:
