@@ -57,6 +57,25 @@ class FakeProviderClient:
         )
 
 
+def test_user_request_reaches_every_model_batch():
+    chunk = ReviewChunkRequest(
+        chunk_id="C1", source_file_id="F1", source_file_name="a.docx",
+        role="main_report", file_type="word", text="visible", location={"paragraph": 1},
+    )
+    request = ReviewJobCreateRequest(
+        client_job_id="task", model_id="model", round_number=1,
+        chunks=[chunk], user_request="只检查金额",
+    )
+    agent = ServerReviewAgent()
+    batches = agent.build_batches(request.chunks, user_request=request.user_request)
+    for batch in batches:
+        prompt = agent.request_payload(batch)["messages"][-1]["content"]
+        assert "只检查金额" in prompt
+    assert ReviewJobCreateRequest(
+        client_job_id="old", model_id="model", round_number=1, chunks=[chunk]
+    ).user_request == ""
+
+
 def _seed_review_case(client) -> tuple[str, str]:
     with client.app.state.session_factory() as db:
         user = User(
@@ -147,6 +166,25 @@ def _model_response(issue_number: int) -> dict[str, object]:
         }
     )
     return {"choices": [{"message": {"content": content}}]}
+
+
+def test_completed_batch_is_available_while_next_batch_runs(client):
+    user_id, model_id = _seed_review_case(client)
+
+    class CheckingProvider(FakeProviderClient):
+        def call(self, route, payload):
+            if self.payloads:
+                with client.app.state.session_factory() as reader:
+                    partial = service.get_job(reader, user_id=user_id, job_id=job.job_id)
+                    assert partial.status == "running"
+                    assert len(partial.issues) == 1
+            return super().call(route, payload)
+
+    provider = CheckingProvider([_model_response(1), _model_response(2)])
+    service = ReviewJobService(client.app.state.settings, provider)
+    with client.app.state.session_factory() as db:
+        job = service.create_job(db, user_id=user_id, payload=_job_payload(model_id))
+        service.execute_job(db, user_id=user_id, job_id=job.job_id)
 
 
 def test_review_chunk_contract_rejects_hidden_sheet(client) -> None:
