@@ -50,7 +50,7 @@ class ReviewJobService:
                 )
             return existing
 
-        batches = self.agent.build_batches(payload.chunks, payload.skill_instructions)
+        batches = self.agent.build_batches(payload.chunks, payload.skill_instructions, payload.user_request)
         model = db.get(ModelDefinition, payload.model_id)
         if model is None or not model.enabled:
             raise ServiceError("model_unavailable", "模型当前不可用。", 409)
@@ -128,7 +128,7 @@ class ReviewJobService:
                 purpose=f"review-context:{job.job_id}",
             )
         )
-        batches = self.agent.build_batches(payload.chunks, payload.skill_instructions)
+        batches = self.agent.build_batches(payload.chunks, payload.skill_instructions, payload.user_request)
         model = db.get(ModelDefinition, job.model_id)
         if model is None:
             raise ServiceError("model_unavailable", "模型当前不可用。", 409)
@@ -166,6 +166,13 @@ class ReviewJobService:
                 )
                 job.completed_batches = index
                 job.progress_percent = int(index * 100 / len(batches))
+                # Publish validated batch output under the same encrypted TTL
+                # policy as the final result, for incremental client delivery.
+                job.result_ciphertext = self.cipher.encrypt(
+                    json.dumps({"issues": issues}, ensure_ascii=False),
+                    purpose=f"review-result:{job.job_id}",
+                )
+                job.result_expires_at = utc_now() + timedelta(hours=24)
                 db.commit()
         except Exception as exc:
             job.status = "failed"
