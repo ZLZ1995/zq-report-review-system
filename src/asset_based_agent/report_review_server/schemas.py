@@ -172,6 +172,7 @@ class ReviewJobCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     skill_instructions: str = Field(default="", max_length=12000)
+    user_request: str = Field(default="", max_length=12000)
 
     client_job_id: str = Field(min_length=1, max_length=128)
     model_id: str = Field(min_length=1, max_length=36)
