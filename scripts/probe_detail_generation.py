@@ -83,6 +83,11 @@ def run():
     job.write_text(json.dumps({'skill_id': 'valuation-detail-workbook-fill', 'inputs': {
         'trial_balance': str(tb), 'balance_sheet': str(bs), 'journal': str(journal),
         'template': str(template), **bank_inputs}}, ensure_ascii=False), 'utf-8')
+    if '--no-tb' in sys.argv:
+        config = json.loads(job.read_text('utf-8'))
+        config['inputs'].pop('trial_balance')
+        config['inputs'].pop('journal')
+        job.write_text(json.dumps(config, ensure_ascii=False), 'utf-8')
     if '--wps' in sys.argv:
         # Force the WPS backend for acceptance only; production stays auto-select.
         sys.path.insert(0, str(root / '.codex/skills/valuation-detail-workbook-fill/scripts'))

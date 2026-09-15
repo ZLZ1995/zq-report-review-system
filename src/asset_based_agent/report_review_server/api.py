@@ -39,6 +39,7 @@ from .schemas import (
     UserResponse,
 )
 from .services.auth_service import AuthContext, AuthService, ServiceError
+from .services.material_analysis import MaterialPlan, MaterialRequest, analyze_materials
 from .services.model_admin_service import ModelAdminService
 from .services.provider_gateway import HttpProviderClient
 from .services.review_job_service import ReviewJobService
@@ -328,6 +329,12 @@ def create_app(
             priority=route.priority,
             enabled=route.enabled,
         )
+
+    @app.post('/api/v1/material-analysis', response_model=MaterialPlan)
+    def material_analysis(payload: MaterialRequest, request: Request,
+                          context: AuthContext = Depends(get_context), db: Session = Depends(get_db)):
+        return analyze_materials(request.app.state.review_job_service.metered, db,
+                                 context.user.user_id, payload)
 
     @app.post(
         "/api/v1/review-jobs",

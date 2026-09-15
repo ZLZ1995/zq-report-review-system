@@ -25,6 +25,12 @@ description: Build or update a Chinese asset-based valuation detail workbook and
 
 ## Core Goal
 
+### 平台自动识别资料
+
+用户无需手工分配资料角色。读取授权后，平台将本地提取的可见文本节选交由已登录的模型服务识别，再通过本地确定性校验选择执行路径。模型识别不构成文件修改权限，也不替代来源及计算核对。不能可靠识别时说明依据和具体问题，不猜类型。
+
+科目余额表和序时账不是所有项目的统一必备资料。资产负债表与银行资料足以支持单一银行资产项目时，使用空的科目明细集合进入轻量流程，不生成虚构科目余额表。其他组合缺少明细证据时列示对应非零项目，不笼统要求固定文件名称。当前自动填报适配器不支持的来源布局须明确说明，不能将模型识别成功等同于填报成功。
+
 Produce a complete first-pass valuation declaration workbook from:
 
 - `科目余额表`

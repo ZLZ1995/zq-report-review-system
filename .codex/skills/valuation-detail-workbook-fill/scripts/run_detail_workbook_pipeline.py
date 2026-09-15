@@ -2748,6 +2748,7 @@ def select_execution_scope(
         mode = "full_template"
     elif single_bank:
         mode = "single_asset_lightweight"
+        active_sheets = ['银行存款']
     else:
         mode = "scoped_standard"
     required_sheets = ["封面", "资产负债表", "分类汇总", "汇总表"]
@@ -3032,7 +3033,7 @@ def stage4_validate_and_self_check(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--trial-balance", required=True)
+    parser.add_argument("--trial-balance")
     parser.add_argument("--balance-sheet", required=True)
     parser.add_argument('--source-checks', help='JSON list of final cell to original source cell evidence mappings')
     parser.add_argument("--financial-statement", action="append", default=[],
@@ -3089,7 +3090,7 @@ def main() -> None:
     timed_stage(output_dir, "balance_sheet_parsed", run_started_at, bs_keys=len(bs.get("values", {})))
     bank_account_rows, bank_extract_report = load_bank_statement_evidence(args.bank_statement, bs["values"])
     write_json(output_dir / "bank_extract_report.json", bank_extract_report)
-    tb_rows = load_trial_balance_rows(Path(args.trial_balance))
+    tb_rows = load_trial_balance_rows(Path(args.trial_balance)) if args.trial_balance else []
     timed_stage(output_dir, "trial_balance_loaded", run_started_at, row_count=len(tb_rows))
     journal_rows = load_journal_rows(Path(args.journal) if args.journal else None)
     timed_stage(output_dir, "journal_loaded", run_started_at, row_count=len(journal_rows))
@@ -3097,6 +3098,15 @@ def main() -> None:
     preflight_report = build_preflight_report(bs, tb_rows, mapping, journal_rows)
     write_json(output_dir / "preflight_report.json", preflight_report)
     preflight_issues = [] if args.skip_preflight else validate_preflight_report(preflight_report)
+    if not args.trial_balance:
+        preliminary_plan = group_rows_for_y71(mapping, [], bs['values'])
+        preliminary_scope = select_execution_scope(bs['values'], preliminary_plan,
+                                                   bank_evidence_available=bool(bank_account_rows))
+        if preliminary_scope['selected_mode'] != 'single_asset_lightweight':
+            raise ValueError('现有资料缺少非银行项目的明细证据；不允许推造科目余额表')
+        # Only the missing-TB check is inapplicable; preserve every financial gate.
+        preflight_issues = [x for x in validate_preflight_report(preflight_report)
+                            if x['code'] != 'trial_balance_no_nonzero_rows']
     write_json(output_dir / "preflight_gate_failures.json", preflight_issues)
     timed_stage(output_dir, "preflight_validated", run_started_at, issue_count=len(preflight_issues))
     if preflight_issues:

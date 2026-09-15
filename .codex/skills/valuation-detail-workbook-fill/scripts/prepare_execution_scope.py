@@ -8,7 +8,7 @@ import run_detail_workbook_pipeline as pipeline
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--trial-balance', required=True)
+    parser.add_argument('--trial-balance')
     parser.add_argument('--balance-sheet', required=True)
     parser.add_argument('--project-mapping', required=True)
     parser.add_argument('--journal')
@@ -23,12 +23,15 @@ def main():
     if total is None or '资产总计' not in values or abs(values['资产总计'] - total) >= 0.005:
         raise ValueError('原始资产负债表不平衡或缺少合计行；尚未扫描或修改模板')
     mapping = json.loads(Path(args.project_mapping).read_text('utf-8'))
-    tb = pipeline.load_trial_balance_rows(Path(args.trial_balance))
+    tb = pipeline.load_trial_balance_rows(Path(args.trial_balance)) if args.trial_balance else []
     journal = pipeline.load_journal_rows(Path(args.journal) if args.journal else None)
     banks, _ = pipeline.load_bank_statement_evidence(args.bank_statement, values)
     plan = pipeline.group_rows_for_y71(mapping, tb, values,
         pipeline.build_journal_entity_index(journal), pipeline.build_journal_fallback_index(journal))
     scope = pipeline.select_execution_scope(values, plan, bank_evidence_available=bool(banks))
+    if not args.trial_balance and scope['selected_mode'] != 'single_asset_lightweight':
+        lines = '、'.join(scope['active_balance_sheet_lines'])
+        raise ValueError(f'现有资料尚不足以支持自动填报：{lines}。请补充这些项目的明细证据；不限定为科目余额表或序时账。')
     # Preserve source-level scope for the pipeline; no extra file discovery.
     Path(args.output).write_text(json.dumps(scope, ensure_ascii=False, indent=2), 'utf-8')
 

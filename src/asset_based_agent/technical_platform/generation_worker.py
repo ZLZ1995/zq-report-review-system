@@ -19,22 +19,23 @@ def call(script, args):
 
 
 def detail(scripts, inputs, output):
-    tb, bs, template = inputs['trial_balance'], inputs['balance_sheet'], inputs['template']
+    bs, template = inputs['balance_sheet'], inputs['template']
+    tb = ['--trial-balance', inputs['trial_balance']] if inputs.get('trial_balance') else []
     mapping, chain = output / 'project_mapping.json', output / 'formula_chain_map.json'
     layout, protection = output / 'sheet_structure_map.json', output / 'formula_protection_report.json'
     registry, summary = output / 'input_cell_registry.json', output / 'summary_chain_input_registry.json'
     journal = ['--journal', inputs['journal']] if inputs.get('journal') else []
     bank = ['--bank-statement', inputs['bank_statement']] if inputs.get('bank_statement') else []
     stages = [
-        ('build_project_mapping.py', ['--trial-balance', tb, '--balance-sheet', bs, *journal, '--output', mapping]),
-        ('prepare_execution_scope.py', ['--trial-balance', tb, '--balance-sheet', bs,
+        ('build_project_mapping.py', [*tb, '--balance-sheet', bs, *journal, '--output', mapping]),
+        ('prepare_execution_scope.py', [*tb, '--balance-sheet', bs,
             '--project-mapping', mapping, *journal, *bank, '--output', output / 'execution_scope.json']),
         ('build_formula_chain_map.py', ['--template', template, '--output', chain]),
         ('scan_template_structure.py', ['--template', template, '--layout-output', layout, '--protection-output', protection,
             '--execution-scope', output / 'execution_scope.json']),
         ('build_input_cell_registry.py', ['--layout-map', layout, '--output', registry]),
         ('build_summary_chain_input_registry.py', ['--layout-map', layout, '--input-cell-registry', registry, '--output', summary]),
-        ('run_detail_workbook_pipeline.py', ['--trial-balance', tb, '--balance-sheet', bs,
+        ('run_detail_workbook_pipeline.py', [*tb, '--balance-sheet', bs,
             '--financial-statement', bs, *journal, *bank, '--execution-mode', 'auto',
             '--template', template, '--output-dir', output,
             '--published-workbook', output / 'detail_workbook.xlsx', '--project-mapping', mapping,

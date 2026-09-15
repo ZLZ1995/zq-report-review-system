@@ -96,10 +96,12 @@ def artifact_path(store, session_id, run_id, index):
     return path
 
 
-def execute_generation(store, run_id, snapshot, cancel, progress):
+def execute_generation(store, run_id, snapshot, cancel, progress, *, provider=None):
     skill_id = snapshot['skill_id']
     roles, files = snapshot.get('input_roles', {}), snapshot['files']
-    validate_roles(skill_id, files, roles)
+    automatic = snapshot.get('automatic_materials') is True
+    if not automatic:
+        validate_roles(skill_id, files, roles)
     if (snapshot.get('mode') != 'local_generation'
             or snapshot.get('skill_instructions') != bundle_fingerprint(skill_id)
             or snapshot.get('capabilities') != ['generate_artifacts', 'read_selected_files']):
@@ -111,6 +113,33 @@ def execute_generation(store, run_id, snapshot, cancel, progress):
     if work.parent.resolve() != root / 'runs':
         raise PermissionError('任务目录被重定向')
     work.mkdir(exist_ok=False)
+    if automatic:
+        if provider is None or not snapshot['permissions'].get('call_model'):
+            raise PermissionError('资料识别缺少模型授权')
+        roles, plan = provider.analyze(files, run_id, cancel, progress)
+        if cancel.is_set():
+            raise ValueError('资料识别已取消，未开始生成')
+        if any(digest(Path(f['path'])) != f['sha256'] for f in files):
+            raise ValueError('识别过程中资料已变化，请重新添加')
+        (work / 'material_analysis.json').write_text(json.dumps(plan, ensure_ascii=False), encoding='utf-8')
+        identified = '\n'.join(f"{next(f['name'] for f in files if f['id'] == a['file_id'])}：{a['reason']}"
+                               for a in plan['assignments'])
+        progress('资料识别完成：' + identified)
+        if not roles.get('balance_sheet'):
+            feedback = ('资料自动识别结果：\n' + identified + '\n\n'
+                        '尚未识别到可确定主体、期间和范围的资产负债表。'
+                        '请补充该资料或说明现有文件中哪一部分提供这些信息；没有生成正式工作簿。')
+            result = {'kind': 'generation', 'model_called': True, 'ok': False,
+                      'artifacts': [], 'feedback': feedback}
+            store.transition(run_id, 'validating', '资料识别及生成范围检查')
+            store.save_result(run_id, result)
+            store.transition(run_id, 'failed', '资料已识别，尚需确认范围依据')
+            return result
+        bound_files = [f for f in files if f['id'] in roles.values()]
+        if 'trial_balance' in roles:
+            validate_roles(skill_id, bound_files, roles)
+        elif any(Path(f['name']).suffix.lower() not in {'.xlsx', '.xls'} for f in bound_files):
+            raise ValueError('资料已识别，但当前填报适配器需要可读取的 Excel 来源，不能仅凭识别文本生成')
     sources = work / 'inputs'
     sources.mkdir()
     selected = {}
@@ -167,6 +196,8 @@ def execute_generation(store, run_id, snapshot, cancel, progress):
     succeeded = not cancel.is_set() and process.returncode == 0 and status.get('ok') is True
     feedback_path = work / 'output/user_feedback.md'
     feedback = feedback_path.read_text(encoding='utf-8') if feedback_path.exists() else '生成未完成，请查看本轮日志；没有发布正式成果。'
+    if automatic:
+        feedback = '资料自动识别结果：\n' + identified + '\n\n' + feedback
     artifacts = []
     names = (['history_fragment.docx', 'history_events.json', 'history_validation.json']
              if skill_id == HISTORY.id else ['detail_workbook.xlsx', 'completion_status.json',
@@ -175,7 +206,7 @@ def execute_generation(store, run_id, snapshot, cancel, progress):
         path = work / 'output' / name
         if path.is_file() and path.resolve().is_relative_to(work):
             artifacts.append({'name': name, 'path': str(path), 'sha256': digest(path)})
-    result = {'kind': 'generation', 'model_called': False, 'artifacts': artifacts,
+    result = {'kind': 'generation', 'model_called': automatic, 'artifacts': artifacts,
               'feedback': feedback, 'ok': succeeded}
     store.save_result(run_id, result)
     store.transition(run_id, 'cancelled' if cancel.is_set() else 'succeeded' if succeeded else 'failed',

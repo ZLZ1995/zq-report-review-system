@@ -10,8 +10,8 @@ import sys
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QStandardPaths, Qt, QThread, Signal, QUrl
-from PySide6.QtGui import QFont, QFontDatabase, QDesktopServices
+from PySide6.QtCore import QEvent, QStandardPaths, Qt, QThread, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QFont, QFontDatabase
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -33,12 +33,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .skills import BUILTINS, GENERATORS, PREFLIGHT, REVIEW, SkillRegistry, digest
-from .store import PlatformStore
+from .execution import execute_task
 from .project_catalog import ProjectCatalog
 from .release_info import CLIENT_VERSION, inspect_server, local_release
+from .skills import BUILTINS, GENERATORS, PREFLIGHT, REVIEW, SkillRegistry, digest
+from .store import PlatformStore
 from .task_spec import build_task_spec
-from .execution import execute_task
 
 SERVER_URL = "https://zq-report-review.zeabur.app/api/v1"
 
@@ -628,7 +628,7 @@ class PlatformWindow(QMainWindow):
         if not prompt:
             return
         if (
-            self.skill_combo.currentData() == REVIEW.id
+            self.skill_combo.currentData() in {REVIEW.id, 'valuation-detail-workbook-fill'}
             and (self.client is None or self.network_state != "connected")
             and not self.connect_service()
         ):
@@ -654,6 +654,7 @@ class PlatformWindow(QMainWindow):
             return
         spec = self.registry.get(self.skill_combo.currentData())
         generation_roles = None
+        generation_confirmed = False
         if spec in GENERATORS:
             from .generation import locked_template
             try:
@@ -671,7 +672,17 @@ class PlatformWindow(QMainWindow):
                 self.render_messages()
                 return
             generation_roles = dialog.roles
+            generation_confirmed = True
         provider = None
+        if spec.id == 'valuation-detail-workbook-fill':
+            from .generation import bundle_fingerprint
+            from .material_analysis import MaterialAnalysisProvider
+            model_id = self.model_combo.currentData()
+            if self.client is None or not model_id:
+                self.status.setText('请先连接服务端并选择模型，才能自动识别资料')
+                self.composer.setPlainText(prompt)
+                return
+            provider = MaterialAnalysisProvider(self.client, model_id, bundle_fingerprint(spec.id))
         if spec.id == REVIEW.id:
             from ..report_review_app.services.remote_review_llm import RemoteReviewLlm
 
@@ -694,7 +705,7 @@ class PlatformWindow(QMainWindow):
                 self.store, self.session_id, prompt, spec, files,
                 model=self.model_combo.currentData() if provider else None,
                 instructions=provider.skill_instructions if provider else "",
-                input_roles=generation_roles, generation_confirmed=generation_roles is not None,
+                input_roles=generation_roles, generation_confirmed=generation_confirmed,
             ).to_snapshot()
         except (ValueError, PermissionError) as exc:
             self.composer.setPlainText(prompt)
@@ -705,7 +716,9 @@ class PlatformWindow(QMainWindow):
         self.store.append(
             self.session_id,
             "event",
-            "计划：复制选定资料 → 本地生成 → 来源及成果校验 → 对话交付。" if spec in GENERATORS else
+            ("计划：模型识别资料 → 范围判断 → 本地生成及校验 → 对话交付。"
+             if spec.id == 'valuation-detail-workbook-fill' else
+             "计划：复制选定资料 → 本地生成 → 来源及成果校验 → 对话交付。") if spec in GENERATORS else
             "计划：只读解析 → 排除隐藏内容 → "
             + ("服务端审核 → " if provider else "")
             + "校验原件未变化。",

@@ -186,7 +186,7 @@ def review_pipeline_sources(workbook, args, pipeline, written_rows, initial_hash
                                   if (x['sheet'], x['cell']) not in failed_bank)
         journals = pipeline.load_journal_rows(Path(args.journal) if args.journal else None)
         cp = pipeline.load_counterparty_balance_rows(Path(args.counterparty_balance) if args.counterparty_balance else None)
-        tb = pipeline.load_trial_balance_rows(Path(args.trial_balance))
+        tb = pipeline.load_trial_balance_rows(Path(args.trial_balance)) if args.trial_balance else []
         source = {'source': metadata['source'], 'source_sheet': metadata['sheet']}
         covered_labels = set()
         if '资产负债表' not in output.sheetnames:

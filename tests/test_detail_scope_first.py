@@ -140,3 +140,15 @@ def test_bank_statement_difference_cannot_be_replaced_with_balance_sheet_amount(
     wb.save(source)
     with pytest.raises(ValueError, match='bank_statement_balance_mismatch'):
         module.load_bank_statement_evidence([str(source)], {'货币资金': 500})
+def test_bank_evidence_activates_bank_page_without_trial_balance():
+    import importlib.util
+    import sys
+    from pathlib import Path
+    scripts = Path(__file__).resolve().parents[1] / '.codex/skills/valuation-detail-workbook-fill/scripts'
+    sys.path.insert(0, str(scripts))
+    spec = importlib.util.spec_from_file_location('no_tb_scope_probe', scripts / 'run_detail_workbook_pipeline.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    result = module.select_execution_scope({'货币资金': 1000, '实收资本': 1000},
+                                           [('银行存款', [], 'cash')], bank_evidence_available=True)
+    assert result['active_detail_sheets'] == ['银行存款']

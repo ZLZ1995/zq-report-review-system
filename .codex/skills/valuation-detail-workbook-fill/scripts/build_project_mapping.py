@@ -447,7 +447,7 @@ def infer_target(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--trial-balance", required=True)
+    parser.add_argument("--trial-balance")
     parser.add_argument("--balance-sheet", required=True)
     parser.add_argument("--journal")
     parser.add_argument("--customer-detail", help="Explicitly selected customer detail workbook only")
@@ -455,7 +455,7 @@ def main() -> None:
     args = parser.parse_args()
 
     bs_values = parse_balance_sheet(Path(args.balance_sheet))
-    tb_rows = parse_trial_balance(Path(args.trial_balance))
+    tb_rows = parse_trial_balance(Path(args.trial_balance)) if args.trial_balance else []
     customer_detail_workbook = Path(args.customer_detail) if args.customer_detail else None
     customer_overrides = load_customer_detail_overrides(customer_detail_workbook)
     account_mappings = []
@@ -506,7 +506,7 @@ def main() -> None:
         )
 
     payload = {
-        "project_id": Path(args.trial_balance).stem,
+        "project_id": Path(args.trial_balance or args.balance_sheet).stem,
         "sources": {
             "trial_balance": args.trial_balance,
             "balance_sheet": args.balance_sheet,

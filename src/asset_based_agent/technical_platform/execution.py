@@ -4,7 +4,7 @@ import json
 from hashlib import sha256
 
 from .context import build_context, model_request
-from .skills import BUILTINS, GENERATORS, REVIEW, preflight
+from .skills import BUILTINS, DETAIL, GENERATORS, REVIEW, preflight
 from .store import now
 from .task_spec import read_snapshot
 
@@ -31,8 +31,9 @@ def execute_task(store, run_id, cancel, progress, *, provider=None, output=None)
             raise PermissionError("Skill 版本不匹配，请重新提交")
         remote = skill == REVIEW
         generation = skill in GENERATORS
+        automatic = skill == DETAIL and snapshot.get('automatic_materials') is True
         expected = {"read_selected_files": True, "modify_originals": False,
-                    "call_model": remote, "upload_raw_files": False,
+                    "call_model": remote or automatic, "upload_raw_files": False,
                     **({'generate_artifacts': True} if generation else {})}
         if snapshot.get("permissions") != expected:
             raise PermissionError("任务权限与只读计划不匹配")
@@ -48,7 +49,7 @@ def execute_task(store, run_id, cancel, progress, *, provider=None, output=None)
             {"id": f["id"], "version": f["sha256"], "sha256": f["sha256"]} for f in files
         ]:
             raise PermissionError("任务文件版本记录不一致")
-        if remote != (provider is not None):
+        if (remote or automatic) != (provider is not None):
             raise PermissionError("模型调用方式与计划不匹配")
         if provider is not None and (provider.model_id != snapshot.get("model")
                     or provider.skill_instructions != snapshot.get("skill_instructions")
@@ -71,7 +72,7 @@ def execute_task(store, run_id, cancel, progress, *, provider=None, output=None)
         phase = "execution"
         if generation:
             from .generation import execute_generation
-            return execute_generation(store, run_id, snapshot, cancel, progress)
+            return execute_generation(store, run_id, snapshot, cancel, progress, provider=provider)
         return preflight(store, run_id, cancel, progress, provider=provider, output=output,
                          claimed=True)
     except Exception as exc:
