@@ -77,6 +77,18 @@ def _batch() -> ReviewBatch:
     )
 
 
+def test_updated_local_review_rules_are_sent_with_user_confirmations():
+    from pathlib import Path
+    rules = (Path(__file__).resolve().parents[2] /
+             'src/asset_based_agent/technical_platform/review_rules.txt').read_text(encoding='utf-8')
+    client = FakeRemoteClient()
+    adapter = RemoteReviewLlm(client, model_id='MODEL-1', skill_instructions=rules,
+                              user_request='报告日期已确认暂空，仅审核其余内容')
+    adapter.review_batches([_batch()])
+    assert client.created_payload['skill_instructions'] == rules
+    assert client.created_payload['user_request'] == '报告日期已确认暂空，仅审核其余内容'
+
+
 class TimeoutClient(FakeRemoteClient):
     def __init__(self):
         super().__init__()

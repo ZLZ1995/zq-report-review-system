@@ -29,6 +29,16 @@ class GenerationDialog(QDialog):
                        '未支持的来源布局会说明原因并停止，不猜数凑平。')
         label.setWordWrap(True)
         layout.addWidget(label)
+        if skill.id == 'valuation-detail-workbook-fill':
+            scope_note = QLabel('新版规则：先核对资产负债表，再按非零科目确定范围。'
+                                '银行资料充分且满足单资产条件时自动选择轻量模式。'
+                                '银行对账单须为带账号、账户名称、开户行、交易日期、账户余额等表头的 XLSX。')
+            scope_note.setWordWrap(True)
+            layout.addWidget(scope_note)
+            office_note = QLabel('需安装 Microsoft Excel 或 WPS 表格（任意一种）。程序自动选择，'
+                                 '只读计算生成副本；组件不可用或校验失败时不交付文件。')
+            office_note.setWordWrap(True)
+            layout.addWidget(office_note)
         form = QFormLayout()
         self.choices = {}
         for role, title, suffixes, required in INPUT_ROLES[skill.id]:

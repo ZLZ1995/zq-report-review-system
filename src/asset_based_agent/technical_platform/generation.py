@@ -17,7 +17,8 @@ INPUT_ROLES = {
     HISTORY.id: [('source_excel', '工商变更信息', ('.xlsx',), True)],
     DETAIL.id: [('trial_balance', '科目余额表', ('.xlsx', '.xls'), True),
                 ('balance_sheet', '原始资产负债表（含单位、期间）', ('.xlsx', '.xls'), True),
-                ('journal', '序时账（可选）', ('.xlsx', '.xls'), False)],
+                ('journal', '序时账（可选）', ('.xlsx', '.xls'), False),
+                ('bank_statement', '银行对账单（可选，标准表头 XLSX）', ('.xlsx',), False)],
 }
 
 
@@ -168,7 +169,8 @@ def execute_generation(store, run_id, snapshot, cancel, progress):
     feedback = feedback_path.read_text(encoding='utf-8') if feedback_path.exists() else '生成未完成，请查看本轮日志；没有发布正式成果。'
     artifacts = []
     names = (['history_fragment.docx', 'history_events.json', 'history_validation.json']
-             if skill_id == HISTORY.id else ['detail_workbook.xlsx', 'completion_status.json', 'delivery_check_report.json'])
+             if skill_id == HISTORY.id else ['detail_workbook.xlsx', 'completion_status.json',
+                                             'delivery_check_report.json', 'execution_scope.json'])
     for name in ([*names, 'user_feedback.md'] if succeeded else ['user_feedback.md']):
         path = work / 'output' / name
         if path.is_file() and path.resolve().is_relative_to(work):

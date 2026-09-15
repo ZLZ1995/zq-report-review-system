@@ -94,14 +94,14 @@ def _load_events(wb):
     after_idx = headers.index("变更后")
 
     events = {}
-    for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
+    for row_number, row in enumerate(ws.iter_rows(min_row=header_row + 1, values_only=True), header_row + 1):
         vals = [text(v) for v in row]
         if not any(vals):
             continue
         date = vals[date_idx]
         item = vals[item_idx]
         if not date or not item:
-            continue
+            raise ValueError(f'变更信息第{row_number}行缺少变更日期或变更事项，请补充后重试')
         date = datetime.strptime(date[:10].replace('/', '-'), '%Y-%m-%d').strftime('%Y-%m-%d')
         events.setdefault(date, []).append(
             {
@@ -536,18 +536,23 @@ def describe_plan_event(seq, entry):
     return f"（{seq}）{cn_date(date)}，企业进行{item_phrase}{capital_phrase}，详情如下："
 
 
-def set_cell_text(cell, value):
-    cell.text = ""
-    paragraph = cell.paragraphs[0]
-    paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+def replace_paragraph_text(paragraph, value, prototype=None):
+    """Replace a uniform template field without discarding its run properties."""
+    source = prototype if prototype is not None else paragraph
+    rpr = next((deepcopy(r._r.rPr) for r in source.runs if r._r.rPr is not None), None)
+    paragraph.clear()
     run = paragraph.add_run(value)
-    run.font.name = "宋体"
-    run._element.rPr.rFonts.set(qn("w:eastAsia"), "宋体")
-    run.font.size = Pt(9)
+    if rpr is not None:
+        run._r.insert(0, rpr)
+    return run
+
+
+def set_cell_text(cell, value):
+    paragraph = cell.paragraphs[0]
+    replace_paragraph_text(paragraph, value)
+    for extra in list(cell.paragraphs[1:]):
+        cell._tc.remove(extra._p)
     apply_paragraph_text_format(paragraph, in_table=True)
-    paragraph.paragraph_format.space_before = Pt(0)
-    paragraph.paragraph_format.space_after = Pt(0)
-    paragraph.paragraph_format.line_spacing = 1.05
 
 
 def set_cell_shading(cell, fill):
@@ -726,7 +731,7 @@ def restore_template_headers(table, template_table):
         for cidx in range(min(len(src_cells), len(dst_cells))):
             src_cell = _Cell(src_cells[cidx], template_table.rows[ridx]._parent)
             dst_cell = _Cell(dst_cells[cidx], table.rows[ridx]._parent)
-            dst_cell.text = src_cell.text
+            replace_paragraph_text(dst_cell.paragraphs[0], src_cell.text, src_cell.paragraphs[0])
 
 
 def clone_row(table, template_row):
@@ -736,7 +741,9 @@ def clone_row(table, template_row):
 
 
 def clear_cell(cell):
-    cell.text = ""
+    replace_paragraph_text(cell.paragraphs[0], "")
+    for extra in list(cell.paragraphs[1:]):
+        cell._tc.remove(extra._p)
 
 
 def row_cell(row, idx):

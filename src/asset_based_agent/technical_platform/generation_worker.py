@@ -24,18 +24,23 @@ def detail(scripts, inputs, output):
     layout, protection = output / 'sheet_structure_map.json', output / 'formula_protection_report.json'
     registry, summary = output / 'input_cell_registry.json', output / 'summary_chain_input_registry.json'
     journal = ['--journal', inputs['journal']] if inputs.get('journal') else []
+    bank = ['--bank-statement', inputs['bank_statement']] if inputs.get('bank_statement') else []
     stages = [
         ('build_project_mapping.py', ['--trial-balance', tb, '--balance-sheet', bs, *journal, '--output', mapping]),
+        ('prepare_execution_scope.py', ['--trial-balance', tb, '--balance-sheet', bs,
+            '--project-mapping', mapping, *journal, *bank, '--output', output / 'execution_scope.json']),
         ('build_formula_chain_map.py', ['--template', template, '--output', chain]),
-        ('scan_template_structure.py', ['--template', template, '--layout-output', layout, '--protection-output', protection]),
+        ('scan_template_structure.py', ['--template', template, '--layout-output', layout, '--protection-output', protection,
+            '--execution-scope', output / 'execution_scope.json']),
         ('build_input_cell_registry.py', ['--layout-map', layout, '--output', registry]),
         ('build_summary_chain_input_registry.py', ['--layout-map', layout, '--input-cell-registry', registry, '--output', summary]),
         ('run_detail_workbook_pipeline.py', ['--trial-balance', tb, '--balance-sheet', bs,
-            '--financial-statement', bs, *journal, '--template', template, '--output-dir', output,
+            '--financial-statement', bs, *journal, *bank, '--execution-mode', 'auto',
+            '--template', template, '--output-dir', output,
             '--published-workbook', output / 'detail_workbook.xlsx', '--project-mapping', mapping,
             '--formula-chain', chain, '--sheet-layout', layout, '--formula-protection', protection,
             '--input-cell-registry', registry, '--summary-chain-input-registry', summary,
-            '--skip-excel-recalc']),
+            '--allow-excel-recalc']),
     ]
     for name, args in stages:
         call(scripts / name, args)
@@ -53,7 +58,8 @@ def main(job_path):
         scripts = bundle_directory(job['skill_id']) / 'scripts'
         sys.path.insert(0, str(scripts))
         if job['skill_id'] == HISTORY.id:
-            raise ValueError('工商锁定模板的填充区域尚未确认，禁止使用通用重建版式代替')
+            from .history_generation import generate
+            ok = generate(scripts, job['inputs'], output)
         elif job['skill_id'] == DETAIL.id:
             ok = detail(scripts, job['inputs'], output)
         else:

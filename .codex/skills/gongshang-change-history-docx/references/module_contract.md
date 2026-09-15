@@ -81,6 +81,9 @@ Additional equity validation requirements:
 
 最低验收项：
 
+- `template_fonts_preserved`：每个非空文字运行的中西文字体与锁定模板一致；缺字体属性视为失败。
+- `text_size`：正文12磅、表格9磅；`w:sz` 与 `w:szCs` 均存在。
+- `first_line_indent`：正文2字符、表格0，无冲突悬挂缩进。
 - `events_order_correct`
 - `fragment_docx_exists`
 - `equity_table_has_7_columns`

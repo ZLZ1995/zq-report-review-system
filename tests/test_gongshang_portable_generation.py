@@ -45,3 +45,16 @@ def test_source_reader_preserves_inputs_and_groups_dates(tmp_path):
     assert events[0][0] == '2025-01-02'
     assert events[0][1][0]['after'] == '李四'
     assert before == (source.read_bytes(), template.read_bytes())
+
+
+def test_source_reader_does_not_silently_drop_incomplete_event(tmp_path):
+    import pytest
+    m = module()
+    source = tmp_path / 'source.xlsx'
+    wb = Workbook()
+    wb.active.title = '变更信息'
+    wb.active.append(['变更日期', '变更事项', '变更前', '变更后'])
+    wb.active.append([None, '法定代表人变更', '张三', '李四'])
+    wb.save(source)
+    with pytest.raises(ValueError, match='日期|事项'):
+        m.load_events(source)

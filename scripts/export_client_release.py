@@ -37,6 +37,10 @@ def main():
         "src/asset_based_agent/__init__.py", "scripts/bootstrap_report_review_admin.py",
         "tests/test_gongshang_text_format.py", "tests/test_gongshang_portable_generation.py",
         "tests/test_gongshang_history_fragment_validation.py",
+        "tests/test_detail_scope_first.py", "tests/test_detail_locked_writer.py",
+        "tests/test_detail_review_release.py", "tests/test_detail_cover_metadata.py",
+        "scripts/probe_detail_generation.py", "scripts/verify_detail_template_preservation.py",
+        "scripts/package_technical_platform.py",
     ):
         paths.add(ROOT / name)
     output = []

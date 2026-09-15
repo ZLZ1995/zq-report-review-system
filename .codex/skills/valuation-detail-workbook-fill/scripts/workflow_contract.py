@@ -60,6 +60,7 @@ RULES: list[WorkflowRule] = [
     WorkflowRule("R43", "runtime", "同一成果 xlsx 禁止并发写入，保存后必须校验 zip 完整性", "gate"),
     WorkflowRule("R44", "artifact", "必须输出 source_inventory.json / project_mapping.json / field_lineage_report.json", "artifact"),
     WorkflowRule("R45", "artifact", "必须输出 preflight_report.json / preflight_gate_failures.json / delivery_check_report.json", "artifact"),
+    WorkflowRule("R46", "scope", "必须先按资产负债表非零科目确定执行范围；默认不得全模板处理", "artifact"),
 ]
 
 
@@ -242,6 +243,7 @@ REQUIRED_ARTIFACT_NAMES = [
     "normalized_journal.json",
     "detail_candidates.json",
     "counterparty_resolution.json",
+    "execution_scope.json",
     "page_plan.json",
     "field_assignment_plan.json",
     "completed_pages.json",
@@ -269,6 +271,7 @@ ARTIFACT_RULE_FILES = {
     "R35": {"hidden_scope.json", "missing_materials.json"},
     "R44": {"source_inventory.json", "project_mapping.json", "field_lineage_report.json"},
     "R45": {"preflight_report.json", "preflight_gate_failures.json", "delivery_check_report.json"},
+    "R46": {"execution_scope.json"},
 }
 
 

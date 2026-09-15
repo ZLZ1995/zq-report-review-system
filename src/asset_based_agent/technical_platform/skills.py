@@ -50,12 +50,12 @@ PREFLIGHT = SkillSpec(
 )
 REVIEW = SkillSpec(
     "report.review",
-    "0.1.0",
+    "0.2.0",
     "评估报告审核",
     frozenset({"read_selected_files", "generate_artifacts"}),
 )
 
-DETAIL = SkillSpec('valuation-detail-workbook-fill', '0.1.0', '评估明细表生成（本地）',
+DETAIL = SkillSpec('valuation-detail-workbook-fill', '0.2.0', '评估明细表生成（本地）',
                    frozenset({'read_selected_files', 'generate_artifacts'}))
 HISTORY = SkillSpec('gongshang-change-history-docx', '0.1.0', '工商历史沿革生成（本地）',
                     frozenset({'read_selected_files', 'generate_artifacts'}))

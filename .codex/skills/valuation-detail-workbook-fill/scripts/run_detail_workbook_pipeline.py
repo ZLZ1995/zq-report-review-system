@@ -13,7 +13,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-import xlrd
+try:
+    import xlrd
+except ImportError:
+    xlrd = None
 from openpyxl import load_workbook
 from openpyxl.cell.cell import MergedCell
 from openpyxl.styles import Border
@@ -355,10 +358,138 @@ def assert_summary_formulas_preserved(wb, baseline) -> None:
                 })
 
 
+def capture_template_formulas(wb) -> dict:
+    return {ws.title: {c.coordinate: copy(c.value) for row in ws for c in row if c.data_type == 'f'}
+            for ws in wb}
+
+
+def assert_template_formulas_preserved(wb, baseline) -> None:
+    for name, cells in baseline.items():
+        if name not in wb.sheetnames:
+            raise ProtectionViolation({'sheet': name, 'reason': 'template_sheet_removed'})
+        for address, formula in cells.items():
+            cell = wb[name][address]
+            guarded_formula = f"=IFERROR({str(formula)[1:]},0)" if str(formula).startswith("=") else ""
+            if wb[name].sheet_state != "visible" and cell.data_type == "f" and cell.value == guarded_formula:
+                continue
+            if cell.data_type != 'f' or cell.value != formula:
+                raise ProtectionViolation({'sheet': name, 'cell': address,
+                    'reason': 'template_formula_changed', 'expected': str(formula), 'actual': str(cell.value)})
+
+
 def clean(value: Any) -> str:
     if value is None:
         return ""
     return " ".join(str(value).strip().split())
+
+
+def load_bank_statement_evidence(paths: list[str], bs_values: dict[str, float]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    accounts: dict[str, dict[str, Any]] = {}
+    sources: list[dict[str, Any]] = []
+    for raw_path in paths:
+        path = Path(raw_path)
+        wb = load_workbook(path, read_only=True, data_only=True)
+        try:
+            for ws in wb.worksheets:
+                header_row = 0
+                headers: dict[str, int] = {}
+                for row in range(1, min(ws.max_row, 20) + 1):
+                    candidate = {
+                        clean(ws.cell(row, col).value): col
+                        for col in range(1, ws.max_column + 1)
+                        if clean(ws.cell(row, col).value)
+                    }
+                    if "账号" in candidate:
+                        header_row = row
+                        headers = candidate
+                        break
+                if not header_row:
+                    continue
+                for row in range(header_row + 1, ws.max_row + 1):
+                    account = re.sub(r"\D", "", clean(ws.cell(row, headers["账号"]).value))
+                    if not account:
+                        continue
+                    item = accounts.setdefault(
+                        account,
+                        {
+                            "account_number": account,
+                            "account_name": "",
+                            "bank_name": "",
+                            "currency": "人民币",
+                            "latest_transaction_date": None,
+                            "latest_transaction_balance": None,
+                            "evidence_sources": [],
+                        },
+                    )
+                    def value(name: str) -> Any:
+                        col = headers.get(name)
+                        return ws.cell(row, col).value if col else None
+                    account_name = clean(value("账户名称") or value("单位名称"))
+                    bank_name = clean(value("开户行") or value("银行类型"))
+                    currency = clean(value("币种"))
+                    if account_name:
+                        item["account_name"] = account_name.split("-", 1)[-1] if account_name[:5].isdigit() and "-" in account_name else account_name
+                    if bank_name and ("开户行" in headers or not item["bank_name"]):
+                        item["bank_name"] = bank_name
+                    if currency:
+                        item["currency"] = "人民币" if "人民币" in currency or "CNY" in currency.upper() else currency
+                    transaction_date = parse_date_text(value("交易日期"))
+                    balance = value("账户余额")
+                    if transaction_date and isinstance(balance, (int, float)):
+                        latest = item.get("latest_transaction_date")
+                        if latest is None or transaction_date > latest:
+                            item["latest_transaction_date"] = transaction_date
+                            item["latest_transaction_balance"] = round(float(balance), 2)
+                    evidence = {"source": str(path), "sheet": ws.title, "row": row,
+                                "columns": dict(headers)}
+                    item["evidence_sources"].append(evidence)
+                    sources.append(evidence)
+        finally:
+            wb.close()
+
+    amount = abs(float(bs_values.get("货币资金", 0.0) or 0.0))
+    rows: list[dict[str, Any]] = []
+    if len(accounts) == 1 and amount >= 0.005:
+        item = next(iter(accounts.values()))
+        balance = item['latest_transaction_balance']
+        if balance is None or abs(balance - amount) >= 0.005:
+            raise ValueError('bank_statement_balance_mismatch：对账单余额与报表货币资金不一致或缺少余额，禁止替代取数')
+        if not item['bank_name'] or not item['account_name'] or item['currency'] != '人民币':
+            raise ValueError('银行账户资料不完整或币种暂不支持，请补充标准人民币对账单')
+        rows.append(
+            {
+                "counterparty": item["bank_name"],
+                "sub_name": item["account_number"],
+                "currency": item["currency"],
+                "book_value": round(amount, 2),
+                "tb_code": "1002",
+                "detail_policy": "detail_fillable",
+                "fill_mode": "detail_fillable",
+                "fill_reason": "",
+                "source_type": "bank_statement_detail",
+                "field_confidence": "high",
+                "evidence_sources": item["evidence_sources"],
+            }
+        )
+    report_accounts = []
+    for item in accounts.values():
+        report_accounts.append(
+            {
+                **item,
+                "latest_transaction_date": item["latest_transaction_date"].strftime("%Y/%m/%d") if item["latest_transaction_date"] else "",
+                "valuation_date_amount": round(amount, 2) if len(accounts) == 1 else None,
+                "valuation_date_amount_source": "adjusted_balance_sheet_货币资金" if len(accounts) == 1 else "",
+            }
+        )
+    report = {
+        "status": "ok" if rows or amount < 0.005 else "needs_materials",
+        "source_files": list(paths),
+        "account_count": len(accounts),
+        "accounts": report_accounts,
+        "written_row_count": len(rows),
+        "note": "银行账号及开户行来自银行资料；评估基准日账面金额来自经用户确认调整后的资产负债表。",
+    }
+    return rows, report
 
 
 def parse_date_text(value: Any) -> datetime | None:
@@ -397,10 +528,12 @@ PAGE_RULES = {
 }
 
 
-def derive_age_bucket(dt: datetime | None) -> tuple[str, str]:
+def derive_age_bucket(dt: datetime | None, *, base_date: datetime | None = None) -> tuple[str, str]:
     if dt is None:
         return "", ""
-    delta_days = (VALUATION_BASE_DATE - dt).days
+    delta_days = ((base_date or VALUATION_BASE_DATE) - dt).days
+    if base_date is not None and delta_days < 0:
+        raise ValueError('journal_date_after_report_date')
     if delta_days <= 365:
         return "1年以内", "G"
     if delta_days <= 365 * 2:
@@ -629,6 +762,8 @@ def safe_set_summary_anchor(
 def parse_balance_sheet(path: Path, cover_source=None) -> dict[str, Any]:
     metadata = cover_source or read_statement_metadata(path)
     if path.suffix.lower() == ".xls":
+        if xlrd is None:
+            raise RuntimeError("xlrd_required_for_legacy_xls")
         book = xlrd.open_workbook(path.as_posix())
         sheet = book.sheet_by_index(0)
         company = clean(sheet.cell_value(6, 0)).replace("公司=", "").replace("单位名称：", "").strip()
@@ -668,7 +803,7 @@ def parse_balance_sheet(path: Path, cover_source=None) -> dict[str, Any]:
             "应付职工薪酬": values_current.get("应付职工薪酬", values_current.get("应付工资", 0.0)),
             "应交税费": values_current.get("应交税费", values_current.get("应交税金", 0.0)),
             "其他流动负债": values_current.get("其他流动负债", values_current.get("预提费用", 0.0)),
-            "实收资本": values_current.get("实收资本", values_current.get("实收资本(或股本)", 0.0)),
+            "实收资本": values_current.get("实收资本", values_current.get("实收资本(或股本)", values_current.get("实收资本(股本)", 0.0))),
         }
         aliases_prior = {
             "应付账款": values_prior.get("应付账款", values_prior.get("应付帐款", 0.0)),
@@ -681,7 +816,7 @@ def parse_balance_sheet(path: Path, cover_source=None) -> dict[str, Any]:
             "应付职工薪酬": values_prior.get("应付职工薪酬", values_prior.get("应付工资", 0.0)),
             "应交税费": values_prior.get("应交税费", values_prior.get("应交税金", 0.0)),
             "其他流动负债": values_prior.get("其他流动负债", values_prior.get("预提费用", 0.0)),
-            "实收资本": values_prior.get("实收资本", values_prior.get("实收资本(或股本)", 0.0)),
+            "实收资本": values_prior.get("实收资本", values_prior.get("实收资本(或股本)", values_prior.get("实收资本(股本)", 0.0))),
         }
         if "棰勬敹璐︽" in aliases and not aliases["棰勬敹璐︽"] and "棰勬敹娆鹃項" in values_current:
             aliases["棰勬敹璐︽"] = values_current.get("棰勬敹娆鹃項", 0.0)
@@ -725,7 +860,7 @@ def parse_balance_sheet(path: Path, cover_source=None) -> dict[str, Any]:
         "应付职工薪酬": values_current.get("应付职工薪酬", values_current.get("应付工资", 0.0)),
         "应交税费": values_current.get("应交税费", values_current.get("应交税金", 0.0)),
         "其他流动负债": values_current.get("其他流动负债", values_current.get("预提费用", 0.0)),
-        "实收资本": values_current.get("实收资本", values_current.get("实收资本(或股本)", 0.0)),
+        "实收资本": values_current.get("实收资本", values_current.get("实收资本(或股本)", values_current.get("实收资本(股本)", 0.0))),
     }
     aliases_prior = {
         "应付账款": values_prior.get("应付账款", values_prior.get("应付帐款", 0.0)),
@@ -738,7 +873,7 @@ def parse_balance_sheet(path: Path, cover_source=None) -> dict[str, Any]:
         "应付职工薪酬": values_prior.get("应付职工薪酬", values_prior.get("应付工资", 0.0)),
         "应交税费": values_prior.get("应交税费", values_prior.get("应交税金", 0.0)),
         "其他流动负债": values_prior.get("其他流动负债", values_prior.get("预提费用", 0.0)),
-        "实收资本": values_prior.get("实收资本", values_prior.get("实收资本(或股本)", 0.0)),
+        "实收资本": values_prior.get("实收资本", values_prior.get("实收资本(或股本)", values_prior.get("实收资本(股本)", 0.0))),
     }
     if "棰勬敹璐︽" in aliases and not aliases["棰勬敹璐︽"] and "棰勬敹娆鹃項" in values_current:
         aliases["棰勬敹璐︽"] = values_current.get("棰勬敹娆鹃項", 0.0)
@@ -1173,9 +1308,12 @@ def strip_entity_from_summary(summary: str, entity: str) -> str:
 def build_journal_entity_index(journal_rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     index: dict[str, list[dict[str, Any]]] = {}
     for row in journal_rows:
-        entity = extract_entity_from_text(
-            f"{row.get('vendor_name','')} {row.get('counterparty_desc','')} {row['account_name']} {row['summary']}"
-        )
+        entities = {extract_entity_from_text(clean(row.get(field, '')))
+                    for field in ('vendor_name', 'counterparty_desc')}
+        entities.discard('')
+        if len(entities) > 1:
+            raise ValueError(f"conflicting_journal_counterparties: row={row.get('row', '?')}")
+        entity = next(iter(entities), '') or extract_entity_from_text(row['summary'])
         if not entity:
             continue
         business_desc = strip_entity_from_summary(row["summary"], entity)
@@ -1868,6 +2006,8 @@ def normalize_footer_for_sheet(ws) -> None:
 def normalize_all_detail_sheet_footers(wb) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     for ws in wb.worksheets:
+        if getattr(ws, '_locked_template_layout', False):
+            continue
         if ws.title in SUMMARY_SHEET_NAMES or is_linked_summary_sheet(ws.title):
             continue
         layout = get_footer_layout(ws.title, ws)
@@ -1902,11 +2042,27 @@ DETAIL_WRITE_TEMPLATES = {
 def write_simple_detail_sheet(ws, rows: list[dict[str, Any]], kind: str, protection: dict[str, Any], registry: dict[str, Any], journal_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     template = DETAIL_WRITE_TEMPLATES.get(ws.title, [])
     sheet_registry = registry.get("selected_sheets", {}).get(ws.title, {})
-    if ws.title in {"预付账款", "应付账款", "其他应收款"}:
+    locked = getattr(ws, '_locked_template_layout', False)
+    if locked:
+        total = find_total_row(ws, 6)
+        inputs = set(sheet_registry.get('confirmed_input_cells', []))
+        amount_cols = [col for col, field in template if field == 'book_value']
+        capacity = [r for r in range(6, total) if any(
+            f'{col}{r}' in inputs and ws[f'{col}{r}'].data_type != 'f' for col in amount_cols)]
+        if len(rows) > len(capacity):
+            raise ProtectionViolation({'sheet': ws.title, 'reason': 'locked_template_capacity_exceeded',
+                                       'capacity': len(capacity), 'required': len(rows)})
+        for address in inputs.intersection(sheet_registry.get('detail_body_cells', [])):
+            cell = ws[address]
+            if 6 <= cell.row < total and not isinstance(cell, MergedCell) and cell.data_type != 'f':
+                safe_set(ws, address, None, protection, registry, kind='detail_body_write')
+    if not locked and ws.title in {"预付账款", "应付账款", "其他应收款"}:
         collapse_duplicate_footer_rows(ws, template, sheet_registry)
-    clear_sheet_body(ws)
+    if not locked:
+        clear_sheet_body(ws)
     total_row = find_total_row(ws, 6)
-    restore_footer_labels(ws, total_row=total_row)
+    if not locked:
+        restore_footer_labels(ws, total_row=total_row)
     if ws.title == "应交税费":
         rows = apply_tax_fee_presentation_openpyxl(ws, rows)
     data_end = max(6, total_row - 1)
@@ -1920,9 +2076,11 @@ def write_simple_detail_sheet(ws, rows: list[dict[str, Any]], kind: str, protect
             candidate_rows.append(row_num)
         elif required_cols and all(f"{col}{row_num}" in writable_cells for col in required_cols):
             candidate_rows.append(row_num)
-    if not candidate_rows:
+    if locked:
+        candidate_rows = capacity
+    elif not candidate_rows:
         candidate_rows = list(range(6, data_end + 1))
-    if ws.title in {"应付账款", "预收账款", "其他应付款", "应交税费"}:
+    if not locked and ws.title in {"应付账款", "预收账款", "其他应付款", "应交税费"}:
         liability_value_cells = {f"H{row_num}" for row_num in candidate_rows}
         writable_cells |= liability_value_cells
         registry.setdefault("selected_sheets", {}).setdefault(ws.title, {}).setdefault("confirmed_input_cells", [])
@@ -2036,7 +2194,8 @@ def write_simple_detail_sheet(ws, rows: list[dict[str, Any]], kind: str, protect
             elif ws.title in {"其他应收款", "其他应付款"}:
                 row_item["evidence_boundary"] = "no_journal_match"
                 row_item["remark"] = "序时账及客商明细未检出发生记录"
-        age_bucket, age_bucket_col = derive_age_bucket(row_item.get("date_value"))
+        age_bucket, age_bucket_col = derive_age_bucket(row_item.get("date_value"),
+            base_date=getattr(ws, '_report_date', None))
         row_item["age_bucket"] = age_bucket
         row_item["age_bucket_col"] = age_bucket_col
         row_item["bucket_amount"] = row_item.get("book_value")
@@ -2052,9 +2211,11 @@ def write_simple_detail_sheet(ws, rows: list[dict[str, Any]], kind: str, protect
                 continue
             else:
                 value = row_item.get(field_name)
+            if locked and ws[f'{col}{r}'].data_type == 'f':
+                continue  # Formula-derived field; validate its calculated value later.
             safe_set(ws, f"{col}{r}", value, protection, registry, kind="detail_body_write")
         written.append({**row_item, "_written_row": r, "_sheet": ws.title})
-    if ws.title == "应收账款":
+    if not locked and ws.title == "应收账款":
         gross_total = round(sum(float(item.get("book_value", 0.0) or 0.0) for item in rows_to_write), 2)
         bs_total = round(float(getattr(write_simple_detail_sheet, "_bs_values", {}).get("应收账款", 0.0) or 0.0), 2)
         allowance = round(gross_total - bs_total, 2)
@@ -2071,7 +2232,7 @@ def write_simple_detail_sheet(ws, rows: list[dict[str, Any]], kind: str, protect
                     "fill_reason": "receivable_gross_to_balance_sheet_net_allowance",
                 }
             )
-    if total_row and candidate_rows:
+    if not locked and total_row and candidate_rows:
         first_row = min(candidate_rows)
         written_data_rows = [int(item["_written_row"]) for item in written if int(item["_written_row"]) < int(total_row)]
         last_row = max(written_data_rows) if written_data_rows else first_row
@@ -2358,6 +2519,15 @@ def cleanup_zero_balance_fixed_asset_family(wb, bs_values: dict[str, float]) -> 
         ws = wb[sheet_name]
         total_row = find_total_row(ws, 6)
         cleared = 0
+        guarded_formulas = 0
+        for formula_row in ws.iter_rows(min_row=6, max_row=ws.max_row):
+            for formula_cell in formula_row:
+                if isinstance(formula_cell, MergedCell) or formula_cell.data_type != "f":
+                    continue
+                formula = str(formula_cell.value or "")
+                if formula.startswith("=") and "/" in formula and not formula.upper().startswith("=IFERROR("):
+                    formula_cell.value = f"=IFERROR({formula[1:]},0)"
+                    guarded_formulas += 1
         for r in range(6, max(6, total_row - 1) + 1):
             for c in range(1, ws.max_column + 1):
                 cell = ws.cell(r, c)
@@ -2368,7 +2538,7 @@ def cleanup_zero_balance_fixed_asset_family(wb, bs_values: dict[str, float]) -> 
                 if cell.value not in (None, ""):
                     cell.value = None
                     cleared += 1
-        report["sheets"].append({"sheet": sheet_name, "cleared_cells": cleared})
+        report["sheets"].append({"sheet": sheet_name, "cleared_cells": cleared, "guarded_formulas": guarded_formulas})
     return report
 
 
@@ -2506,6 +2676,12 @@ def build_validation_report(workbook: Path) -> dict:
     return report
 
 
+def validate_saved_stage1(workbook: Path, *, allow_recalc: bool) -> dict:
+    if allow_recalc:
+        force_excel_recalc(workbook)
+    return build_validation_report(workbook)
+
+
 def build_flow_debug_report(workbook: Path) -> dict[str, Any]:
     wb = load_workbook(workbook, data_only=True)
     payload: dict[str, Any] = {}
@@ -2526,6 +2702,114 @@ def build_flow_debug_report(workbook: Path) -> dict[str, Any]:
 
 def nonzero_items(values: dict[str, float], keys: list[str]) -> dict[str, float]:
     return {key: round(float(values.get(key, 0.0) or 0.0), 2) for key in keys if abs(float(values.get(key, 0.0) or 0.0)) >= 0.005}
+
+
+SCOPE_EXCLUDED_BALANCE_SHEET_LINES = {
+    "资产总计", "负债合计", "所有者权益合计", "负债和所有者权益合计",
+    "负债和所有者权益（或股东权益）合计", "流动资产合计", "非流动资产合计",
+    "流动负债合计", "非流动负债合计", "实收资本", "实收资本(股本)",
+    "实收资本(或股本)", "资本公积", "减:库存股", "减：库存股", "其他综合收益",
+    "专项储备", "盈余公积", "未分配利润", "外币报表折算差额",
+}
+
+
+def select_execution_scope(
+    bs_values: dict[str, float],
+    sheet_plan: list[tuple[str, list[dict[str, Any]], str]],
+    *,
+    requested_mode: str = "auto",
+    bank_evidence_available: bool = False,
+) -> dict[str, Any]:
+    def planned_row_amount(row: dict[str, Any]) -> float:
+        for key in ("book_value", "source_amount"):
+            if row.get(key) not in (None, ""):
+                return float(row.get(key) or 0.0)
+        return float(row.get("debit_end", 0.0) or 0.0) - float(row.get("credit_end", 0.0) or 0.0)
+
+    active_lines = {
+        label: round(float(value or 0.0), 2)
+        for label, value in bs_values.items()
+        if abs(float(value or 0.0)) >= 0.005
+        and label not in SCOPE_EXCLUDED_BALANCE_SHEET_LINES
+        and not label.endswith(("合计", "总计"))
+    }
+    active_sheets = sorted({
+        sheet_name
+        for sheet_name, rows, _kind in sheet_plan
+        if sheet_name != "00000000"
+        and any(abs(planned_row_amount(row)) >= 0.005 for row in rows)
+    })
+    single_bank = (
+        set(active_lines) == {"货币资金"}
+        and set(active_sheets).issubset({"银行存款"})
+        and bank_evidence_available
+    )
+    if requested_mode == "full":
+        mode = "full_template"
+    elif single_bank:
+        mode = "single_asset_lightweight"
+    else:
+        mode = "scoped_standard"
+    required_sheets = ["封面", "资产负债表", "分类汇总", "汇总表"]
+    if mode == "single_asset_lightweight":
+        required_sheets.extend(["银行存款", "流动汇总"])
+    else:
+        required_sheets.extend(active_sheets)
+    return {
+        "requested_mode": requested_mode,
+        "selected_mode": mode,
+        "active_balance_sheet_lines": active_lines,
+        "active_detail_sheets": active_sheets,
+        "required_dependency_sheets": list(dict.fromkeys(required_sheets)),
+        "stage1_excel_recalc_required": mode != "single_asset_lightweight",
+        "reason": (
+            "任务配置显式要求全模板处理"
+            if mode == "full_template"
+            else "仅货币资金非零且银行证据完整，先完成范围识别后进入单资产轻量路径"
+            if mode == "single_asset_lightweight"
+            else "按资产负债表非零科目生成范围并执行对应明细与依赖链"
+        ),
+    }
+
+
+def restrict_plan_to_scope(plan, scope):
+    if scope['selected_mode'] == 'full_template':
+        return plan
+    selected = set(scope['active_detail_sheets'])
+    return [item for item in plan if item[0] in selected]
+
+
+def validate_saved_stage1_scoped(workbook: Path, bs: dict[str, Any]) -> dict[str, Any]:
+    values = bs.get("values_current") or bs.get("values") or {}
+    assets = float(values.get("资产总计", 0.0) or 0.0)
+    liabilities_equity = float(
+        next((values[key] for key in (
+            "负债和所有者权益（或股东权益）合计", "负债和所有者权益合计",
+            "负债和所有者权益总计", "负债及所有者权益总计",
+        ) if key in values), 0.0) or 0.0
+    )
+    wb = load_workbook(workbook, read_only=True, data_only=False)
+    ws = wb["资产负债表"]
+    checks = []
+    for cell_ref, label in (("D7", "货币资金"), ("I31", "实收资本"), ("I35", "未分配利润")):
+        expected = float(values.get(label, 0.0) or 0.0)
+        if abs(expected) < 0.005:
+            continue
+        actual = ws[cell_ref].value
+        # Resolve only a direct same-sheet input reference; never evaluate arbitrary formulas.
+        if isinstance(actual, str) and re.fullmatch(r"=\$?[A-Z]{1,3}\$?[1-9][0-9]*", actual):
+            actual = ws[actual[1:].replace("$", "")].value
+        actual_number = float(actual) if isinstance(actual, (int, float)) else None
+        checks.append({"cell": cell_ref, "label": label, "expected": expected, "actual": actual_number,
+                       "matched": actual_number is not None and abs(actual_number - expected) < 0.005})
+    wb.close()
+    difference = round(liabilities_equity - assets, 2)
+    return {
+        "assets_equal_liabilities_equity": abs(difference) < 0.005 and all(item["matched"] for item in checks),
+        "balance_sheet_difference": difference,
+        "validation_mode": "scoped_direct_inputs",
+        "direct_input_checks": checks,
+    }
 
 
 def build_preflight_report(
@@ -2705,9 +2989,19 @@ def stage3_enrich_detail_pages_from_journals(
     wb,
     bs: dict[str, Any],
     placeholder_pages: list[dict[str, Any]],
+    execution_scope: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     placeholder_pages.extend(fill_noncurrent_placeholders(wb, bs["values"]))
-    fixed_asset_cleanup = cleanup_zero_balance_fixed_asset_family(wb, bs["values"])
+    scope = execution_scope or {}
+    scope_sheets = set(scope.get("active_detail_sheets", [])) | set(scope.get("required_dependency_sheets", []))
+    should_clean_fixed_assets = scope.get("selected_mode") == "full_template" or bool(
+        scope_sheets & {"固定资产汇总", "房屋建筑物", "构筑物", "井巷", "管道沟槽", "机器设备", "车辆", "电子设备", "土地", "固定资产清理"}
+    )
+    fixed_asset_cleanup = (
+        cleanup_zero_balance_fixed_asset_family(wb, bs["values"])
+        if should_clean_fixed_assets
+        else {"fixed_asset_zero": True, "sheets": [], "skipped": "out_of_scope"}
+    )
     return placeholder_pages, {"fixed_asset_zero_balance_cleanup": fixed_asset_cleanup}
 
 
@@ -2745,6 +3039,7 @@ def main() -> None:
                         help="Explicit original financial statements for cover metadata; repeat for multiple periods")
     parser.add_argument("--journal")
     parser.add_argument("--counterparty-balance")
+    parser.add_argument("--bank-statement", action="append", default=[])
     parser.add_argument("--template", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--published-workbook", required=True)
@@ -2757,6 +3052,7 @@ def main() -> None:
     parser.add_argument("--skip-excel-recalc", action="store_true", default=True)
     parser.add_argument("--allow-excel-recalc", action="store_true")
     parser.add_argument("--skip-preflight", action="store_true")
+    parser.add_argument("--execution-mode", choices=["auto", "scoped", "full"], default="auto")
     args = parser.parse_args()
     main.output_dir = Path(args.output_dir)
     if args.allow_excel_recalc:
@@ -2768,6 +3064,7 @@ def main() -> None:
     write_stage(output_dir, "start")
     initial_source_hashes = source_fingerprints([
         args.trial_balance, args.balance_sheet, args.journal, args.counterparty_balance, args.source_checks,
+        *args.bank_statement,
         *args.financial_statement,
         *([x['source'] for x in json.loads(Path(args.source_checks).read_text(encoding='utf-8'))] if args.source_checks else []),
     ])
@@ -2777,6 +3074,7 @@ def main() -> None:
     shutil.copy2(args.template, staging)
     template_wb = load_workbook(staging, data_only=False)
     summary_formula_baseline = capture_summary_formulas(template_wb)
+    template_formula_baseline = capture_template_formulas(template_wb)
     template_wb.close()
     timed_stage(output_dir, "template_copied", run_started_at, staging=str(staging))
 
@@ -2789,6 +3087,8 @@ def main() -> None:
     write_json(output_dir / 'cover_source_selection.json', cover_source)
     bs = parse_balance_sheet(Path(args.balance_sheet), cover_source=cover_source)
     timed_stage(output_dir, "balance_sheet_parsed", run_started_at, bs_keys=len(bs.get("values", {})))
+    bank_account_rows, bank_extract_report = load_bank_statement_evidence(args.bank_statement, bs["values"])
+    write_json(output_dir / "bank_extract_report.json", bank_extract_report)
     tb_rows = load_trial_balance_rows(Path(args.trial_balance))
     timed_stage(output_dir, "trial_balance_loaded", run_started_at, row_count=len(tb_rows))
     journal_rows = load_journal_rows(Path(args.journal) if args.journal else None)
@@ -2821,17 +3121,30 @@ def main() -> None:
         sheet_plan = apply_counterparty_balance_rows(sheet_plan, counterparty_balance_rows)
         sheet_plan = refine_counterparty_balance_rows(sheet_plan, counterparty_balance_rows)
     source_reconciliation = getattr(group_rows_for_y71, "source_reconciliation", {})
+    execution_scope = select_execution_scope(
+        bs["values"],
+        sheet_plan,
+        requested_mode=args.execution_mode,
+        bank_evidence_available=bool(bank_account_rows),
+    )
+    write_json(output_dir / "execution_scope.json", execution_scope)
+    sheet_plan = restrict_plan_to_scope(sheet_plan, execution_scope)
+    timed_stage(output_dir, "execution_scope_selected", run_started_at, mode=execution_scope["selected_mode"])
 
     try:
         wb = load_workbook(staging)
         timed_stage(output_dir, "stage1_opened", run_started_at)
         stage1_fill_cover_and_balance_sheet(wb, bs, protection, registry)
         assert_summary_formulas_preserved(wb, summary_formula_baseline)
+        assert_template_formulas_preserved(wb, template_formula_baseline)
         timed_stage(output_dir, "stage1_filled", run_started_at)
         wb.save(staging)
         wb.close()
         timed_stage(output_dir, "stage1_saved", run_started_at)
-        stage1_validation = build_validation_report(staging)
+        if execution_scope["stage1_excel_recalc_required"]:
+            stage1_validation = validate_saved_stage1(staging, allow_recalc=not args.skip_excel_recalc)
+        else:
+            stage1_validation = validate_saved_stage1_scoped(staging, bs)
         timed_stage(output_dir, "stage1_validated", run_started_at)
         stage1_issues = validate_stage1_gate(stage1_validation)
         if stage1_issues:
@@ -2840,6 +3153,9 @@ def main() -> None:
 
         wb = load_workbook(staging)
         timed_stage(output_dir, "stage2_opened", run_started_at)
+        for sheet in wb:
+            sheet._locked_template_layout = True
+            sheet._report_date = cover_source['report_date']
         (
             sheet_plan,
             completed_pages,
@@ -2854,6 +3170,7 @@ def main() -> None:
             protection,
             registry,
             counterparty_balance_rows,
+            bank_account_rows,
         )
         timed_stage(output_dir, "stage2_filled", run_started_at, completed_pages=len(completed_pages), placeholders=len(placeholder_pages))
         stage2_fix_writes = stage2_postfix_key_sheets(wb, bs)
@@ -2864,7 +3181,9 @@ def main() -> None:
         if routing_issues:
             write_contract_json(output_dir / "routing_sanity_failures.json", routing_issues)
             raise RuntimeError("routing_sanity_failed")
-        placeholder_pages, stage3_meta = stage3_enrich_detail_pages_from_journals(wb, bs, placeholder_pages)
+        placeholder_pages, stage3_meta = stage3_enrich_detail_pages_from_journals(
+            wb, bs, placeholder_pages, execution_scope
+        )
         timed_stage(output_dir, "stage3_done", run_started_at, placeholders=len(placeholder_pages))
         visibility_report = apply_sheet_visibility(wb, bs["values"], sheet_plan, completed_pages, placeholder_pages)
         timed_stage(output_dir, "visibility_done", run_started_at)
@@ -2873,6 +3192,7 @@ def main() -> None:
         footer_normalization_report = normalize_all_detail_sheet_footers(wb)
         timed_stage(output_dir, "footer_normalized", run_started_at, sheet_count=len(footer_normalization_report))
         assert_summary_formulas_preserved(wb, summary_formula_baseline)
+        assert_template_formulas_preserved(wb, template_formula_baseline)
         wb.calculation.calcMode = "auto"
         wb.calculation.fullCalcOnLoad = True
         wb.calculation.forceFullCalc = True
@@ -2900,6 +3220,7 @@ def main() -> None:
     verification_wb = load_workbook(staging, data_only=False)
     try:
         assert_summary_formulas_preserved(verification_wb, summary_formula_baseline)
+        assert_template_formulas_preserved(verification_wb, template_formula_baseline)
         cover_report = validate_cover(verification_wb, cover_source)
     finally:
         verification_wb.close()
@@ -2941,6 +3262,7 @@ def main() -> None:
             "balance_sheet": args.balance_sheet,
             "journal": args.journal or "",
             "counterparty_balance": args.counterparty_balance or "",
+            "bank_statements": list(args.bank_statement),
             "template": args.template,
             "project_mapping": args.project_mapping,
             "formula_chain": args.formula_chain,
@@ -3053,20 +3375,26 @@ def fill_noncurrent_placeholders(wb, bs_values: dict[str, float]) -> list[dict[s
     for account_name, item in NONCURRENT_ASSET_SHEET_MAPPING.items():
         if account_name == "固定资产":
             continue
+        value = round(float(bs_values.get(item["bs_line"], 0.0) or 0.0), 2)
+        if abs(value) < 0.005:
+            continue
         placeholders.append(
             {
                 "sheet": item["sheet"],
                 "account_name": account_name,
-                "value": bs_values.get(item["bs_line"], 0.0),
+                "value": value,
                 "reason": "placeholder_only_noncurrent_account_requires_detail_source",
             }
         )
     for account_name, item in NONCURRENT_LIABILITY_SHEET_MAPPING.items():
+        value = round(float(bs_values.get(item["bs_line"], 0.0) or 0.0), 2)
+        if abs(value) < 0.005:
+            continue
         placeholders.append(
             {
                 "sheet": item["sheet"],
                 "account_name": account_name,
-                "value": bs_values.get(item["bs_line"], 0.0),
+                "value": value,
                 "reason": "placeholder_only_noncurrent_liability_requires_detail_source",
             }
         )
@@ -3165,6 +3493,8 @@ def stage2_postfix_key_sheets(
             "H39": 0.0,
             "I39": 0.0,
         }.items():
+            if ws[cell_ref].data_type == 'f':
+                continue
             ws[cell_ref] = value
             writes.append({"sheet": "资产负债表", "cell": cell_ref, "value": value})
     return writes
@@ -3220,10 +3550,14 @@ def apply_counterparty_balance_rows(
 def normalize_stage2_rows(
     sheet_plan: list[tuple[str, list[dict[str, Any]], str]],
     bs: dict[str, Any],
+    bank_account_rows: list[dict[str, Any]] | None = None,
 ) -> list[tuple[str, list[dict[str, Any]], str]]:
     normalized = []
     for sheet_name, rows, kind in sheet_plan:
         if sheet_name == "银行存款":
+            if bank_account_rows:
+                normalized.append((sheet_name, list(bank_account_rows), kind))
+                continue
             amount = abs(float(bs["values"].get("货币资金", 0.0) or 0.0))
             bank_rows = []
             if amount >= 0.005:
@@ -3273,9 +3607,10 @@ def stage2_fill_detail_pages_from_trial_balance(
     protection: dict[str, Any],
     registry: dict[str, Any],
     counterparty_balance_rows: list[dict[str, Any]] | None = None,
+    bank_account_rows: list[dict[str, Any]] | None = None,
 ) -> tuple[list[tuple[str, list[dict[str, Any]], str]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     counterparty_balance_rows = counterparty_balance_rows or []
-    sheet_plan = normalize_stage2_rows(sheet_plan, bs)
+    sheet_plan = normalize_stage2_rows(sheet_plan, bs, bank_account_rows)
 
     # Rebuild stage-2 rows by page type.
     six_detail_sheets = {"应收账款", "预付账款", "其他应收款", "应付账款", "预收账款", "其他应付款"}
@@ -3316,6 +3651,9 @@ def stage2_fill_detail_pages_from_trial_balance(
     rebuilt = []
     for sheet_name, rows, kind in sheet_plan:
         if sheet_name == "银行存款":
+            if bank_account_rows:
+                rebuilt.append((sheet_name, list(bank_account_rows), kind))
+                continue
             rebuilt.append(
                 (
                     sheet_name,

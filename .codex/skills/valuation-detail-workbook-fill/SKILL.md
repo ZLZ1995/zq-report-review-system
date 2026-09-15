@@ -1,6 +1,6 @@
 ---
 name: valuation-detail-workbook-fill
-description: Build or update a Chinese asset-based valuation detail workbook and declaration workbook from a subject-balance workbook, balance sheet, and optional journals or detailed ledgers. Use when Codex needs to produce a complete first-pass 评估申报表/评估明细表 from 科目余额表 and 财务报表, including placeholder book-value population for asset classes without detailed schedules yet, cleanup of template residue in zero-balance sections, bad-debt or impairment footer handling, and later incremental replacement of placeholder sections when supplementary detail files arrive.
+description: Build or update a Chinese asset-based valuation detail workbook and declaration workbook from a balance sheet, subject-balance workbook, and optional journals or detailed ledgers. Use when Codex needs to produce a 评估申报表/评估明细表 through a balance-sheet-driven scoped workflow, including a lightweight single-asset route, detail-page filling only for non-zero accounts, controlled placeholder handling, formula/link preservation, and later incremental replacement when supplementary detail files arrive.
 ---
 
 # Valuation Detail Workbook Fill
@@ -10,7 +10,8 @@ description: Build or update a Chinese asset-based valuation detail workbook and
 - 使用用户确认的固定模板，运行时不允许更换模板；所有生成数据回填到该模板副本的合法输入区域。
 - 模板原件不修改；保留模板样式、工作表结构、公式、链接和固定页脚，继续执行下述保护与交付门禁。
 - 绑定缺失、模板哈希不符或布局不匹配时停止，不扫描旧项目产物充当模板。
-- 当前仓库配置指向旧项目临时工作簿，尚不能作为已确认的正式模板。确认正式模板并绑定之前，客户端禁止生成。
+- 平台通过本目录 `template.lock.json` 绑定 `assets/template.xlsx`，不得使用旧项目临时工作簿配置替代；缺少绑定或哈希校验失败时禁止生成。
+- 平台接入先运行 `scripts/prepare_execution_scope.py`，然后按范围扫描模板输入区。当前银行对账单入口支持标准表头 XLSX；余额不一致或资料不足时阻断，不用报表金额替代对账单证据。用户要求原公式不可更改，因此平台不自动应用下文的可选公式保护改写。
 
 ### 模板占位与执行替换
 
@@ -33,6 +34,19 @@ Produce a complete first-pass valuation declaration workbook from:
 
 The first pass must be complete enough to circulate internally even when some non-current-asset detail files are still missing.
 
+## Mandatory Scope-First Routing
+
+The default route is scope-first, not full-template processing. Follow [scope_first_execution.md](references/scope_first_execution.md).
+
+1. Read the formal balance sheet first and complete the accounting-statement reconciliation required for the selected reporting date.
+2. Identify non-zero asset and liability lines. Equity lines still populate the balance sheet, but they do not activate appraisal detail pages.
+3. Map only those non-zero lines to detail sheets, then add the smallest summary/formula dependency closure needed to validate them.
+4. Write `execution_scope.json` before any detail-page write. It must state the selected mode, active balance-sheet lines, active detail sheets, required dependency sheets, and fallback reason if full-template processing is selected.
+5. Default to `scoped_standard`. Select `single_asset_lightweight` when only one supported asset family is non-zero and its detail evidence is complete; bank-only engagements with a usable bank statement are the primary case.
+6. Use `full_template` only when the user explicitly requests it, the template is being structurally migrated, or required formula dependencies cannot be closed safely. Record the exact reason; complexity alone is not a reason.
+
+In scoped modes, do not initialize, clean, recalculate, or review unrelated detail-sheet families. Unrelated sheets may be hidden after structural checks. Inspect or repair an out-of-scope sheet only when its existing formula error propagates into a required visible summary, and keep that intervention narrowly limited to the root error.
+
 ## Project-Local Mapping Rule
 
 This skill uses a project-local mapping workflow.
@@ -40,7 +54,7 @@ This skill uses a project-local mapping workflow.
 - Within one project, TB code to account meaning can be treated as stable evidence.
 - Across projects, TB code meaning must never be assumed to be reusable.
 - The reusable part is the workflow that builds `project_mapping.json`, not a cross-project fixed code table.
-- Every run must build or validate a project-local mapping first, then use that mapping to drive:
+- Every run must build or validate a project-local mapping for the non-zero balance-sheet scope first, then use that mapping to drive:
   - detail-page routing
   - balance-sheet sync
   - summary-chain sync
@@ -62,7 +76,7 @@ Do not hardcode a cross-project rule such as `某个编号前缀 always maps to 
 - Do not depend on desktop Excel/WPS `Save` or `SaveAs` for unattended production runs. The skill must remain fully automatic and must not trigger modal confirmation dialogs.
 - Generate and modify a workbook in an ASCII-named staging path first, then publish to the final Chinese filename with filesystem copy or rename after validation passes.
 - Do not write concurrently to the same `.xlsx`; after each save, validate the `.xlsx` as a zip before any further read/write step.
-- Never leave old-project residue in sections whose source balance is zero for the current project.
+- Never expose old-project residue in in-scope or visible sections. Out-of-scope sheets should normally be hidden and left structurally untouched; clear them only when they enter the required dependency closure or the user requests a full-template cleanup.
 - Never fabricate fixed-asset, intangible-asset, long-term-equity-investment, or construction-in-progress detail rows.
 - Never fabricate any accounting fact, counterparty, asset item, amount, date, certificate number, PO number, or business description. All detail content and all numeric values must come from the user-provided `科目余额表`, `序时账`, `资产负债表`, or later supplementary source files explicitly provided by the user.
 - If a class has only total-book-value evidence and no detail schedule yet, create a placeholder state rather than fake detail.
@@ -135,18 +149,19 @@ Required field meaning:
 
 Use a pure file-level automation route.
 
-1. Copy the template workbook to an ASCII-named staging file.
-2. Read sources with `openpyxl` or other non-UI readers.
-3. Write workbook content through OOXML-safe file edits or tightly scoped workbook-library writes.
-4. Recompute or explicitly populate the key reconciliation chain in Python instead of depending on desktop Excel or WPS recalculation.
-5. Validate the staging workbook.
-6. Publish the validated staging workbook to the final Chinese filename with filesystem copy or rename only.
+1. Read and reconcile the formal balance sheet, then create `execution_scope.json`.
+2. Copy the template workbook to an ASCII-named staging file.
+3. Read only the source data needed by the selected scope with `openpyxl` or other non-UI readers.
+4. Write workbook content through OOXML-safe file edits or tightly scoped workbook-library writes.
+5. Recompute or explicitly populate only the required reconciliation dependency chain in Python instead of depending on desktop Excel or WPS recalculation.
+6. Validate the staging workbook within the selected scope and dependency closure.
+7. Publish the validated staging workbook to the final Chinese filename with filesystem copy or rename only.
 
 Do not treat desktop Excel or WPS as the production write path. At most, use them as an optional read-only inspection fallback when debugging.
 
-### Stage 1: Scan Sources
+### Stage 1: Determine Scope Before Template Work
 
-Build a page-handling plan from the source workbooks.
+Build the balance-sheet scope and page-handling plan before scanning or modifying detail-sheet families. Only in-scope pages and their required dependency sheets belong in the plan.
 
 Classify each workbook section into one of three states:
 
@@ -155,11 +170,11 @@ Classify each workbook section into one of three states:
 2. `placeholder_only`
    - The source has only aggregate book value and no supporting detail schedule yet.
 3. `zero_balance_cleanup`
-   - The source class balance is zero, so the page must be cleared of historical residue.
+   - Use only for a zero-balance page that is in the required dependency closure, contains visible residue, or is included by an explicit full-template cleanup request.
 4. `not_in_scope_hide`
    - The account or page is not involved in the current source books and should be hidden in the delivered workbook after structural validation.
 
-Always output a machine-readable page plan before writing. The page plan should contain:
+Always output `execution_scope.json` and a machine-readable page plan before detail writing. The page plan should contain:
 
 - source account code or report line
 - target workbook sheet
@@ -217,7 +232,7 @@ Rules:
 
 Rules:
 
-- Clear all historical body content in the relevant sheet group.
+- Do not sweep every zero-balance family. Clear historical body content only in the scoped sheet group or where residue affects a required visible dependency.
 - Keep sheet titles, page headers, footer formulas, merged-cell layout, return links, and summary formulas intact.
 - Clear old project text such as device IDs, PO numbers, equipment names, trademarks, patent numbers, historical asset codes, or unrelated companies.
 - If a page is outside current scope entirely, prefer hiding it in the delivered workbook after checks pass.
@@ -267,6 +282,7 @@ Every run must produce:
 22. `tax_extract_report.json`
 23. `reclassification_analysis.json`
 24. `delivery_check_report.json`
+25. `execution_scope.json`
 
 `missing_materials.json` should list concrete file expectations, for example:
 
@@ -281,7 +297,7 @@ Before declaring completion, validate:
 
 - The workbook zip structure is valid after the final save.
 - The output `资产负债表` ties exactly to the formal financial statement when one is provided.
-- No `#REF!` in touched sheets.
+- No `#REF!` in touched sheets, visible sheets, or the required dependency closure.
 - No old-project identifiers remain in `zero_balance_cleanup` sheets.
 - Placeholder-only sheets contain no fabricated detail rows.
 - Deduction rows such as `坏账准备` or `减值准备` are filled with source amount or `0`, not left blank.
@@ -296,7 +312,7 @@ Before declaring completion, validate:
 - The `分类汇总` difference column must reconcile to zero or template-allowed blank states after placeholder placement and supplemental refills.
 - When placeholder-only pages feed summary sheets, the corresponding `资产负债表` or aggregate placeholder writes must be sufficient to avoid `分类汇总` difference failures.
 - Hidden sheets or hidden rows must not break formulas, links, or required navigation.
-- The delivered workbook should expose only in-scope account pages plus required structural summary sheets.
+- The delivered workbook should expose only in-scope account pages plus required structural summary sheets; hidden out-of-scope sheets do not require full evaluation unless they feed the selected dependency closure.
 - Any account present in either source book must remain visible in the delivered workbook, even if it is only a placeholder-only page.
 - If `分类汇总!J4` is not `OK`, `unreconciled_reasons.json` must explain the exact reason, affected rows, current source evidence boundary, and required missing files or structural blockers.
 - When the sources do not support a value, leave it blank, placeholder-only, or explicitly unreconciled; do not guess.
@@ -319,18 +335,22 @@ Before declaring completion, validate:
 - Always read and relay `user_feedback.md` to the user, including unresolved locations, differences, required materials and publication status. JSON reports alone are not user feedback. Accepted blank journal fields and authorized placeholder-only pages must also be disclosed.
 
 - Use pure file-level workbook automation as the default writer.
+- In `single_asset_lightweight`, validate stage-1 balance-sheet inputs directly and perform at most one final workbook recalculation. Do not run a desktop full-workbook recalculation merely to decide which pages are in scope.
+- In `scoped_standard`, restrict structure scanning, cleanup, semantic review, and formula-error review to active pages plus their dependency closure.
+- A switch to `full_template` must be visible in `execution_scope.json` with a concrete structural reason or an explicit user request.
 - Prefer one of these routes:
   - scoped `openpyxl` writes when they do not break workbook structure
   - direct OOXML sheet-XML patching when template preservation is fragile
 - Do not rely on desktop Excel or WPS save prompts, recalculation prompts, or UI suppression flags for final delivery.
 - For slow cleanup of large sheets, clear only the true body range instead of scanning the entire used range.
 - Compute and validate the key summary-chain and `分类汇总` difference-chain in Python so acceptance does not depend on a desktop spreadsheet application.
-- Prefer page-family cleanup rules:
+- Prefer scoped page-family cleanup rules:
   - fixed-asset family
   - intangible-asset family
   - receivable or payable family
 - Add project-visible semantic anomaly checks before publish, not only after publish.
 - Prefer failing fast with explicit anomaly reports over silently forcing business labels into settlement-object columns.
+- Never blanket-wrap formulas with `IFERROR`. A narrow guard is allowed only for the specific out-of-scope hidden leaf formula whose pre-existing division error propagates into a required visible summary; preserve the original formula inside the guard and record the affected cell.
 
 ## Strict Execution Reference
 

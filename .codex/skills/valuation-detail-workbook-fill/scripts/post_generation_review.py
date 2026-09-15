@@ -39,6 +39,10 @@ def numeric(value):
 
 def equal(a, b, kind='text'):
     if kind == 'amount':
+        if a is None and numeric(b) and abs(b) < 0.005:
+            return True
+        if b is None and numeric(a) and abs(a) < 0.005:
+            return True
         return numeric(a) and numeric(b) and abs(a - b) < 0.005
     if kind == 'date':
         def day(v):
@@ -89,7 +93,10 @@ def source_fingerprints(paths):
         if path:
             p = Path(path)
             with p.open('rb') as stream:
-                result[str(p)] = hashlib.file_digest(stream, 'sha256').hexdigest()
+                hasher = hashlib.sha256()
+                for block in iter(lambda: stream.read(1024 * 1024), b''):
+                    hasher.update(block)
+                result[str(p)] = hasher.hexdigest()
     return result
 
 
@@ -113,6 +120,31 @@ def strict_journal_candidates(sheet, party, journals, pipeline):
             continue
         accepted.append(row)
     return accepted
+
+
+def review_bank_sources(output, paths, bs_values, written_rows, pipeline):
+    """Reopen bank evidence; writer records select locations, never expected amounts."""
+    checks, problems = [], []
+    accounts, _ = pipeline.load_bank_statement_evidence(paths, bs_values)
+    by_account = {item['sub_name']: item for item in accounts}
+    for written in written_rows:
+        if written['_sheet'] != '银行存款':
+            continue
+        sheet, row = written['_sheet'], written['_written_row']
+        account = pipeline.clean(output[sheet][f'C{row}'].value)
+        original = by_account.get(account)
+        if original is None:
+            problems.append(issue('source_unverified', sheet=sheet, cell=f'C{row}'))
+            continue
+        for col, field, kind in [('B', 'counterparty', 'text'), ('C', 'sub_name', 'text'), ('I', 'book_value', 'amount')]:
+            entry = {'sheet': sheet, 'cell': f'{col}{row}', 'kind': kind,
+                     'source_evidence': original['evidence_sources']}
+            actual = output[sheet][entry['cell']].value
+            checks.append({**entry, 'expected': original[field], 'actual': actual})
+            problem = compare(entry, original[field], actual)
+            if problem:
+                problems.append(problem)
+    return checks, problems
 
 
 def review_pipeline_sources(workbook, args, pipeline, written_rows, initial_hashes):
@@ -144,6 +176,14 @@ def review_pipeline_sources(workbook, args, pipeline, written_rows, initial_hash
         metadata = pipeline.select_latest_statement(bs_path)
         # Prefer the original financial statement over an intermediate normalization.
         bs = pipeline.parse_balance_sheet(Path(metadata['source']))
+        if getattr(args, 'bank_statement', None):
+            bank_checks, bank_problems = review_bank_sources(
+                output, args.bank_statement, bs['values'], written_rows, pipeline)
+            checks.extend(bank_checks)
+            problems.extend(bank_problems)
+            failed_bank = {(x.get('sheet'), x.get('cell')) for x in bank_problems}
+            verified_cells.update((x['sheet'], x['cell']) for x in bank_checks
+                                  if (x['sheet'], x['cell']) not in failed_bank)
         journals = pipeline.load_journal_rows(Path(args.journal) if args.journal else None)
         cp = pipeline.load_counterparty_balance_rows(Path(args.counterparty_balance) if args.counterparty_balance else None)
         tb = pipeline.load_trial_balance_rows(Path(args.trial_balance))

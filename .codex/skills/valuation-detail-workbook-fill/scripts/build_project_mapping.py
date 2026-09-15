@@ -7,7 +7,10 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-import xlrd
+try:
+    import xlrd
+except ImportError:
+    xlrd = None
 from openpyxl import load_workbook
 from detail_mapping_config import (
     CURRENT_LIABILITY_SHEET_MAPPING,
@@ -114,6 +117,8 @@ def parse_trial_balance(path: Path) -> list[dict[str, Any]]:
 
 def parse_balance_sheet(path: Path) -> dict[str, float]:
     if path.suffix.lower() == ".xls":
+        if xlrd is None:
+            raise RuntimeError("xlrd_required_for_legacy_xls")
         book = xlrd.open_workbook(path.as_posix())
         sheet = book.sheet_by_index(0)
         values: dict[str, float] = {}
@@ -175,15 +180,7 @@ def parse_balance_sheet(path: Path) -> dict[str, float]:
 
 
 def discover_customer_detail_workbook(trial_balance_path: Path) -> Path | None:
-    search_roots = [trial_balance_path.parent]
-    search_roots.extend(trial_balance_path.parents[:4])
-    seen: set[Path] = set()
-    for root in search_roots:
-        if root in seen or not root.exists():
-            continue
-        seen.add(root)
-        for match in root.rglob("客商明细表.xlsx"):
-            return match
+    # Kept for caller compatibility; directory proximity is not user consent.
     return None
 
 
@@ -453,12 +450,13 @@ def main() -> None:
     parser.add_argument("--trial-balance", required=True)
     parser.add_argument("--balance-sheet", required=True)
     parser.add_argument("--journal")
+    parser.add_argument("--customer-detail", help="Explicitly selected customer detail workbook only")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
 
-    tb_rows = parse_trial_balance(Path(args.trial_balance))
     bs_values = parse_balance_sheet(Path(args.balance_sheet))
-    customer_detail_workbook = discover_customer_detail_workbook(Path(args.trial_balance))
+    tb_rows = parse_trial_balance(Path(args.trial_balance))
+    customer_detail_workbook = Path(args.customer_detail) if args.customer_detail else None
     customer_overrides = load_customer_detail_overrides(customer_detail_workbook)
     account_mappings = []
     for row in tb_rows:

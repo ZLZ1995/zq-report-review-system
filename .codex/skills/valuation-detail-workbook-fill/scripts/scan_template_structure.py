@@ -136,10 +136,16 @@ def main() -> None:
     parser.add_argument("--template", required=True)
     parser.add_argument("--layout-output", required=True)
     parser.add_argument("--protection-output", required=True)
+    parser.add_argument('--execution-scope')
     args = parser.parse_args()
 
     wb = load_workbook(Path(args.template))
     selected_sheets = [name for name in wb.sheetnames if name in PREFERRED_SHEETS]
+    if args.execution_scope:
+        scope = json.loads(Path(args.execution_scope).read_text('utf-8'))
+        if scope['selected_mode'] != 'full_template':
+            selected = set(scope['active_detail_sheets']) | set(scope['required_dependency_sheets'])
+            selected_sheets = [name for name in wb.sheetnames if name in selected]
     layout_map = {
         "template": str(Path(args.template)),
         "sheet_order": selected_sheets,
