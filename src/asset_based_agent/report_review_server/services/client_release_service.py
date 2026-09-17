@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import re
@@ -10,8 +12,16 @@ from collections.abc import Mapping
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from ..models import ClientRelease, ClientReleaseAudit
+DOMAIN = b'ZQ-CLIENT-RELEASE-v1\x00'
+PUBLIC_KEYS = {'zq-release-20260917': base64.b64decode('GwMV2oe4mWUq9MQDsfkeGLRMGWFoMhTiAngTSUrsqlU=')}
+
+
+def canonical_payload(payload: dict[str, object]) -> bytes:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("ascii")
 from .auth_service import ServiceError
 
 _STATUSES = frozenset({"draft", "canary", "stable", "withdrawn"})
@@ -27,8 +37,15 @@ def _manifest(raw: Mapping[str, object]) -> tuple[str, dict[str, object], str]:
         raise ServiceError("invalid_release_manifest", "发布清单格式无效。", 422)
     payload = raw["payload"]
     assert isinstance(payload, dict)
-    if set(payload) != _REQUIRED_PAYLOAD or not isinstance(raw.get("signature"), str) or not raw["signature"]:
+    signature_text = raw.get("signature")
+    key_id = payload.get("key_id")
+    if set(payload) != _REQUIRED_PAYLOAD or not isinstance(signature_text, str) or not signature_text or not isinstance(key_id, str) or key_id not in PUBLIC_KEYS:
         raise ServiceError("invalid_release_manifest", "发布清单字段或签名无效。", 422)
+    try:
+        signature = base64.b64decode(signature_text, validate=True)
+        Ed25519PublicKey.from_public_bytes(PUBLIC_KEYS[key_id]).verify(signature, DOMAIN + canonical_payload(payload))
+    except (InvalidSignature, ValueError, TypeError, binascii.Error) as exc:
+        raise ServiceError("invalid_release_manifest", "发布清单签名校验失败。", 422) from exc
     version = payload.get("version")
     if not isinstance(version, str) or not re.fullmatch(r"\d+\.\d+\.\d+", version):
         raise ServiceError("invalid_release_manifest", "发布版本号无效。", 422)
