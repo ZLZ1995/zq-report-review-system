@@ -1,5 +1,12 @@
 # 执行账本
 
+## 2026-09-17 release sync evidence
+
+- Local release candidate was rebuilt in the isolated checkout `D:/ZQ-Acceptance/release-checkout` from the explicit 550-file manifest. The final staged set was 344 changed/added files; no user working-tree files were staged.
+- Release checkout targeted tests passed: 200 passed, 1 warning, exit 0 (`D:/ZQ-Acceptance/release-checkout-tests2`). The earlier full local regression remains 1280 passed (`D:/ZQ-Acceptance/r-3f89ea42c59140d8a3`).
+- Secret-pattern scan returned no match outside tests. Staged diff was checked after rebuilding the checkout; the first temporary copy was discarded because a formatting helper had written literal `\\n` text, so it was never committed.
+- GitHub branch pushed successfully: `codex/platform-sync-20260917`, commit `b43dc39`, remote `origin` = `https://github.com/ZLZ1995/zq-report-review-system.git`. Main was not overwritten. Zeabur has not been switched or redeployed yet; online `/api/v1/capabilities` remains 404 on the old Release 0.2.5 deployment.
+
 启动日期：2026-09-16。目标 active；未发布、未部署。所有passed必须附验证证据。
 
 ## 当前检查点
