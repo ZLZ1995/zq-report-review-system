@@ -9,3 +9,9 @@ def test_server_dockerfile_copies_shared_agent_package():
         / 'Dockerfile'
     ).read_text(encoding='utf-8')
     assert 'COPY src/asset_based_agent /app/src/asset_based_agent' in dockerfile
+
+
+def test_repository_root_has_server_build_fallback():
+    root_dockerfile = Path(__file__).resolve().parents[2] / 'Dockerfile'
+    assert root_dockerfile.is_file()
+    assert 'COPY src/asset_based_agent /app/src/asset_based_agent' in root_dockerfile.read_text(encoding='utf-8')
