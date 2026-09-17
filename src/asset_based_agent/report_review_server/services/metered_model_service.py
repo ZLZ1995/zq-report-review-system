@@ -239,6 +239,23 @@ class MeteredModelService:
             )
         )
         wallet = self.wallet_service.get_wallet(db, user_id, lock=True)
+        raced = db.scalar(
+            select(BalanceHold).where(
+                BalanceHold.user_id == user_id,
+                BalanceHold.client_request_id == client_request_id,
+            )
+        )
+        if raced is not None:
+            if raced.model_id != model_id:
+                raise ServiceError(
+                    "idempotency_conflict",
+                    "相同请求编号对应了不同模型。",
+                    409,
+                )
+            if commit:
+                db.commit()
+                db.refresh(raced)
+            return raced
         self._require_reconciled(db, user_id)
         active_holds = db.scalar(
             select(func.coalesce(func.sum(BalanceHold.reserved_amount), 0)).where(

@@ -1,5 +1,12 @@
 # 执行账本
 
+## 2026-09-18 PostgreSQL 钱包并发验收
+
+- 在隔离 WSL Ubuntu 24.04 中安装并启动 PostgreSQL 16.2，创建一次性 `zq_acceptance` 测试库；未连接或修改 Zeabur 生产数据库。迁移从空库连续升级到真实 head `0007_skill_releases`。
+- 首次真实并发探针稳定复现缺陷：同一 `client_request_id` 的 6 个并发预占只有 1 个成功，其余 5 个因 `uq_hold_user_request` 唯一约束抛出 `IntegrityError`；证据保留在探针失败输出中。测试先行新增 PostgreSQL 专项用例后，对钱包行加锁后的请求记录进行二次核对，使并发重放返回同一 hold，不新增冻结记录。
+- 修复后 PostgreSQL 专项 1/1 通过；完整探针中，同请求 6/6 返回同一 hold，两个 0.60 元请求竞争 1.00 元余额时仅一个成功，6 次并发 capture 只产生 1 条扣款流水，余额为 0.75000000。证据 `D:/ZQ-Acceptance/postgresql-wallet-concurrency.json`。
+- 邻近计费/核对/审核任务回归 43 passed、1 skipped；完整服务端回归 205 passed、1 skipped；限定 Ruff 与目标文件 Mypy 通过。跳过项仅为未提供 PostgreSQL URL 时的默认保护，本轮真实 PostgreSQL 专项已在 WSL 单独通过。G04-03 仍保留 `doing`，因为独立客户端进程间资源锁尚未验收，不能用钱包数据库并发替代该门禁。
+
 ## 2026-09-17 build identity follow-up
 
 - G09/G10 build identity hardening: `deploy/report_review_server/Dockerfile` and repository-root `Dockerfile` now accept `ARG REPORT_REVIEW_BUILD_SHA` and expose it as the runtime `REPORT_REVIEW_BUILD_SHA`; no JWT, provider key, or release private key is baked into either image.
@@ -647,7 +654,7 @@
 | G03-07 | doing | 钱包原子预占、模型实际usage归一、重试/切备用渠道账务幂等、取消与失败结算、过期hold处理；模型与路由价格仍不传客户端。 | 用量可信度27关联通过；未知费用核对、预算硬边界、并发与恢复仍待实现验证 |
 | G04-01 | passed | 项目树展开多个会话；新建、重命名、归档、未读及运行状态；从指定消息分叉，保存parent/fork与上下文快照。 | 项目树保持多项目同时展开，切换会话隔离草稿；后台运行/未读徽标不切换当前对话；新建、重命名、归档/恢复与指定消息分叉均接入UI和持久层。项目树/会话/消息分叉/徽标/分支上下文专项36项通过。 |
 | G04-02 | passed | 独立会话不继承旧附件/授权；分支只继承已完成事实引用，不复制执行中动作和写授权；成果引用固定版本。 | 分支快照仅保存来源消息哈希及锚点前已完成结果引用；草稿、附件选择、运行中动作和权限回执不复制。后代读取重验来源、成果哈希、路径和版本，跨账号、变更锚点及越权提升均拒绝。分支上下文/草稿/文件范围/权限专项39项通过。 |
-| G04-03 | doing | 客户端实际HTTP model2、DETAIL生成子进程office1、生成目录排他及等待取消已接；在途HTTP不因caller取消释放。服务端审核执行器固定单任务，标签排他已测。 | 客户端同时两个model租约可进入且第三个等待；服务端两个不同任务由单工作线程串行，24项资源锁/审核任务专项通过。本机 Office+WPS 并存场景分别完成真实 Excel 和强制 WPS 明细表生成，退出码0、来源/模板哈希不变、95 sheet交付门禁和1,322个汇总公式保护通过；结束后无本轮新建进程残留，测试前已有的 WPS 进程保持不动。证据 `D:/ZQ-Acceptance/office-wps-real-acceptance.json`。独立进程间锁和真实PostgreSQL钱包竞态仍待验证；本机无 PostgreSQL/Docker daemon，WSL 安装因软件源超时和旧包404失败，未连接生产库，证据 `D:/ZQ-Acceptance/postgresql-test-environment.json`，暂不签收。 |
+| G04-03 | doing | 客户端实际HTTP model2、DETAIL生成子进程office1、生成目录排他及等待取消已接；在途HTTP不因caller取消释放。服务端审核执行器固定单任务，标签排他已测。 | 客户端同时两个model租约可进入且第三个等待；服务端两个不同任务由单工作线程串行，24项资源锁/审核任务专项通过。本机 Office+WPS 并存场景分别完成真实 Excel 和强制 WPS 明细表生成，退出码0、来源/模板哈希不变、95 sheet交付门禁和1,322个汇总公式保护通过；结束后无本轮新建进程残留，测试前已有的 WPS 进程保持不动。证据 `D:/ZQ-Acceptance/office-wps-real-acceptance.json`。隔离 PostgreSQL 16.2 从空库迁移到 `0007_skill_releases`，真实并发验证同请求预占幂等、超额预占阻止和重复 capture 单次扣款全部通过，证据 `D:/ZQ-Acceptance/postgresql-wallet-concurrency.json`。独立客户端进程间资源锁仍待验证，暂不签收整项。 |
 | G05-01 | doing | 通用面板、地址/标签/导航、主页/书签、下载/冷恢复及用户弹窗已接；隐藏保留网站状态。 | 真实Qt及本机HTTP测试、928完整回归；真实站点和EXE未验收 |
 | G05-02 | doing | 账号/environment Profile及存储锁、导航/请求/弹窗/TLS拒绝策略；捕获仅ApplicationWorld窄通道，MainWorld无宿主入口。 | 合成页/真实本机HTTP/进程锁与928回归；真实TLS/复杂站点及EXE仍待验 |
 | G05-03 | doing | 捕获→内存加密候选→当前标签明确确认成功并同意→保存/更新已接；暂不/never/恢复、删除及多账号填充可用。 | 真实Qt合成DOM+DPAPI+UI通过；成功依赖用户确认，SPA/多步骤/真实提交导航/OA未验，不标完整通过 |
