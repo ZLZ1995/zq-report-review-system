@@ -7,6 +7,7 @@ Workers stay registered until their thread has actually terminated.
 from dataclasses import dataclass
 from threading import Event, RLock
 from typing import Protocol
+from uuid import uuid4
 
 
 class ManagedWorker(Protocol):
@@ -33,9 +34,12 @@ class TaskManager:
     def __init__(self) -> None:
         self._workers: dict[TaskBinding, ManagedWorker] = {}
         self._lock = RLock()
+        self._update_barrier: str | None = None
 
     def register(self, binding: TaskBinding, worker: ManagedWorker) -> None:
         with self._lock:
+            if self._update_barrier is not None:
+                raise ValueError('Client update preparation blocks new tasks')
             for existing, registered in self._workers.items():
                 if registered is worker or (
                     existing.owner == binding.owner
@@ -45,6 +49,19 @@ class TaskManager:
                 ):
                     raise ValueError('Task, session or worker already active')
             self._workers[binding] = worker
+
+    def acquire_update_barrier(self) -> str:
+        with self._lock:
+            if self._workers or self._update_barrier is not None:
+                raise ValueError('Client update requires idle task manager')
+            self._update_barrier = uuid4().hex
+            return self._update_barrier
+
+    def release_update_barrier(self, token: str) -> None:
+        with self._lock:
+            if not token or token != self._update_barrier:
+                raise ValueError('Stale or foreign update barrier')
+            self._update_barrier = None
 
     def active(self) -> tuple[TaskBinding, ...]:
         with self._lock:

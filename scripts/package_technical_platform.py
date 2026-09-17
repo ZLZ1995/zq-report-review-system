@@ -7,9 +7,15 @@ from zipfile import ZIP_DEFLATED, ZipFile
 from asset_based_agent.technical_platform.release_info import CLIENT_VERSION
 
 
-def main():
-    root = Path(__file__).resolve().parents[1]
+def main(root: Path | None = None):
+    explicit_root = root is not None
+    root = (root or Path(__file__).resolve().parents[1]).resolve()
     parent = root / 'dist/technical_platform'
+    if explicit_root and not parent.exists():
+        parent = root
+    output = parent / f'ZQ-Workspace-{CLIENT_VERSION}-Windows.zip'
+    if output.exists():
+        raise FileExistsError(output)
     folder = parent / 'ZQ技术平台'
     files = [p for p in folder.rglob('*') if p.is_file()]
     if any(p.suffix in {'.db', '.sqlite', '.sqlite3', '.log'} or p.name.startswith('.env') for p in files):
@@ -20,7 +26,6 @@ def main():
         bundle = folder / '_internal/builtin_skills' / skill
         lock = json.loads((bundle / 'template.lock.json').read_text(encoding='utf-8'))
         assert hashlib.sha256((bundle / lock['path']).read_bytes()).hexdigest() == lock['sha256']
-    output = parent / f'ZQ-Workspace-{CLIENT_VERSION}-Windows.zip'
     with ZipFile(output, 'w', ZIP_DEFLATED, compresslevel=6) as archive:
         for path in sorted(files):
             archive.write(path, path.relative_to(parent))

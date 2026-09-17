@@ -22,6 +22,8 @@ def collect_paths(root=ROOT, *, require_explicit=True):
     for folder in ("src/asset_based_agent/technical_platform", "src/asset_based_agent/report_review_app",
                    "tests/technical_platform", "tests/report_review_app", "tests/report_review_server"):
         paths.update((root / folder).rglob("*.py"))
+    paths.update((root / "tests/platform_update").glob("*.py"))
+    paths.update((root / "src/asset_based_agent/technical_platform/updates").glob("*.py"))
     for folder in ("docs/technical_platform",):
         paths.update((root / folder).glob("*.md"))
         paths.update((root / folder).glob("*.txt"))
@@ -44,6 +46,8 @@ def collect_paths(root=ROOT, *, require_explicit=True):
         "scripts/run_technical_platform.py", "scripts/build_technical_platform.py",
         "scripts/smoke_technical_platform_exe.py", "scripts/test_report_review_productization.py",
         "scripts/export_client_release.py", "assets/report_review/zq_app_icon.ico",
+        "scripts/run_client_updater.py", "scripts/run_client_launcher.py",
+        "scripts/create_release_signing_key.py", "scripts/sign_client_release.py",
         "src/asset_based_agent/__init__.py", "scripts/bootstrap_report_review_admin.py",
         "src/asset_based_agent/agent_contracts.py",
         "src/asset_based_agent/browser_contracts.py",

@@ -11,6 +11,20 @@ class ResourceLocks:
     def __init__(self) -> None:
         self._condition = Condition()
         self._used: dict[str, int] = {}
+        self._updating = False
+
+    @contextmanager
+    def update_barrier(self) -> Iterator[None]:
+        with self._condition:
+            if self._used or self._updating:
+                raise ValueError('Update requires idle execution resources')
+            self._updating = True
+        try:
+            yield
+        finally:
+            with self._condition:
+                self._updating = False
+                self._condition.notify_all()
 
     def busy(self) -> bool:
         with self._condition:
@@ -31,6 +45,8 @@ class ResourceLocks:
         limits = {name: self._capacity(name) for name in names}
         with self._condition:
             while True:
+                if self._updating:
+                    raise ValueError('Client update blocks new execution resources')
                 if cancel is not None and cancel.is_set():
                     raise TaskCancelled('等待执行资源时已取消，未启动下一步')
                 if all(self._used.get(name, 0) < limit for name, limit in limits.items()):

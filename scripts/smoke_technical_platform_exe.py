@@ -10,7 +10,8 @@ import win32process
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def main():
+def main(root: Path | None = None):
+    root = (root or ROOT).resolve()
     folder = ROOT / "dist/technical_platform/ZQ技术平台"
     rules = folder / "_internal/asset_based_agent/technical_platform/review_rules.txt"
     assert (

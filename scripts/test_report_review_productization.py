@@ -14,6 +14,7 @@ SUITES = (
     ROOT / "tests" / "report_review_app",
     ROOT / "tests" / "report_review_server",
     ROOT / "tests" / "technical_platform",
+    ROOT / "tests" / "platform_update",
 )
 
 
