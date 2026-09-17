@@ -230,3 +230,46 @@ class ClientReleaseResponse(BaseModel):
     sequence: int
     status: str
     manifest_sha256: str
+
+
+class SkillReleaseCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    skill_id: str = Field(pattern=r"^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$", max_length=80)
+    version: str = Field(pattern=r"^\d+\.\d+\.\d+$", max_length=32)
+    package_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    schema_version: Literal[1] = 1
+    adapter: Literal["report.review", "review.preflight"]
+    capabilities: list[Literal["read_selected_files", "generate_artifacts"]] = Field(
+        min_length=1, max_length=2
+    )
+    minimum_client_version: str = Field(pattern=r"^\d+\.\d+\.\d+$", max_length=32)
+    evidence_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    test_report_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def validate_capabilities(self) -> SkillReleaseCreateRequest:
+        if len(set(self.capabilities)) != len(self.capabilities):
+            raise ValueError("capabilities must be unique")
+        allowed = ({"read_selected_files", "generate_artifacts"}
+                   if self.adapter == "report.review" else {"read_selected_files"})
+        if set(self.capabilities) > allowed or "read_selected_files" not in self.capabilities:
+            raise ValueError("adapter capabilities are invalid")
+        return self
+
+
+class SkillReleaseTransitionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: Literal["approved", "stable", "withdrawn"]
+
+
+class SkillReleaseResponse(BaseModel):
+    release_id: str
+    skill_id: str
+    version: str
+    package_sha256: str
+    schema_version: int
+    adapter: str
+    capabilities: list[str]
+    minimum_client_version: str
+    status: str

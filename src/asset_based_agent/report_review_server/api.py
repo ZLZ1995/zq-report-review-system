@@ -57,6 +57,9 @@ from .schemas import (
     ReviewJobCreateRequest,
     ReviewJobEventResponse,
     ReviewJobResponse,
+    SkillReleaseCreateRequest,
+    SkillReleaseResponse,
+    SkillReleaseTransitionRequest,
     TokenResponse,
     UserResponse,
 )
@@ -68,6 +71,7 @@ from .services.model_admin_service import ModelAdminService
 from .services.provider_gateway import HttpProviderClient
 from .services.review_job_executor import ReviewJobExecutor
 from .services.review_job_service import ReviewJobService
+from .services.skill_release_service import SkillReleaseService
 from .services.skill_routing import RoutePlan, RouteRequest, route_skill
 from .services.task_planning import propose_plan
 from .services.task_understanding import understand_task
@@ -121,6 +125,7 @@ def create_app(
     app.state.auth_service = AuthService(actual_settings)
     app.state.wallet_service = WalletService()
     app.state.client_release_service = ClientReleaseService()
+    app.state.skill_release_service = SkillReleaseService()
     app.state.model_admin_service = ModelAdminService(
         SecretCipher(actual_settings.encryption_key_bytes())
     )
@@ -182,6 +187,7 @@ def create_app(
             'review_cancel': ('/api/v1/review-jobs/{job_id}/cancel', 'POST'),
             'review_events': ('/api/v1/review-jobs/{job_id}/events', 'GET'),
             'client_release': ('/api/v1/client-releases/current', 'GET'),
+            'skill_releases': ('/api/v1/skill-releases', 'GET'),
         }
         return {'schema_version': 1, 'protocol_version': 1,
                 'build_sha': actual_settings.build_sha,
@@ -209,6 +215,36 @@ def create_app(
         request.app.state.auth_service.require_admin(context)
         return request.app.state.client_release_service.transition(db, admin_user_id=context.user.user_id,
                                                                     release_id=release_id, status=payload.status)
+
+    @app.get('/api/v1/skill-releases', response_model=list[SkillReleaseResponse])
+    def list_stable_skill_releases(request: Request, db: Session = Depends(get_db)):
+        return request.app.state.skill_release_service.list_stable(db)
+
+    @app.post('/api/v1/admin/skill-releases', response_model=SkillReleaseResponse, status_code=201)
+    def create_skill_release(payload: SkillReleaseCreateRequest, request: Request,
+                             context: AuthContext = Depends(get_context),
+                             db: Session = Depends(get_db)):
+        request.app.state.auth_service.require_admin(context)
+        return request.app.state.skill_release_service.create(
+            db, admin_user_id=context.user.user_id, payload=payload,
+        )
+
+    @app.get('/api/v1/admin/skill-releases', response_model=list[SkillReleaseResponse])
+    def list_admin_skill_releases(request: Request, context: AuthContext = Depends(get_context),
+                                  db: Session = Depends(get_db)):
+        request.app.state.auth_service.require_admin(context)
+        return request.app.state.skill_release_service.list_admin(db)
+
+    @app.post('/api/v1/admin/skill-releases/{release_id}/transition',
+              response_model=SkillReleaseResponse)
+    def transition_skill_release(release_id: str, payload: SkillReleaseTransitionRequest,
+                                 request: Request, context: AuthContext = Depends(get_context),
+                                 db: Session = Depends(get_db)):
+        request.app.state.auth_service.require_admin(context)
+        return request.app.state.skill_release_service.transition(
+            db, admin_user_id=context.user.user_id, release_id=release_id,
+            status=payload.status,
+        )
 
     @app.post("/api/v1/auth/login", response_model=TokenResponse)
     def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)):

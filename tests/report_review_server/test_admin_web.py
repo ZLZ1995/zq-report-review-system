@@ -12,7 +12,8 @@ def test_billing_page_and_browser_behavior(client):
     runtime = shutil.which('node')
     assert runtime, 'Node.js is required for shipped admin JavaScript behavior tests'
     root = Path(__file__).resolve().parents[2]
-    for name in ['test_admin_billing_ui.cjs', 'test_admin_discovery_ui.cjs']:
+    for name in ['test_admin_billing_ui.cjs', 'test_admin_discovery_ui.cjs',
+                 'test_admin_skill_release_ui.cjs']:
         result = subprocess.run([runtime, str(Path(__file__).with_name(name))], cwd=root,
                                 capture_output=True, text=True, encoding='utf-8', timeout=30, check=False)
         assert result.returncode == 0, result.stdout + result.stderr
@@ -29,6 +30,8 @@ def test_admin_assets_are_independent_and_restrict_scripts(client):
     assert "localStorage" not in script
     assert "innerHTML" not in script
     assert client.get("/admin/style.css").status_code == 200
+    assert "skill-releases" in page.text
+    assert "Skill 版本治理" in page.text
 
 
 def test_overview_requires_admin_and_never_exposes_password(client):

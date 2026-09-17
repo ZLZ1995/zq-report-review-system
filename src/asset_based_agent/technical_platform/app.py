@@ -990,9 +990,15 @@ class PlatformWindow(QMainWindow):
                 else Qt.CheckState.Unchecked
             )
             self.files.addItem(row)
-        for item in self.store.memories(self.project_id):
-            row = QListWidgetItem(item["text"])
-            row.setData(Qt.ItemDataRole.UserRole, item["id"])
+        from .memory_service import MemoryService
+        from .ui.memory_panel import memory_label
+        records = (MemoryService(self.store).list_for_context(self.session_id)
+                   if self.session_id else [])
+        for item in records:
+            row = QListWidgetItem(memory_label(item))
+            row.setData(Qt.ItemDataRole.UserRole, item.id)
+            if item.status == "revoked":
+                row.setFlags(row.flags() & ~Qt.ItemFlag.ItemIsEnabled)
             self.memories.addItem(row)
         del blocker
         self.save_current_draft()
@@ -1803,17 +1809,23 @@ class PlatformWindow(QMainWindow):
     def add_memory(self):
         if not self.project_id:
             return
-        text, ok = QInputDialog.getText(
-            self, "确认项目偏好", "该偏好只适用于当前项目："
-        )
-        if ok and text.strip():
-            self.store.remember(self.project_id, text, confirmed=True)
+        from .memory_service import MemoryService
+        from .ui.memory_panel import MemoryEditorDialog
+        dialog = MemoryEditorDialog(allow_session=bool(self.session_id), parent=self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            value = dialog.value()
+            MemoryService(self.store).create(
+                **value, project_id=(None if value["scope"] == "user" else self.project_id),
+                session_id=(self.session_id if value["scope"] == "session" else None),
+                confirmed=True,
+            )
             self.refresh_details()
 
     def delete_memory(self):
         item = self.memories.currentItem()
         if item and self.project_id:
-            self.store.forget(self.project_id, item.data(Qt.ItemDataRole.UserRole))
+            from .memory_service import MemoryService
+            MemoryService(self.store).revoke(item.data(Qt.ItemDataRole.UserRole))
             self.refresh_details()
 
     def archive(self):

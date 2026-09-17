@@ -46,6 +46,42 @@ def test_real_review_adapter_uses_filtered_batches_and_step_idempotency(tmp_path
     assert len(calls) == 1
 
 
+def test_real_review_adapter_persists_normalized_issue_evidence(tmp_path):
+    from asset_based_agent.report_review_app.services.rule_registry import (
+        IssueCandidate,
+    )
+    from asset_based_agent.technical_platform.adapters.review import ReviewAdapter
+    from asset_based_agent.technical_platform.execution_plan import ExecutionPlan
+    from asset_based_agent.technical_platform.harness import execute_plan
+    from asset_based_agent.technical_platform.step_results import StepResults
+    from asset_based_agent.technical_platform.tool_dispatcher import ToolDispatcher
+
+    store, run, _ = make_run(tmp_path, remote=True)
+    plan = ExecutionPlan.model_validate(json.loads(store.run(run)['snapshot'])['execution_plan'])
+    source = json.loads(store.run(run)['snapshot'])['files'][0]
+    candidate = IssueCandidate(
+        source_file_id=source['id'], source_file_name=source['name'], category='synthetic',
+        risk_level='medium', location={'paragraph': 1}, description='Synthetic issue',
+        confidence=0.8, evidence_summaries=['paragraph 1'],
+    )
+    class Provider:
+        model_id = 'test'
+        skill_instructions = 'rules'
+        def set_client_job_id(self, _):
+            pass
+        def review_batches(self, batches, progress_callback=None):
+            return [candidate, candidate]
+    adapter = ReviewAdapter(store, run, provider=Provider(), progress=lambda _: None)
+    assert execute_plan(store, run, plan, ToolDispatcher({'review.execute': adapter}),
+                        threading.Event()) == 'succeeded'
+    with store.connect() as db:
+        identity = db.execute('SELECT id FROM execution_results WHERE run=?', (run,)).fetchone()[0]
+    result = StepResults(store).read(run, 'execute', identity)
+    assert len(result['issues']) == 1
+    assert result['issues'][0]['evidence_state'] == 'sufficient'
+    assert len(result['issues'][0]['fingerprint']) == 64
+
+
 def test_step_result_cannot_be_read_by_another_account(tmp_path):
     from asset_based_agent.technical_platform.step_results import StepResults
     from asset_based_agent.technical_platform.store import PlatformStore

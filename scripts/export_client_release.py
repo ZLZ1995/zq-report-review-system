@@ -63,6 +63,7 @@ def collect_paths(root=ROOT, *, require_explicit=True):
         "scripts/probe_admin_billing_browser.cjs",
         "tests/report_review_server/test_admin_billing_ui.cjs",
         "tests/report_review_server/test_admin_discovery_ui.cjs",
+        "tests/report_review_server/test_admin_skill_release_ui.cjs",
         "tests/agent_acceptance/README.md",
         "tests/agent_acceptance/corpus.py", "tests/agent_acceptance/scoring.py",
         "tests/agent_acceptance/cases/intent.jsonl",

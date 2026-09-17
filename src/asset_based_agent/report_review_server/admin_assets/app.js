@@ -7,6 +7,7 @@ let billingNextOffset = null;
 const billingUnknown = new Set();
 let billingBusy = false;
 let releaseItems = [];
+let skillReleaseItems = [];
 const el = id => document.getElementById(id);
 const notice = text => { el("notice").textContent = text; };
 function clearSession() {
@@ -21,7 +22,7 @@ function clearSession() {
   el("desk").hidden = true;
   el("logout").hidden = true;
   el("login-panel").hidden = false;
-  for (const id of ["users", "stats", "model-list", "route-list", "model-choice", "release-choice", "release-list"]) el(id).replaceChildren();
+  for (const id of ["users", "stats", "model-list", "route-list", "model-choice", "release-choice", "release-list", "skill-release-choice", "skill-release-list"]) el(id).replaceChildren();
   document.querySelectorAll("form").forEach(form => form.reset());
   document.querySelectorAll(".user-choice").forEach(select => select.replaceChildren());
   invalidateConnection();
@@ -32,6 +33,42 @@ function releaseLabel(item) {
 function updateReleaseButtons() {
   const selected = releaseItems.find(item => item.release_id === el("release-choice").value);
   for (const id of ["release-canary", "release-stable", "release-withdraw"]) el(id).disabled = !selected;
+}
+function skillReleaseLabel(item) {
+  return item.skill_id + " · " + item.version + " · " + item.status;
+}
+function updateSkillReleaseButtons() {
+  const selected = skillReleaseItems.find(item => item.release_id === el("skill-release-choice").value);
+  el("skill-release-approve").disabled = !selected || !["draft", "withdrawn"].includes(selected.status);
+  el("skill-release-stable").disabled = !selected || selected.status !== "approved";
+  el("skill-release-withdraw").disabled = !selected || selected.status === "withdrawn";
+}
+async function refreshSkillReleases() {
+  const data = await api("/admin/skill-releases");
+  skillReleaseItems = Array.isArray(data) ? data : [];
+  const choice = el("skill-release-choice");
+  choice.replaceChildren();
+  option(choice, "", skillReleaseItems.length ? "请选择 Skill 版本" : "暂无 Skill 版本");
+  const list = el("skill-release-list");
+  list.replaceChildren();
+  for (const item of skillReleaseItems) {
+    option(choice, item.release_id, skillReleaseLabel(item));
+    const p = document.createElement("p");
+    p.textContent = skillReleaseLabel(item) + " · 包 SHA256 " + item.package_sha256;
+    list.append(p);
+  }
+  updateSkillReleaseButtons();
+}
+async function transitionSkillRelease(status) {
+  const releaseId = el("skill-release-choice").value;
+  const selected = skillReleaseItems.find(item => item.release_id === releaseId);
+  if (!selected || !confirm("确认将 " + selected.skill_id + " " + selected.version + " 设为 " + status + "？")) return;
+  for (const id of ["skill-release-approve", "skill-release-stable", "skill-release-withdraw"]) el(id).disabled = true;
+  try {
+    await api("/admin/skill-releases/" + encodeURIComponent(releaseId) + "/transition", "POST", {status});
+    notice("Skill 版本状态已更新。");
+    await refreshSkillReleases();
+  } catch (error) { notice(error instanceof TypeError ? "网络异常，请刷新核对状态。" : error.message); updateSkillReleaseButtons(); }
 }
 async function refreshReleases() {
   const data = await api("/admin/client-releases");
@@ -149,7 +186,7 @@ bind("login", async data => {
     try { await api("/auth/logout", "POST"); } finally { clearSession(); }
     throw new Error("仅支持已完成初始化的管理员账号。临时密码请先通过认证入口修改。");
   }
-  try { await refresh(); await refreshReleases(); } catch (error) { clearSession(); throw error; }
+  try { await refresh(); await refreshReleases(); await refreshSkillReleases(); } catch (error) { clearSession(); throw error; }
   el("desk").hidden = false; el("login-panel").hidden = true; el("logout").hidden = false;
   notice("已登录总控。凭据仅保存在当前页面内存中。");
 });
@@ -225,6 +262,15 @@ el("release-refresh").addEventListener("click", async () => { try { await refres
 el("release-canary").addEventListener("click", () => transitionRelease("canary"));
 el("release-stable").addEventListener("click", () => transitionRelease("stable"));
 el("release-withdraw").addEventListener("click", () => transitionRelease("withdrawn"));
+bind("skill-release-create", data => save("/admin/skill-releases", "POST", {
+  ...data, schema_version: 1, adapter: "report.review",
+  capabilities: ["read_selected_files", "generate_artifacts"],
+}));
+el("skill-release-choice").addEventListener("change", updateSkillReleaseButtons);
+el("skill-release-refresh").addEventListener("click", async () => { try { await refreshSkillReleases(); notice("Skill 列表已刷新。"); } catch (error) { notice(error.message); } });
+el("skill-release-approve").addEventListener("click", () => transitionSkillRelease("approved"));
+el("skill-release-stable").addEventListener("click", () => transitionSkillRelease("stable"));
+el("skill-release-withdraw").addEventListener("click", () => transitionSkillRelease("withdrawn"));
 
 function billingReceipt(record) {
   el("billing-result").textContent = "核对回执：" + record.reconciliation_id +

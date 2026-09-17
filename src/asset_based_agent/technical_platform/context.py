@@ -7,19 +7,17 @@ from hashlib import sha256
 from .store import PlatformStore
 
 
-def build_context(store: PlatformStore, session_id: str, current: str) -> dict:
-    session = store.session(session_id)
+def build_context(store: PlatformStore, session_id: str, current: str, *, clock=None) -> dict:
+    store.session(session_id)
     # Bound retrieval, not just the eventual prompt. No assistant/file output is reused.
     with store.connect() as db:
         history = [dict(row) for row in db.execute(
             "SELECT id,substr(text,1,800) AS text,(text=?) AS is_current FROM messages "
             "WHERE session=? AND role='user' ORDER BY id DESC LIMIT 7", (current, session_id)
         )]
-        memories = [dict(row) for row in db.execute(
-            "SELECT id,text FROM memories WHERE project=? AND active=1 "
-            "AND source='explicit_user' AND length(text)<=2000 "
-            "ORDER BY created DESC,id DESC LIMIT 16", (session["project"],)
-        )]
+    from .memory_retrieval import retrieve_memories
+    kwargs = {} if clock is None else {"clock": clock}
+    memories = retrieve_memories(store, session_id, **kwargs)
     if history and history[0]["is_current"]:
         history.pop(0)
     for item in history:
@@ -27,11 +25,14 @@ def build_context(store: PlatformStore, session_id: str, current: str) -> dict:
     history = list(reversed(history[:6]))
     selected = []
     remaining = 2500
-    for item in memories:
-        if len(item["text"]) > remaining:
+    for record in memories:
+        if len(record.text) > remaining:
             continue
-        selected.append({**item, "version": sha256(item["text"].encode("utf-8")).hexdigest()})
-        remaining -= len(item["text"])
+        selected.append({"id": record.id, "text": record.text, "scope": record.scope,
+                         "kind": record.kind, "source": record.source,
+                         "version": sha256((str(record.version) + "\0" + record.text)
+                                           .encode("utf-8")).hexdigest()})
+        remaining -= len(record.text)
     return fit_context(current, {"history": history, "memories": selected,
             "memory_ids": [item["id"] for item in selected],
             "prior_results_available": False,

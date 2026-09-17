@@ -4,6 +4,7 @@ import os
 import tempfile
 from pathlib import Path
 
+from ..report_review_app.domain.enums import IssueStatus
 from ..report_review_app.domain.models import AuditProject, ReviewIssue
 from ..report_review_app.services.report_export_service import ReportExportService
 
@@ -27,14 +28,19 @@ def export_review(store, run_id: str, destination: Path) -> Path:
     issues = []
     for index, item in enumerate(result.get('issues', []), 1):
         pending = item.get('requires_verification') or '待核实' in item.get('description', '').split('】', 1)[0]
+        revision = item.get('revision', {})
+        fingerprint = item.get('fingerprint', f'{run_id}-{index}')
         issues.append(ReviewIssue(
-            issue_id=f'{run_id}-{index}', fingerprint=f'{run_id}-{index}',
+            issue_id=f'{run_id}-{index}', fingerprint=fingerprint,
             source_file_id=item['source_file_id'], source_file_name=item['source_file_name'],
             category=item['category'], risk_level=item['risk_level'],
-            status='uncertain' if pending else 'new', location=item.get('location', {}),
+            status=IssueStatus.UNCERTAIN if pending else IssueStatus.NEW,
+            location=item.get('location', {}),
             description=item['description'], recommendation=item.get('recommendation', ''),
             original_text=item.get('original_text', '') or '\n'.join(item.get('evidence_summaries', [])), confidence=item.get('confidence', 0),
-            first_seen_round=1, last_seen_round=1, origin='model', evidence_state='unverified',
+            first_seen_round=revision.get('first_seen_round', 1),
+            last_seen_round=revision.get('last_seen_round', 1), origin='model',
+            evidence_state=item.get('evidence_state', 'unverified'),
         ))
     service = ReportExportService()
     summary = service._summary(project, 1, issues)

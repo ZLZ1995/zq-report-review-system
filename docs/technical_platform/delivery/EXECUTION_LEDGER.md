@@ -653,15 +653,15 @@
 | G05-03 | doing | 捕获→内存加密候选→当前标签明确确认成功并同意→保存/更新已接；暂不/never/恢复、删除及多账号填充可用。 | 真实Qt合成DOM+DPAPI+UI通过；成功依赖用户确认，SPA/多步骤/真实提交导航/OA未验，不标完整通过 |
 | G05-04 | doing | DPAPI当前Windows用户、账号/环境/来源隔离、无明文降级；密码仅本地可信捕获/填充链路。 | 篡改/复制/未授权保存、落盘及测试输出检查通过；模型观察全链路/跨Windows账号/更新保留待验 |
 | G05-05 | doing | 用户确认填充已接，一次页面ticket和精确来源/表单校验；Agent网站账号授权未实现。 | 真实合成DOM及UI通过，非Agent使用许可；复杂登录/验证码/真实站点未验收 |
-| G06-01 | doing | 可信登录填充及TaskManager标签租约已分轮回归；固定有界observe脚本/控制器专项通过，通用动作、DOM重验、实际调度仍待接入。 | 955/958回归及本轮观察专项；非完整阶段验收 |
-| G06-02 | doing | 普通手动浏览保持独立，原生输入接管撤销当前标签租约及后续许可、不影响另一页；自然语言/Skill调用和持久任务网站授权尚未接通。 | 真实Qt接管专项及958回归；实际Agent端到端待验 |
-| G06-03 | pending | 网站业务授权绑定具体对象/成果/动作；明确任务可构成该动作授权，有歧义再问；网页提示注入不能扩大权限。 | 待验证 |
+| G06-01 | passed | 通用open/navigate/observe/click/fill/select/login/scroll/wait/download/upload工具和可信登录工具；输入输出契约、页面版本与标签租约齐全，禁止任意代码执行工具。 | `browser.execute`使用固定工具目录和严格Pydantic契约；每次动作重验标签租约、页面版本、来源和持久任务状态，下载/上传另有本机完整性回执。无任意脚本/代码执行动作。原生Windows入口浏览器相关393项通过。 |
+| G06-02 | passed | 用户自然语言、Skill要求均能调用；普通手动浏览不需任务；Agent不能偷读无关标签；用户接管立即停止后续动作。 | Agent理解结果的browser分支已接`start_browser_task`和专属BrowserTaskHost；手动面板保持独立。跨标签观察受租约隔离，接管使当前租约及迟到回调失效。自然语言→确认→浏览器任务、切会话拒绝及接管专项包含在393项回归。 |
+| G06-03 | passed | 网站业务授权绑定具体对象/成果/动作；明确任务可构成该动作授权，有歧义再问；网页提示注入不能扩大权限。 | 总任务授权绑定owner/project/session/task及允许来源/动作；每个写动作再绑定step claim、tab、page version、origin、target和payload摘要，原生确认后发放60秒一次性回执并先消费后派发。网页文本只作为不可信观察，不能创建权限；歧义返回对话追问。并发消费、撤权、换claim、接管、跨账号和提示文本专项通过。 |
 | G06-04 | pending | OA先走原流程，用合成成果和获准测试项目验证查找→上传→回执。必要OA源码修改另列必要性、接口契约、测试及授权，不自动重构OA。 | 待验证 |
 | G06-05 | pending | 非OA站点验证查询和已保存账号登录/下载；页面刷新、跳转、超时、重复提交和多标签身份变更均有测试。 | 待验证 |
-| G07-01 | pending | 报告审核、评估明细表、工商沿革及外部Skill接入统一契约；不重写锁定模板；Office/WPS真实生成与格式/链接验证。 | 待验证 |
-| G07-02 | doing | 单/组合审核报告和成果进对话；前台/后台批注询问同事务落盘，后台不弹到其他会话；只授权副本。 | 完整761回归；实机/真实模型、多轮及崩溃间隙补问未验 |
-| G07-03 | pending | 保留可追溯问题证据、去重、修订状态；执行失败说明阶段/原因/恢复方式，不能只给笼统网络提示。 | 待验证 |
-| G07-04 | pending | 用户/项目/会话记忆分层，来源、确认、过期、删除和优先级；外部Skill风险门禁，用户反馈先成候选规则，经验证再生效，禁止暗改模板/权限。 | 待验证 |
+| G07-01 | passed | 报告审核、评估明细表、工商沿革及外部Skill接入统一契约；不重写锁定模板；Office/WPS真实生成与格式/链接验证。 | Skill契约、内置模板、安装、组合任务和生成套件59项通过。真实评估明细表生成`run_zdhyse1y`退出码0；锁定`template.xlsx`的10,123个公式位置及链接部件无变化、sheet顺序保持。工商Word字体/段落格式和锁定模板、报告审核只读同步均在上述回归中。 |
+| G07-02 | passed | 单/组合审核报告和成果进对话；前台/后台批注询问同事务落盘，后台不弹到其他会话；只授权副本。 | 审核交付/标准Word/批注/后台补问/组合步骤/导出/诊断42项通过，完整平台897项及报告客户端223项通过。成果按所属步骤注册并显示对话链接；拒绝批注不写文件，接受时只生成授权副本，原件哈希门禁保留。 |
+| G07-03 | passed | 保留可追溯问题证据、去重、修订状态；执行失败说明阶段/原因/恢复方式，不能只给笼统网络提示。 | `review_issues`按文件、类别、位置和规范化问题生成稳定SHA256指纹，合并精确重复、保留证据摘要及定位哈希，记录new/persistent/resolved轮次状态；无文本证据明确标为unverified。证据/导出/匹配31项、诊断邻域42项及完整897+223回归通过。 |
+| G07-04 | passed | 用户/项目/会话记忆分层，来源、确认、过期、删除和优先级；外部Skill风险门禁，用户反馈先成候选规则，经验证再生效，禁止暗改模板/权限。 | 本地schema11新增分层记忆、反馈和改进提案；作用域覆盖、来源/版本/到期/撤回/优先级及UI历史入口齐全。忽略不提案，误判/漏判/偏好仅生成证据绑定候选，命名测试全部通过才可validated，客户端无publish。外部包仍限数据文件和只读/生成能力。服务端`0007_skill_releases`提供草稿→批准→稳定→撤回/回滚及管理员审计，不接收提示词/客户原文。新增及邻近61+31+20+14+7项、完整平台897/服务端205/报告客户端223项通过；线上部署留G09/G10。 |
 | G08-01 | pending | 经确认的发布副本有正确.gitignore/.dockerignore和依赖锁；同步白名单含新增模块、CI、部署和必要空白资源；扫描密钥、客户数据及模板残留；不自动恢复源工作区删除文件。 | 待验证 |
 | G08-02 | pending | CI跑客户端无GUI单测、服务端契约/数据库迁移、静态检查、安全负面测试；Windows job构建客户端，Linux job构建服务端镜像；离线/mock测试不消耗真实API。 | 待验证 |
 | G08-03 | pending | 新增签名清单、包哈希、协议/schema范围、平台架构、可信key ID和发布说明；私钥放受控签名环境/GitHub受保护Secret，不进服务端普通变量或仓库；建立轮换/撤销机制。 | 待验证 |
@@ -750,15 +750,15 @@
 | NL05-08 | G07 | pending | 增  /  TTP/test_followup_controller.py、test_review_actions.py、test_artifact_registry.py、test_output_validation.py、test_task_progress.py  /  自然语言接续、错轮次、防伪成果、事件恢复测试  / 
 | NL05-09 | G07 | pending | 改  /  TTP/test_annotation_followup.py、test_export.py、test_composer_keys.py、test_file_drop.py、test_window.py、test_diagnostics.py  /  保真、拒绝/取消、不重复询问、历史入口、快捷键回归  / 
 | NL05-10 | G07 | pending | 条件增  /  TSRV/test_review_conversation.py  /  若新增问题对话接口，验证账号、问题范围、幂等和费用  / 
-| NL06-01 | G07/G08 | pending | 增  /  TP/memory_contracts.py、memory_service.py、memory_retrieval.py  /  来源、适用范围、有效期、状态、版本及撤销；按当前任务检索  / 
-| NL06-02 | G07/G08 | pending | 增  /  TP/feedback_service.py、skill_improvement.py  /  区分忽略/误判/偏好；创建改进提案、附证据和关联测试，不自动发布  / 
-| NL06-03 | G07/G08 | pending | 改  /  TP/context.py、store.py、skill_installation.py  /  撤回即时生效；账号/项目隔离；规则切换只影响授权的新任务  / 
-| NL06-04 | G07/G08 | pending | 增  /  TP/migrations/004_memory_proposals.sql；TP/ui/memory_panel.py  /  记忆历史、提案与用户可见的来源/删除入口  / 
-| NL06-05 | G07/G08 | pending | 增  /  SRV/services/skill_release_service.py  /  通用 Skill 的审批、版本发布、兼容声明和回滚；不接收未授权的客户原文  / 
-| NL06-06 | G07/G08 | pending | 改  /  SRV/models.py、schemas.py、api.py；SRV/admin_assets/index.html、app.js、style.css  /  管理员审批和版本记录；客户端不得自授管理员权限  / 
-| NL06-07 | G07/G08 | pending | 条件增  /  DEP/migrations/versions/<next_revision>_skill_release_registry.py  /  审批/发布需要的新增表，按当时真实 head 创建  / 
-| NL06-08 | G07/G08 | pending | 增  /  TTP/test_memory_service.py、test_memory_retrieval.py、test_skill_improvement.py；TSRV/test_skill_release_service.py  /  记忆冲突、过期、撤回、越权审批、版本回滚  / 
-| NL06-09 | G07/G08 | pending | 改  /  TTP/test_context.py、test_store.py、test_skill_installation.py；TSRV/test_admin_web.py  /  原用户和管理行为回归  / 
+| NL06-01 | G07/G08 | passed | `memory_contracts.py`、`memory_service.py`、`memory_retrieval.py`：来源、用户/项目/会话范围、有效期、状态、版本、优先级和撤销；任务上下文只取当前账号及当前范围的有效值。 |
+| NL06-02 | G07/G08 | passed | `feedback_service.py`、`skill_improvement.py`：忽略/误判/漏判/坏建议/偏好分型；只有非忽略反馈且绑定证据才形成候选，关联测试通过后仅变为validated，不自动发布。 |
+| NL06-03 | G07/G08 | passed | `context.py`、`store.py`、`skill_installation.py`：撤回即时停止注入，历史任务快照保留ID；账号/项目/会话隔离；外部Skill保持数据包及权限白名单，切换不影响活动任务。 |
+| NL06-04 | G07/G08 | passed | 本地schema11增量迁移及`ui/memory_panel.py`：旧项目记忆迁移、来源/范围/状态/版本可见、明确确认后新增、撤回入口；无业务内容默认写系统盘。 |
+| NL06-05 | G07/G08 | passed | `skill_release_service.py`：通用Skill草稿、批准、稳定、撤回和旧版回滚；公共响应不含验证证据哈希或客户原文。 |
+| NL06-06 | G07/G08 | passed | 服务端models/schemas/api及总控页面已接Skill版本治理；仅管理员可写，客户端仅能读取稳定元数据，无法自授管理权限。 |
+| NL06-07 | G07/G08 | passed | 新Alembic head `0007_skill_releases`基于真实`0006_review_job_events`，含版本唯一约束、状态索引及不可静默丢弃的审计表。 |
+| NL06-08 | G07/G08 | passed | 新增memory/service/retrieval/improvement及server skill release测试；覆盖冲突、过期、撤回、跨账号、无证据、测试失败、越权、分阶段发布和回滚。 |
+| NL06-09 | G07/G08 | passed | context/store/迁移/安装/UI/总控邻域回归及三套全量：平台897、服务端205、报告客户端223全部通过。 |
 | NL07-01 | G02/G08/G09/G10/G11 | doing | tests/agent_acceptance/cases/五类JSONL及holdout.jsonl、manifest.json；100+20人工合成用例已冻结，独立复核及真实模型验证待完成 |
 | NL07-02 | G02/G08/G09/G10/G11 | doing | tests/agent_acceptance/scoring.py及scripts/evaluate_agent_semantics.py；七维标签、分组/安全/留出门禁及冻结校验已实现，真实回放及副作用授权验收未完成 |
 | NL07-03 | G02/G08/G09/G10/G11 | passed | scripts/run_agent_e2e.py：输入消息→结构化理解→明确确认→只读执行→原件哈希复核→不可覆盖证据成果；确定性本地探针不冒充真实模型语义验收；3项专项及控制器/Harness组合22项通过，实跑证据 D:/ZQ-Acceptance/e2e-dff1df8-evidence.json |

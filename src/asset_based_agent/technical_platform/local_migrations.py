@@ -7,7 +7,7 @@ from contextlib import closing
 from pathlib import Path
 from uuid import uuid4
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 
 def _version(db):
@@ -114,6 +114,46 @@ def apply_v10(db):
         db.execute('ALTER TABLE browser_upload_attempts ADD COLUMN metadata TEXT')
 
 
+def apply_v11(db):
+    db.execute('''CREATE TABLE IF NOT EXISTS memory_records (
+        id TEXT PRIMARY KEY, owner TEXT NOT NULL,
+        scope TEXT NOT NULL CHECK(scope IN ('user','project','session')),
+        project TEXT REFERENCES projects(id), session TEXT REFERENCES sessions(id),
+        memory_key TEXT NOT NULL, text TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('preference','fact','instruction')),
+        source TEXT NOT NULL CHECK(source IN ('explicit_user','verified_artifact')),
+        source_ref TEXT, status TEXT NOT NULL CHECK(status IN ('active','revoked')),
+        priority INTEGER NOT NULL CHECK(priority BETWEEN 0 AND 100), valid_until TEXT,
+        version INTEGER NOT NULL CHECK(version > 0), created TEXT NOT NULL, updated TEXT NOT NULL)''')
+    db.execute('CREATE INDEX IF NOT EXISTS memory_lookup_idx ON memory_records(owner,status,scope,project,session)')
+    db.execute('''CREATE TABLE IF NOT EXISTS feedback_records (
+        id TEXT PRIMARY KEY, owner TEXT NOT NULL, run TEXT NOT NULL REFERENCES runs(id),
+        kind TEXT NOT NULL, summary TEXT NOT NULL, evidence_json TEXT NOT NULL,
+        created TEXT NOT NULL)''')
+    db.execute('''CREATE TABLE IF NOT EXISTS skill_improvement_proposals (
+        id TEXT PRIMARY KEY, owner TEXT NOT NULL,
+        feedback_id TEXT NOT NULL UNIQUE REFERENCES feedback_records(id),
+        skill_id TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('candidate','validated','rejected')),
+        summary TEXT NOT NULL, evidence_json TEXT NOT NULL, test_ids_json TEXT NOT NULL,
+        created TEXT NOT NULL, updated TEXT NOT NULL)''')
+    # Preserve legacy explicit project memories when this is a real platform
+    # database.  Very old/synthetic databases may legitimately have neither
+    # table; additive migration must still succeed for them.
+    tables = {row[0] for row in db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('memories','projects')"
+    )}
+    if tables == {'memories', 'projects'}:
+        db.execute('''INSERT OR IGNORE INTO memory_records
+            (id,owner,scope,project,session,memory_key,text,kind,source,source_ref,status,
+             priority,valid_until,version,created,updated)
+            SELECT m.id,p.owner,'project',m.project,NULL,'legacy:' || m.id,m.text,'preference',
+                   CASE WHEN m.source='explicit_user' THEN 'explicit_user' ELSE 'verified_artifact' END,
+                   CASE WHEN m.source='explicit_user' THEN NULL ELSE m.source END,
+                   CASE WHEN m.active=1 THEN 'active' ELSE 'revoked' END,
+                   50,NULL,1,m.created,m.created
+              FROM memories m JOIN projects p ON p.id=m.project''')
+
+
 def migrate_database(path: Path) -> Path | None:
     path = path.resolve()
     if not path.is_file():
@@ -171,6 +211,8 @@ def migrate_database(path: Path) -> Path | None:
                 apply_v9(db)
             if previous_version < 10:
                 apply_v10(db)
+            if previous_version < 11:
+                apply_v11(db)
             db.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
             db.commit()
             return backup

@@ -190,6 +190,8 @@ def preflight(
             "files": result["files"],
             "issues": [item.model_dump(mode="json") for item in issues if item.source_file_id in target_ids],
         }
+        from .review_issues import normalize_review_result
+        result = normalize_review_result(result, round_number=1)
     if manage_run:
         store.transition(run_id, "validating", "校验所有原文件保持不变")
     for item in files:

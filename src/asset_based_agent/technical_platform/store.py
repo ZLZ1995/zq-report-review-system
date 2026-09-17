@@ -31,6 +31,7 @@ class PlatformStore:
             apply_v8,
             apply_v9,
             apply_v10,
+            apply_v11,
             migrate_database,
         )
 
@@ -89,6 +90,7 @@ class PlatformStore:
                 apply_v8(db)
                 apply_v9(db)
                 apply_v10(db)
+                apply_v11(db)
                 db.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
         # Creation is allowed only during explicit initialization. Later requests
         # must fail closed if a disk disappears or the database is moved.
@@ -145,6 +147,8 @@ class PlatformStore:
             db.execute("INSERT INTO project_claims VALUES(?,?,?,?)",
                        (project_id, "local-preview", self.owner, now()))
             db.execute("UPDATE projects SET owner=? WHERE id=?", (self.owner, project_id))
+            db.execute("UPDATE memory_records SET owner=? WHERE project=?",
+                       (self.owner, project_id))
 
     def session(self, session_id: str) -> dict:
         with self.connect() as db:
@@ -358,34 +362,27 @@ class PlatformStore:
             )
 
     def remember(self, project_id: str, text: str, *, confirmed: bool) -> str:
-        self.project(project_id)
-        if not confirmed or not text.strip():
-            raise ValueError("记忆必须由用户明确确认")
-        identity = uuid4().hex
-        with self.connect() as db:
-            db.execute(
-                "INSERT INTO memories VALUES(?,?,?,?,1,?)",
-                (identity, project_id, text.strip(), "explicit_user", now()),
-            )
-        return identity
+        from .memory_service import MemoryService
+        return MemoryService(self).create(
+            scope="project", project_id=project_id, key="legacy:" + uuid4().hex,
+            text=text, source="explicit_user", confirmed=confirmed,
+        )
 
     def memories(self, project_id: str) -> list[dict]:
-        self.project(project_id)
-        with self.connect() as db:
-            return [
-                dict(r)
-                for r in db.execute(
-                    "SELECT * FROM memories WHERE project=? AND active=1 ORDER BY created",
-                    (project_id,),
-                )
-            ]
+        from .memory_service import MemoryService
+        return [
+            {"id": item.id, "project": item.project_id, "text": item.text,
+             "source": item.source, "active": 1, "created": item.created.isoformat()}
+            for item in MemoryService(self).active_for_project(project_id)
+        ]
 
     def forget(self, project_id: str, memory_id: str) -> None:
         self.project(project_id)
-        with self.connect() as db:
-            db.execute(
-                "DELETE FROM memories WHERE project=? AND id=?", (project_id, memory_id)
-            )
+        from .memory_service import MemoryService
+        record = MemoryService(self).get(memory_id)
+        if record.project_id != project_id:
+            raise PermissionError("记忆不存在或无权访问")
+        MemoryService(self).revoke(memory_id)
 
     def feedback(self, run_id: str, kind: str, text: str) -> None:
         self.run(run_id)

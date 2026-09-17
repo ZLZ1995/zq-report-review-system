@@ -82,6 +82,54 @@ class ClientReleaseAudit(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class SkillRelease(Base):
+    """Metadata-only registry for tested, administrator-approved Skill versions."""
+
+    __tablename__ = "report_review_skill_releases"
+    __table_args__ = (
+        UniqueConstraint("skill_id", "version", name="uq_skill_release_version"),
+    )
+
+    release_id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    skill_id: Mapped[str] = mapped_column(String(80), index=True)
+    version: Mapped[str] = mapped_column(String(32))
+    package_sha256: Mapped[str] = mapped_column(String(64))
+    schema_version: Mapped[int] = mapped_column(Integer)
+    adapter: Mapped[str] = mapped_column(String(64))
+    capabilities_json: Mapped[str] = mapped_column(Text)
+    minimum_client_version: Mapped[str] = mapped_column(String(32))
+    evidence_sha256: Mapped[str] = mapped_column(String(64))
+    test_report_sha256: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16), default="draft", index=True)
+    created_by: Mapped[str] = mapped_column(
+        String(36), ForeignKey("report_review_users.user_id", ondelete="RESTRICT")
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
+class SkillReleaseAudit(Base):
+    __tablename__ = "report_review_skill_release_audits"
+
+    audit_id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    release_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("report_review_skill_releases.release_id", ondelete="RESTRICT")
+    )
+    admin_user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("report_review_users.user_id", ondelete="RESTRICT")
+    )
+    action: Mapped[str] = mapped_column(String(32))
+    from_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    to_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class AuthSession(Base):
     __tablename__ = "report_review_sessions"
     __table_args__ = (Index("ix_report_review_sessions_user_active", "user_id", "revoked_at"),)
