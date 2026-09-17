@@ -75,6 +75,34 @@ def test_file_metadata_change_invalidates_result_without_reading_source(tmp_path
     assert source.read_text('utf-8') == 'synthetic'
 
 
+def test_current_attachment_scope_never_expands_to_project_history(tmp_path):
+    from asset_based_agent.technical_platform.agent_controller import AgentController
+    from asset_based_agent.technical_platform.skills import digest
+
+    store = PlatformStore(tmp_path / 'db.sqlite', 'alice')
+    project = store.create_project('one')
+    session = store.create_session(project)
+    old = tmp_path / 'old.docx'; old.write_bytes(b'old')
+    current = tmp_path / 'current.docx'; current.write_bytes(b'current')
+    old_id = store.add_file(project, old, digest(old))
+    current_id = store.add_file(project, current, digest(current))
+    controller = AgentController(store)
+    pending = controller.prepare(session, '只审核本轮上传的文件', model_id='m',
+                                 selected_ids=[current_id])
+    assert [item.id for item in pending.request.files] == [current_id]
+    assert [item['id'] for item in pending.files] == [current_id]
+    payload = {
+        'schema_version': 1, 'message_intent': 'execute', 'goal': '审核本轮文件',
+        'targets': [old_id], 'references': [], 'excluded': [], 'constraints': [],
+        'deliverables': [], 'missing_inputs': [],
+        'evidence_message_ids': [pending.request.message_id],
+        'skill_ids': ['report.review'], 'next_action': 'plan', 'reply': '开始审核。',
+    }
+    with pytest.raises(ValueError, match='Unknown file reference'):
+        controller.complete(pending, payload)
+    assert store.runs(session) == []
+
+
 def test_catalog_switch_does_not_redirect_pending_conversation(tmp_path):
     from asset_based_agent.technical_platform.agent_controller import AgentController
     from asset_based_agent.technical_platform.project_catalog import ProjectCatalog

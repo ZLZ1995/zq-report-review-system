@@ -634,7 +634,7 @@
 | G01-03 | doing | 定义带版本的TaskSpec、PlanStep、ToolCall、Event、Artifact、Permission及脱敏错误契约，统一owner/project/session/task/step/request ID。 | execution_contracts.py；task_spec/execution已接入身份；其余执行/事件/成果消费待接入 |
 | G01-04 | doing | 建立客户端版本、服务端构建SHA、API能力、数据schema和Skill/模板版本兼容矩阵；增量兼容优先，不以网络错误代替协议不兼容。 | capabilities API/config + release_info/UI已测；完整矩阵和执行前检查待实施 |
 | G02-01 | doing | 从用户意图解析目标、对象、版本、排除项、动作和交付件；咨询/澄清不自动执行业务Skill；删除手动Skill切换依赖。 | AgentController/TaskUnderstanding/客户端已接，模拟及安全边界专项通过；真实语义与留出验收未完成 |
-| G02-02 | pending | 解析本轮附件、明确文件名和跨轮指代；不能把项目文件库全选为任务输入；存在多义先澄清。 | 待验证 |
+| G02-02 | passed | 解析本轮附件、明确文件名和跨轮指代；不能把项目文件库全选为任务输入；存在多义先澄清。 | AgentController仅把本轮勾选ID送入理解请求；旧文件注入被Unknown file reference拒绝且不建任务；同名歧义不猜最新；控制器/解析器/范围/拖拽22项通过 |
 | G02-03 | doing | 统一动态Skill能力目录、结构化选择/计划、输入约束和追问续接；网页任务不靠OA关键词硬路由；支持多个Skill组合。 | 内置/外部规则包目录、组合提案确认及真实本地生成接通，684回归；网页能力、完整追问续接与真实语义未验 |
 | G02-04 | doing | 扩展服务端skill_routing及必要规划接口；模型输出必须schema校验，客户端Harness再次校验；不相信模型自报权限。 | understand/plan服务端接口与共享schema、客户端复核已测；尚未部署/真实模型验收 |
 | G02-05 | doing | 建立至少100条语义用例和独立留出集：否定、纠正、切任务、指代、无附件、OA/非OA、恶意文档指令。安全边界用例100%通过，其余明确目标至少95%；不靠训练集复述冒充泛化。 | 100基础+20留出已冻结，评分/冻结9专项；真实采集、重复及人工复核未完成，不宣称语义通过 |
