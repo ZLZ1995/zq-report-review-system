@@ -306,6 +306,13 @@ class ReviewJob(Base):
     context_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    execution_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    worker_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     result_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
     result_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -313,7 +320,29 @@ class ReviewJob(Base):
     batch_count: Mapped[int] = mapped_column(Integer, default=0)
     completed_batches: Mapped[int] = mapped_column(Integer, default=0)
     progress_percent: Mapped[int] = mapped_column(Integer, default=0)
+    event_sequence: Mapped[int] = mapped_column(Integer, default=0)
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ReviewJobEvent(Base):
+    """Durable, metadata-only progress cursor for reconnecting clients."""
+
+    __tablename__ = "report_review_job_events"
+    __table_args__ = (
+        UniqueConstraint("job_id", "sequence", name="uq_review_job_event_sequence"),
+        Index("ix_review_job_events_cursor", "job_id", "sequence"),
+    )
+
+    event_id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    job_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("report_review_jobs.job_id", ondelete="CASCADE")
+    )
+    sequence: Mapped[int] = mapped_column(Integer)
+    kind: Mapped[str] = mapped_column(String(32))
+    completed_batches: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)

@@ -152,8 +152,8 @@ class RemoteReviewLlm:
         batch_total: int,
         progress_callback: Callable[[dict[str, object]], None] | None,
     ) -> dict[str, object]:
-        # The server endpoint is synchronous. Progress polling runs alongside it
-        # so the existing workbench can show completed server batches.
+        # Execution acknowledgement is short-lived; durable status and validated
+        # batch output are read from the original job without resubmitting it.
         result_holder: list[dict[str, object]] = []
         error_holder: list[BaseException] = []
 
@@ -182,6 +182,7 @@ class RemoteReviewLlm:
         worker.start()
         deadline = time.monotonic() + self.result_wait_seconds
         result: dict[str, object] = {}
+        last_state: dict[str, object] = {}
         delivered = 0
 
         def emit_output(state):
@@ -209,9 +210,14 @@ class RemoteReviewLlm:
                     threading.Thread(target=request_stop, daemon=True).start()
                 raise TaskCancelled('已停止接收；服务端取消请求已发起，当前模型调用可能仍需结算')
             if result_holder:
-                result = result_holder[0]
-                emit_output(result)
-                break
+                acknowledged = result_holder.pop(0)
+                last_state = acknowledged
+                emit_output(acknowledged)
+                if acknowledged.get("status") in {
+                    "succeeded", "failed", "cancelled", "expired"
+                }:
+                    result = acknowledged
+                    break
             # A lost execute response does not mean the server stopped working.
             # Only GET the original job: never resubmit an ambiguous paid call.
             try:
@@ -227,6 +233,7 @@ class RemoteReviewLlm:
                 else:
                     time.sleep(self.poll_interval)
                 continue
+            last_state = state
             emit_output(state)
             if state.get("status") in {"succeeded", "failed", "cancelled", "expired"}:
                 result = state
@@ -255,6 +262,14 @@ class RemoteReviewLlm:
             else:
                 time.sleep(self.poll_interval)
         if not result:
+            if last_state.get("heartbeat_status") == "stale":
+                raise ReviewNetworkError(
+                    f"服务端工作进程心跳超时（任务编号：{job_id}）。任务将由服务端恢复；请勿重复提交。"
+                )
+            if last_state:
+                raise ReviewNetworkError(
+                    f"服务端任务仍在执行（任务编号：{job_id}）。可稍后按原任务继续查询；请勿重复提交。"
+                )
             raise ReviewNetworkError(
                 f"服务端任务状态尚未确认（任务编号：{job_id}）。请勿重复发起审核，以免重复扣费。"
             )

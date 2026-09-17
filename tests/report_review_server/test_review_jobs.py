@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import timedelta
 from decimal import Decimal
 
@@ -178,6 +179,11 @@ def test_completed_batch_is_available_while_next_batch_runs(client):
                     partial = service.get_job(reader, user_id=user_id, job_id=job.job_id)
                     assert partial.status == "running"
                     assert len(partial.issues) == 1
+                    persisted = reader.get(ReviewJob, job.job_id)
+                    assert persisted is not None
+                    assert persisted.worker_id == "inline"
+                    assert persisted.lease_expires_at is not None
+                    assert partial.heartbeat_status == "active"
             return super().call(route, payload)
 
     provider = CheckingProvider([_model_response(1), _model_response(2)])
@@ -302,6 +308,8 @@ def test_review_job_uses_one_round_hold_and_one_wallet_charge(client) -> None:
     assert len(requests) == 2
     assert {request.hold_id for request in requests} == {holds[0].hold_id}
     assert len(charges) == 1
+    assert job.worker_id is None
+    assert job.lease_expires_at is None
 
 
 def test_review_job_creation_is_idempotent(client) -> None:
@@ -315,6 +323,122 @@ def test_review_job_creation_is_idempotent(client) -> None:
 
     assert first.job_id == second.job_id
     assert len(holds) == 1
+
+
+def test_review_job_events_are_durable_and_cursor_scoped(client) -> None:
+    user_id, model_id = _seed_review_case(client)
+    service = ReviewJobService(
+        client.app.state.settings,
+        FakeProviderClient([_model_response(1), _model_response(2)]),
+    )
+
+    with client.app.state.session_factory() as db:
+        job = service.create_job(db, user_id=user_id, payload=_job_payload(model_id))
+        service.execute_job(db, user_id=user_id, job_id=job.job_id)
+        events = service.list_events(db, user_id=user_id, job_id=job.job_id, after_sequence=0)
+        assert [event.sequence for event in events] == list(range(1, len(events) + 1))
+        assert events[0].kind == "queued"
+        assert events[-1].kind == "succeeded"
+        assert service.list_events(
+            db,
+            user_id=user_id,
+            job_id=job.job_id,
+            after_sequence=events[-2].sequence,
+        ) == [events[-1]]
+
+        with pytest.raises(ServiceError):
+            service.list_events(
+                db,
+                user_id="another-user",
+                job_id=job.job_id,
+                after_sequence=0,
+            )
+
+
+def test_interrupted_running_job_is_requeued_for_startup_recovery(client) -> None:
+    user_id, model_id = _seed_review_case(client)
+    service = ReviewJobService(client.app.state.settings, FakeProviderClient([]))
+    with client.app.state.session_factory() as db:
+        job = service.create_job(db, user_id=user_id, payload=_job_payload(model_id))
+        service.request_execution(db, user_id=user_id, job_id=job.job_id)
+        job.status = "running"
+        job.started_at = utc_now()
+        db.commit()
+
+        recovered = service.recover_interrupted(db)
+        db.refresh(job)
+        assert recovered == [(user_id, job.job_id)]
+        assert job.status == "queued"
+        assert job.started_at is None
+        assert job.error_code == "recovered_after_restart"
+        assert service.list_events(
+            db,
+            user_id=user_id,
+            job_id=job.job_id,
+            after_sequence=0,
+        )[-1].kind == "recovered"
+
+
+def test_running_job_reports_stale_worker_heartbeat_without_exposing_worker(client) -> None:
+    user_id, model_id = _seed_review_case(client)
+    service = ReviewJobService(client.app.state.settings, FakeProviderClient([]))
+    with client.app.state.session_factory() as db:
+        job = service.create_job(db, user_id=user_id, payload=_job_payload(model_id))
+        service.request_execution(db, user_id=user_id, job_id=job.job_id)
+        job.status = "running"
+        job.worker_id = "secret-worker-identity"
+        job.lease_expires_at = utc_now() - timedelta(seconds=1)
+        db.commit()
+        response = service.get_job(db, user_id=user_id, job_id=job.job_id)
+        assert response.heartbeat_status == "stale"
+        assert "worker_id" not in response.model_dump()
+        assert "lease_expires_at" not in response.model_dump()
+
+
+def test_review_job_event_api_resumes_after_cursor(client) -> None:
+    _unused_user_id, model_id = _seed_review_case(client)
+    with client.app.state.session_factory() as db:
+        user = client.app.state.auth_service.create_user(
+            db,
+            username="event-review-user",
+            display_name="Event Review User",
+            temporary_password="Temporary123",
+        )
+        client.app.state.wallet_service.adjust(
+            db,
+            user_id=user.user_id,
+            amount=Decimal("100.00"),
+            admin_user_id="test-admin",
+        )
+    client.app.state.review_job_service = ReviewJobService(
+        client.app.state.settings,
+        FakeProviderClient([_model_response(1), _model_response(2)]),
+    )
+    login = client.post("/api/v1/auth/login", json={
+        "username": "event-review-user",
+        "password": "Temporary123",
+        "client_instance_id": "event-review-test",
+    })
+    headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+    created = client.post(
+        "/api/v1/review-jobs",
+        headers=headers,
+        json=_job_payload(model_id).model_dump(mode="json"),
+    )
+    job_id = created.json()["job_id"]
+    client.post(f"/api/v1/review-jobs/{job_id}/execute", headers=headers)
+    assert client.app.state.review_job_executor.wait(job_id, timeout=5)
+
+    first = client.get(f"/api/v1/review-jobs/{job_id}/events", headers=headers)
+    assert first.status_code == 200
+    events = first.json()
+    assert events[-1]["kind"] == "succeeded"
+    resumed = client.get(
+        f"/api/v1/review-jobs/{job_id}/events",
+        params={"after_sequence": events[-2]["sequence"]},
+        headers=headers,
+    )
+    assert resumed.json() == [events[-1]]
 
 
 def test_review_job_api_exposes_only_structured_job_result(client) -> None:
@@ -358,11 +482,126 @@ def test_review_job_api_exposes_only_structured_job_result(client) -> None:
     )
 
     assert created.status_code == 201
-    assert executed.status_code == 200
-    assert executed.json()["status"] == "succeeded"
-    assert len(executed.json()["issues"]) == 2
-    assert "context_ciphertext" not in executed.json()
-    assert "charged_amount" not in executed.json()
+    assert executed.status_code == 202
+    assert client.app.state.review_job_executor.wait(created.json()["job_id"], timeout=5)
+    finished = client.get(
+        f"/api/v1/review-jobs/{created.json()['job_id']}",
+        headers=headers,
+    )
+    assert finished.json()["status"] == "succeeded"
+    assert len(finished.json()["issues"]) == 2
+    assert "context_ciphertext" not in finished.json()
+    assert "charged_amount" not in finished.json()
+
+
+def test_execute_api_returns_before_provider_finishes_and_duplicate_is_idempotent(client) -> None:
+    _unused_user_id, model_id = _seed_review_case(client)
+    with client.app.state.session_factory() as db:
+        user = client.app.state.auth_service.create_user(
+            db,
+            username="async-review-user",
+            display_name="Async Review User",
+            temporary_password="Temporary123",
+        )
+        client.app.state.wallet_service.adjust(
+            db,
+            user_id=user.user_id,
+            amount=Decimal("100.00"),
+            admin_user_id="test-admin",
+        )
+
+    entered, release = threading.Event(), threading.Event()
+    calls: list[int] = []
+
+    class BlockingProvider(FakeProviderClient):
+        def call(self, route, payload):
+            calls.append(1)
+            entered.set()
+            assert release.wait(5)
+            return super().call(route, payload)
+
+    provider = BlockingProvider([_model_response(1), _model_response(2)])
+    client.app.state.review_job_service = ReviewJobService(client.app.state.settings, provider)
+    client.app.state.review_job_executor.replace_service(client.app.state.review_job_service)
+    login = client.post("/api/v1/auth/login", json={
+        "username": "async-review-user",
+        "password": "Temporary123",
+        "client_instance_id": "async-review-test",
+    })
+    headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+    created = client.post(
+        "/api/v1/review-jobs",
+        headers=headers,
+        json=_job_payload(model_id).model_dump(mode="json"),
+    )
+    job_id = created.json()["job_id"]
+    try:
+        first = client.post(f"/api/v1/review-jobs/{job_id}/execute", headers=headers)
+        assert first.status_code == 202
+        assert first.json()["status"] in {"queued", "running"}
+        assert entered.wait(1)
+        assert len(calls) == 1
+    finally:
+        release.set()
+    assert client.app.state.review_job_executor.wait(job_id, timeout=5)
+    finished = client.get(f"/api/v1/review-jobs/{job_id}", headers=headers)
+    assert finished.json()["status"] == "succeeded"
+    assert len(provider.payloads) == 2
+    duplicate = client.post(f"/api/v1/review-jobs/{job_id}/execute", headers=headers)
+    assert duplicate.status_code == 202
+    assert duplicate.json()["status"] == "succeeded"
+    assert len(provider.payloads) == 2
+
+
+def test_async_preflight_failure_marks_job_failed_and_releases_hold(client) -> None:
+    _unused_user_id, model_id = _seed_review_case(client)
+    with client.app.state.session_factory() as db:
+        user = client.app.state.auth_service.create_user(
+            db,
+            username="expired-async-review-user",
+            display_name="Expired Async Review User",
+            temporary_password="Temporary123",
+        )
+        client.app.state.wallet_service.adjust(
+            db,
+            user_id=user.user_id,
+            amount=Decimal("100.00"),
+            admin_user_id="test-admin",
+        )
+
+    provider = FakeProviderClient([])
+    client.app.state.review_job_service = ReviewJobService(client.app.state.settings, provider)
+    client.app.state.review_job_executor.replace_service(client.app.state.review_job_service)
+    login = client.post("/api/v1/auth/login", json={
+        "username": "expired-async-review-user",
+        "password": "Temporary123",
+        "client_instance_id": "expired-async-review-test",
+    })
+    headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+    created = client.post(
+        "/api/v1/review-jobs",
+        headers=headers,
+        json=_job_payload(model_id).model_dump(mode="json"),
+    )
+    job_id = created.json()["job_id"]
+    with client.app.state.session_factory() as db:
+        job = db.get(ReviewJob, job_id)
+        assert job is not None
+        job.context_expires_at = utc_now() - timedelta(seconds=1)
+        hold_id = job.hold_id
+        db.commit()
+
+    executed = client.post(f"/api/v1/review-jobs/{job_id}/execute", headers=headers)
+    assert executed.status_code == 202
+    assert client.app.state.review_job_executor.wait(job_id, timeout=5)
+
+    finished = client.get(f"/api/v1/review-jobs/{job_id}", headers=headers)
+    assert finished.json()["status"] == "failed"
+    assert finished.json()["error_code"] == "review_context_expired"
+    assert provider.payloads == []
+    with client.app.state.session_factory() as db:
+        hold = db.get(BalanceHold, hold_id)
+        assert hold is not None and hold.status == "released"
 
 
 def test_failed_review_captures_reported_usage_once(client) -> None:

@@ -125,6 +125,34 @@ def test_execute_timeout_recovers_same_job_without_resubmitting():
     assert client.polls >= 2
 
 
+def test_async_execute_acceptance_is_polled_to_terminal_result():
+    class AsyncAcceptedClient(FakeRemoteClient):
+        def __init__(self):
+            super().__init__()
+            self.polls = 0
+
+        def execute_review_job(self, job_id):
+            return {"job_id": job_id, "status": "queued", "event_sequence": 2}
+
+        def get_review_job(self, job_id):
+            self.polls += 1
+            if self.polls == 1:
+                return {
+                    "job_id": job_id,
+                    "status": "running",
+                    "completed_batches": 0,
+                    "batch_count": 1,
+                    "event_sequence": 3,
+                }
+            return FakeRemoteClient.execute_review_job(self, job_id)
+
+    client = AsyncAcceptedClient()
+    adapter = RemoteReviewLlm(client, model_id="MODEL-1", poll_interval=0.001)
+    issues = adapter.review_batches([_batch()])
+    assert issues[0].description == "A server-side issue"
+    assert client.polls == 2
+
+
 def test_polling_reports_actual_server_batch_progress():
     client = TimeoutClient()
     events = []
@@ -157,6 +185,29 @@ def test_server_failure_after_timeout_is_reported():
 
     adapter = RemoteReviewLlm(FailedClient(), model_id="MODEL-1", poll_interval=0.001)
     with pytest.raises(ReviewResponseSchemaError, match="provider_timeout"):
+        adapter.review_batches([_batch()])
+
+
+def test_stale_server_worker_is_classified_after_poll_deadline():
+    class StaleClient(FakeRemoteClient):
+        def execute_review_job(self, job_id):
+            return {"status": "queued"}
+
+        def get_review_job(self, job_id):
+            return {
+                "status": "running",
+                "heartbeat_status": "stale",
+                "completed_batches": 0,
+                "batch_count": 1,
+            }
+
+    adapter = RemoteReviewLlm(
+        StaleClient(),
+        model_id="MODEL-1",
+        poll_interval=0.001,
+        result_wait_seconds=0.01,
+    )
+    with pytest.raises(ReviewNetworkError, match="心跳超时"):
         adapter.review_batches([_batch()])
 
 

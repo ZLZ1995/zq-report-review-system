@@ -251,6 +251,14 @@ def test_remote_client_exposes_model_balance_and_review_job_business_endpoints()
                 200,
                 json={"job_id": "JOB-1", "status": "succeeded", "issues": []},
             )
+        if request.url.path.endswith("/events"):
+            assert request.url.params["after_sequence"] == "2"
+            return httpx.Response(200, json=[{
+                "sequence": 3,
+                "kind": "running",
+                "completed_batches": 0,
+                "created_at": "2026-09-17T00:00:00Z",
+            }])
         raise AssertionError(request.url.path)
 
     client = RemoteSessionClient(
@@ -272,8 +280,10 @@ def test_remote_client_exposes_model_balance_and_review_job_business_endpoints()
         }
     )
     result = client.execute_review_job(str(created["job_id"]))
+    events = client.get_review_job_events("JOB-1", after_sequence=2)
 
     assert result["status"] == "succeeded"
+    assert events[0]["sequence"] == 3
     assert paths == [
         "/api/v1/auth/login",
         "/api/v1/models",
@@ -281,6 +291,7 @@ def test_remote_client_exposes_model_balance_and_review_job_business_endpoints()
         "/api/v1/capabilities",
         "/api/v1/review-jobs",
         "/api/v1/review-jobs/JOB-1/execute",
+        "/api/v1/review-jobs/JOB-1/events",
     ]
 
 

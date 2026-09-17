@@ -15,6 +15,10 @@ def test_review_job_openapi_contract_is_valid_and_visibility_is_closed() -> None
     assert "/review-jobs" in payload["paths"]
     assert "/review-jobs/{job_id}" in payload["paths"]
     assert "/review-jobs/{job_id}/execute" in payload["paths"]
+    assert "/review-jobs/{job_id}/events" in payload["paths"]
+    execute_responses = payload["paths"]["/review-jobs/{job_id}/execute"]["post"]["responses"]
+    assert "202" in execute_responses
+    assert "200" not in execute_responses
     chunk = payload["components"]["schemas"]["ReviewChunk"]
     assert chunk["additionalProperties"] is False
     assert chunk["properties"]["sheet_state"]["enum"] == ["visible"]

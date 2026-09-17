@@ -368,6 +368,22 @@ class RemoteSessionClient:
             raise RemoteAuthenticationError("服务端审核进度格式无效。")
         return result
 
+    def get_review_job_events(
+        self,
+        job_id: str,
+        *,
+        after_sequence: int = 0,
+    ) -> list[dict[str, object]]:
+        if after_sequence < 0:
+            raise ValueError("review job event cursor must be non-negative")
+        result = self._authenticated_json(
+            "GET",
+            f"/review-jobs/{job_id}/events?after_sequence={after_sequence}",
+        )
+        if not isinstance(result, list) or not all(isinstance(item, dict) for item in result):
+            raise RemoteAuthenticationError("服务端审核事件格式无效。")
+        return result
+
     def user_summary(self) -> dict[str, str]:
         if self.user is None:
             raise SessionRevoked("当前没有有效登录会话。")

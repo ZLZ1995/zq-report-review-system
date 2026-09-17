@@ -55,6 +55,7 @@ from .schemas import (
     RefreshRequest,
     ResetPasswordRequest,
     ReviewJobCreateRequest,
+    ReviewJobEventResponse,
     ReviewJobResponse,
     TokenResponse,
     UserResponse,
@@ -65,6 +66,7 @@ from .services.browser_step import propose_browser_step
 from .services.material_analysis import MaterialPlan, MaterialRequest, analyze_materials
 from .services.model_admin_service import ModelAdminService
 from .services.provider_gateway import HttpProviderClient
+from .services.review_job_executor import ReviewJobExecutor
 from .services.review_job_service import ReviewJobService
 from .services.skill_routing import RoutePlan, RouteRequest, route_skill
 from .services.task_planning import propose_plan
@@ -91,6 +93,7 @@ def create_app(
     async def lifespan(_app: FastAPI):
         with session_factory() as cleanup_db:
             cleanup_expired_temporary_data(cleanup_db)
+        _app.state.review_job_executor.recover()
         cleanup_task = asyncio.create_task(_temporary_cleanup_loop(session_factory))
         try:
             yield
@@ -98,6 +101,7 @@ def create_app(
             cleanup_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await cleanup_task
+            _app.state.review_job_executor.shutdown()
 
     app = FastAPI(
         title="ZQ Report Review Control API",
@@ -123,6 +127,10 @@ def create_app(
     app.state.review_job_service = ReviewJobService(
         actual_settings,
         HttpProviderClient(SecretCipher(actual_settings.encryption_key_bytes())),
+    )
+    app.state.review_job_executor = ReviewJobExecutor(
+        session_factory,
+        app.state.review_job_service,
     )
 
     @app.exception_handler(ServiceError)
@@ -172,6 +180,7 @@ def create_app(
             'material_analysis': ('/api/v1/material-analysis', 'POST'),
             'review_jobs': ('/api/v1/review-jobs', 'POST'),
             'review_cancel': ('/api/v1/review-jobs/{job_id}/cancel', 'POST'),
+            'review_events': ('/api/v1/review-jobs/{job_id}/events', 'GET'),
             'client_release': ('/api/v1/client-releases/current', 'GET'),
         }
         return {'schema_version': 1, 'protocol_version': 1,
@@ -459,6 +468,7 @@ def create_app(
     @app.post(
         "/api/v1/review-jobs/{job_id}/execute",
         response_model=ReviewJobResponse,
+        status_code=202,
     )
     def execute_review_job(
         job_id: str,
@@ -466,11 +476,22 @@ def create_app(
         context: AuthContext = Depends(get_context),
         db: Session = Depends(get_db),
     ) -> ReviewJobResponse:
-        return request.app.state.review_job_service.execute_job(
+        user_id = context.user.user_id
+        result = request.app.state.review_job_service.request_execution(
             db,
-            user_id=context.user.user_id,
+            user_id=user_id,
             job_id=job_id,
         )
+        # Release the request-scoped transaction before the background worker
+        # opens its independent session. This also keeps SQLite test deployments
+        # from sharing one pooled connection across two active transactions.
+        db.close()
+        request.app.state.review_job_executor.submit(
+            user_id,
+            job_id,
+            service=request.app.state.review_job_service,
+        )
+        return result
 
     @app.get(
         "/api/v1/review-jobs/{job_id}",
@@ -486,6 +507,26 @@ def create_app(
             db,
             user_id=context.user.user_id,
             job_id=job_id,
+        )
+
+    @app.get(
+        "/api/v1/review-jobs/{job_id}/events",
+        response_model=list[ReviewJobEventResponse],
+    )
+    def get_review_job_events(
+        job_id: str,
+        request: Request,
+        after_sequence: int = 0,
+        context: AuthContext = Depends(get_context),
+        db: Session = Depends(get_db),
+    ):
+        if after_sequence < 0:
+            raise ServiceError("invalid_cursor", "任务事件游标无效。", 422)
+        return request.app.state.review_job_service.list_events(
+            db,
+            user_id=context.user.user_id,
+            job_id=job_id,
+            after_sequence=after_sequence,
         )
 
     from .admin_web import install_admin_web

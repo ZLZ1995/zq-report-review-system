@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from ..config import ServerSettings
 from ..crypto import SecretCipher
-from ..models import ModelDefinition, ReviewJob, utc_now
+from ..models import ModelDefinition, ReviewJob, ReviewJobEvent, utc_now
 from ..schemas import ReviewJobCreateRequest, ReviewJobResponse
 from .auth_service import ServiceError, is_expired
 from .metered_model_service import BillingReconciliationRequired, MeteredModelService
@@ -80,6 +80,7 @@ class ReviewJobService:
             )
             db.add(job)
             db.flush()
+            self._record_event(db, job, "queued")
             job.context_ciphertext = self.cipher.encrypt(
                 context_json,
                 purpose=f"review-context:{job.job_id}",
@@ -105,8 +106,12 @@ class ReviewJobService:
         *,
         user_id: str,
         job_id: str,
+        worker_id: str = "inline",
     ) -> ReviewJobResponse:
         job = self._get_owned_job(db, user_id=user_id, job_id=job_id)
+        if job.status == "queued" and job.execution_requested_at is None:
+            self.request_execution(db, user_id=user_id, job_id=job_id)
+            db.refresh(job)
         if job.status == "succeeded":
             return self.to_response(job)
         if job.status == "failed":
@@ -140,14 +145,23 @@ class ReviewJobService:
                 ReviewJob.job_id == job_id,
                 ReviewJob.user_id == user_id,
                 ReviewJob.status == "queued",
+                ReviewJob.execution_requested_at.is_not(None),
             )
-            .values(status="running", started_at=utc_now(), error_code=None)
+            .values(
+                status="running",
+                started_at=utc_now(),
+                error_code=None,
+                worker_id=worker_id,
+                lease_expires_at=utc_now() + timedelta(minutes=15),
+            )
             .returning(ReviewJob.job_id)
         )
         db.commit()
         if claimed_job_id is None:
             raise ServiceError("review_job_in_progress", "审核任务正在执行。", 409)
         db.refresh(job)
+        self._record_event(db, job, "running")
+        db.commit()
 
         issues: list[dict[str, object]] = []
         try:
@@ -155,6 +169,8 @@ class ReviewJobService:
                 db.refresh(job)
                 if job.error_code == 'cancel_requested':
                     return self._finish_cancel(db, job)
+                job.lease_expires_at = utc_now() + timedelta(minutes=15)
+                db.commit()
                 request_payload = self.agent.request_payload(batch)
                 metered_result = self.metered.execute(
                     db,
@@ -181,11 +197,15 @@ class ReviewJobService:
                     purpose=f"review-result:{job.job_id}",
                 )
                 job.result_expires_at = utc_now() + timedelta(hours=24)
+                self._record_event(db, job, "progress")
                 db.commit()
         except Exception as exc:
             job.status = "failed"
             job.error_code = getattr(exc, "code", "review_execution_failed")
             job.completed_at = utc_now()
+            job.worker_id = None
+            job.lease_expires_at = None
+            self._record_event(db, job, "failed")
             db.commit()
             if isinstance(exc, BillingReconciliationRequired):
                 raise
@@ -207,6 +227,9 @@ class ReviewJobService:
         job.status = "succeeded"
         job.progress_percent = 100
         job.completed_at = utc_now()
+        job.worker_id = None
+        job.lease_expires_at = None
+        self._record_event(db, job, "succeeded")
         db.commit()
         self.metered.capture_hold(
             db,
@@ -219,9 +242,76 @@ class ReviewJobService:
     def get_job(self, db: Session, *, user_id: str, job_id: str) -> ReviewJobResponse:
         return self.to_response(self._get_owned_job(db, user_id=user_id, job_id=job_id))
 
+    def request_execution(self, db: Session, *, user_id: str, job_id: str) -> ReviewJobResponse:
+        job = self._get_owned_job(db, user_id=user_id, job_id=job_id)
+        if job.status in {"succeeded", "running"}:
+            return self.to_response(job)
+        if job.status != "queued":
+            raise ServiceError("review_job_not_executable", "审核任务不能再次执行。", 409)
+        if job.execution_requested_at is None:
+            job.execution_requested_at = utc_now()
+            self._record_event(db, job, "execution_requested")
+            db.commit()
+            db.refresh(job)
+        return self.to_response(job)
+
+    def fail_requested_job(
+        self,
+        db: Session,
+        *,
+        user_id: str,
+        job_id: str,
+        error_code: str = "review_execution_rejected",
+    ) -> ReviewJobResponse:
+        """Close a requested job that failed before any provider call began."""
+        job = self._get_owned_job(db, user_id=user_id, job_id=job_id)
+        if job.status != "queued" or job.execution_requested_at is None:
+            return self.to_response(job)
+        job.status = "failed"
+        job.error_code = error_code
+        job.completed_at = utc_now()
+        job.worker_id = None
+        job.lease_expires_at = None
+        self._record_event(db, job, "failed")
+        db.commit()
+        self.metered.capture_hold(
+            db,
+            hold_id=job.hold_id,
+            reference_id=job.job_id,
+        )
+        db.refresh(job)
+        return self.to_response(job)
+
+    def recover_interrupted(self, db: Session) -> list[tuple[str, str]]:
+        interrupted = list(db.scalars(select(ReviewJob).where(ReviewJob.status == "running")))
+        for job in interrupted:
+            job.status = "queued"
+            job.started_at = None
+            job.error_code = "recovered_after_restart"
+            job.worker_id = None
+            job.lease_expires_at = None
+            self._record_event(db, job, "recovered")
+        db.commit()
+        rows = db.execute(select(ReviewJob.user_id, ReviewJob.job_id).where(
+            ReviewJob.status == "queued",
+            ReviewJob.execution_requested_at.is_not(None),
+        ))
+        return [(user_id, job_id) for user_id, job_id in rows]
+
+    def list_events(self, db: Session, *, user_id: str, job_id: str,
+                    after_sequence: int = 0) -> list[ReviewJobEvent]:
+        self._get_owned_job(db, user_id=user_id, job_id=job_id)
+        return list(db.scalars(select(ReviewJobEvent).where(
+            ReviewJobEvent.job_id == job_id,
+            ReviewJobEvent.sequence > after_sequence,
+        ).order_by(ReviewJobEvent.sequence)))
+
     def _finish_cancel(self, db, job):
         job.status = 'cancelled'
         job.completed_at = utc_now()
+        job.worker_id = None
+        job.lease_expires_at = None
+        self._record_event(db, job, 'cancelled')
         db.commit()
         self.metered.capture_hold(db, hold_id=job.hold_id, reference_id=job.job_id)
         db.refresh(job)
@@ -237,6 +327,9 @@ class ReviewJobService:
             db.execute(update(ReviewJob).where(
                 ReviewJob.job_id == job_id, ReviewJob.user_id == user_id, ReviewJob.status == 'running'
             ).values(error_code='cancel_requested'))
+        db.commit()
+        db.refresh(job)
+        self._record_event(db, job, 'cancelled' if cancelled is not None else 'cancel_requested')
         db.commit()
         if cancelled is not None:
             self.metered.capture_hold(db, hold_id=job.hold_id, reference_id=job.job_id)
@@ -268,6 +361,15 @@ class ReviewJobService:
             batch_count=job.batch_count,
             completed_batches=job.completed_batches,
             progress_percent=job.progress_percent,
+            event_sequence=job.event_sequence,
+            heartbeat_status=(
+                "stale"
+                if job.status == "running"
+                and (job.lease_expires_at is None or is_expired(job.lease_expires_at))
+                else "active"
+                if job.status == "running"
+                else "not_applicable"
+            ),
             issues=issues,
             error_code=job.error_code,
         )
@@ -278,6 +380,18 @@ class ReviewJobService:
         if job is None or job.user_id != user_id:
             raise ServiceError("review_job_not_found", "审核任务不存在。", 404)
         return job
+
+    @staticmethod
+    def _record_event(db: Session, job: ReviewJob, kind: str) -> ReviewJobEvent:
+        job.event_sequence += 1
+        event = ReviewJobEvent(
+            job_id=job.job_id,
+            sequence=job.event_sequence,
+            kind=kind,
+            completed_batches=job.completed_batches,
+        )
+        db.add(event)
+        return event
 
     def _estimated_usage(
         self,

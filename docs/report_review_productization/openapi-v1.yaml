@@ -194,12 +194,35 @@ paths:
             type: string
             format: uuid
       responses:
-        "200":
-          description: Review completed using the server-owned Agent
+        "202":
+          description: Durable review execution accepted; poll job or event cursor
         "409":
           description: Job is already running or its reservation is invalid
         "410":
           description: Encrypted temporary context has expired
+  /review-jobs/{job_id}/events:
+    get:
+      operationId: listReviewJobEvents
+      description: Returns metadata-only durable events after the supplied cursor; model text remains in the encrypted temporary job result.
+      parameters:
+        - in: path
+          name: job_id
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: after_sequence
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        "200":
+          description: Ordered events after the cursor
+        "404":
+          description: Job does not belong to the authenticated user
   /admin/users/{user_id}/balance-adjustments:
     post:
       operationId: adjustBalance

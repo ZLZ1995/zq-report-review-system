@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 
@@ -195,8 +196,20 @@ class ReviewJobResponse(BaseModel):
     batch_count: int
     completed_batches: int
     progress_percent: int
+    event_sequence: int
+    heartbeat_status: Literal["active", "stale", "not_applicable"]
     issues: list[dict[str, object]] = Field(default_factory=list)
     error_code: str | None = None
+
+
+class ReviewJobEventResponse(BaseModel):
+    sequence: int = Field(ge=1)
+    kind: Literal[
+        "queued", "execution_requested", "running", "progress",
+        "cancel_requested", "cancelled", "failed", "succeeded", "recovered",
+    ]
+    completed_batches: int = Field(ge=0)
+    created_at: datetime
 
 
 class ClientReleaseCreateRequest(BaseModel):
