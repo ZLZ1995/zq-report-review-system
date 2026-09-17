@@ -1,0 +1,72 @@
+name: publish-client-release-assets
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Successful technical-platform-client workflow run ID
+        required: true
+        type: string
+      source_sha:
+        description: Exact 40-character source commit SHA
+        required: true
+        type: string
+      release_tag:
+        description: Existing draft release tag
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  upload-release-assets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Validate inputs
+        shell: bash
+        env:
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+      - name: Download exact Windows build artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          mkdir release-assets
+          gh run download "$SOURCE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "zq-workspace-windows-$SOURCE_SHA" \
+            --dir release-assets
+      - name: Verify immutable asset allowlist
+        shell: bash
+        run: |
+          test -f release-assets/ZQ-Workspace-0.2.7-Windows.zip
+          test -f release-assets/ZQ-Workspace-0.2.7-Managed-Windows.zip
+          test -f release-assets/ZQ-Workspace-0.2.7-Windows.json
+          test -f release-assets/ZQ-Workspace-0.2.7-Managed-Windows.json
+          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 4
+          sha256sum release-assets/*
+      - name: Upload build assets to existing draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft' | grep -qx true
+          gh release upload "$RELEASE_TAG" \
+            release-assets/ZQ-Workspace-0.2.7-Windows.zip \
+            release-assets/ZQ-Workspace-0.2.7-Managed-Windows.zip \
+            release-assets/ZQ-Workspace-0.2.7-Windows.json \
+            release-assets/ZQ-Workspace-0.2.7-Managed-Windows.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber

@@ -47,3 +47,19 @@ def test_ci_builds_client_and_server_and_runs_static_security_gates():
     assert 'ruff check' in server
     assert 'tests/report_review_server' in server
     assert 'docker build' in server
+
+
+def test_release_asset_workflow_only_promotes_an_exact_successful_ci_artifact():
+    root = Path(__file__).resolve().parents[2]
+    workflow = (root / '.github/workflows/release-assets.yml').read_text(
+        encoding='utf-8')
+    assert 'workflow_dispatch:' in workflow
+    assert 'permissions:\n  actions: read\n  contents: write' in workflow
+    assert 'gh run download "$SOURCE_RUN_ID"' in workflow
+    assert 'zq-workspace-windows-$SOURCE_SHA' in workflow
+    assert '[[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]' in workflow
+    assert 'gh release view "$RELEASE_TAG"' in workflow
+    assert "grep -qx true" in workflow
+    assert 'ZQ-Workspace-0.2.7-Windows.zip' in workflow
+    assert 'ZQ-Workspace-0.2.7-Managed-Windows.zip' in workflow
+    assert '--clobber' in workflow
