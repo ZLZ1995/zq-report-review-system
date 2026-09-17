@@ -75,6 +75,8 @@ def test_actual_release_contains_new_acceptance_tools():
         "tests/agent_acceptance/cases/holdout.jsonl",
         "tests/agent_acceptance/cases/manifest.json",
         "scripts/evaluate_agent_semantics.py",
+        "scripts/run_agent_e2e.py",
+        "tests/technical_platform/test_agent_e2e_runner.py",
         "scripts/probe_admin_billing_browser.cjs",
         "docs/report_review_productization/openapi-v1.yaml",
     ):

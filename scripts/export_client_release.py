@@ -73,6 +73,7 @@ def collect_paths(root=ROOT, *, require_explicit=True):
         "tests/agent_acceptance/cases/holdout.jsonl",
         "tests/agent_acceptance/cases/manifest.json",
         "scripts/evaluate_agent_semantics.py",
+        "scripts/run_agent_e2e.py",
         "docs/report_review_productization/openapi-v1.yaml",
     ):
         path = root / name

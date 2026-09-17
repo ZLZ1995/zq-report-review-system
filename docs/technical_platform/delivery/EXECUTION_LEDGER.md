@@ -640,8 +640,8 @@
 | G02-05 | doing | 建立至少100条语义用例和独立留出集：否定、纠正、切任务、指代、无附件、OA/非OA、恶意文档指令。安全边界用例100%通过，其余明确目标至少95%；不靠训练集复述冒充泛化。 | 100基础+20留出已冻结，评分/冻结9专项；真实采集、重复及人工复核未完成，不宣称语义通过 |
 | G03-01 | doing | 计划式执行、权限门禁、后置验证、失败诊断和检查点；每步记录可审计的简短执行摘要，不要求或存储模型隐性思维链。 | ExecutionStore/StepResults/顺序Harness/receipt/真实适配器接通，684回归；远端恢复与更完整诊断仍待验 |
 | G03-02 | doing | TaskManager已替代全局worker存储，三类线程定向归属；UI切换不停止后台任务、停止针对当前会话、关闭等待全部任务及在途资源。真实Excel双预检并发已测；云端及Office并发/恢复门禁待验收。 | 完整757通过，r-573038b10a194a949d8eea83edeb0dff；仅本地并发验证 |
-| G03-03 | pending | 停止按钮立即反馈；网络、模型流、子进程/COM步骤协作取消；不得结束用户其他Office进程；服务端取消与客户端状态对齐。取消不等于已提交远程事务回滚。 | 待验证 |
-| G03-04 | pending | 模型文本增量直接进对应对话，成果链接也在对话；取消成果侧栏依赖。提供阶段进度，不编造百分比，不把完成文本打字动画称为真实流。 | 待验证 |
+| G03-03 | passed | 停止按钮立即反馈；网络、模型流、子进程/COM步骤协作取消；不得结束用户其他Office进程；服务端取消与客户端状态对齐。取消不等于已提交远程事务回滚。 | 客户端停止立即进入“正在停止”并禁用重复停止；远端取消请求、轮询中断、迟到结果隔离、生成子进程协作取消、资源锁与服务端queued/running取消均有覆盖；相关专项50项通过。生成链路只终止自身创建并持有句柄的子进程，不枚举或结束用户Office进程。 |
+| G03-04 | passed | 模型文本增量直接进对应对话，成果链接也在对话；取消成果侧栏依赖。提供阶段进度，不编造百分比，不把完成文本打字动画称为真实流。 | 服务端每批验证后发布增量issues，客户端轮询在最终响应前转发output事件；TaskEventRelay按不可变owner/project/session/task绑定写入原对话，切换会话不串屏且finished后拒绝迟到输出。审核报告、批注及生成成果链接由对话渲染；UI无成果侧栏。进度仅报告解析、重连、批次完成和校验阶段。远端增量/预检/事件路由/成果交付与取消邻域共50项通过。 |
 | G03-05 | pending | 服务端持久任务状态、单任务执行抢占/租约、重复execute幂等；长任务与HTTP请求寿命解耦，重启后无永久running。首版可用数据库持久队列/租约，不强制新增Redis。 | 待验证 |
 | G03-06 | pending | 实现事件序号/游标和断线续接、终态查询、心跳/超时分类；原始模型流不默认长期存库；任务正文加密临时保留最长24小时。 | 待验证 |
 | G03-07 | doing | 钱包原子预占、模型实际usage归一、重试/切备用渠道账务幂等、取消与失败结算、过期hold处理；模型与路由价格仍不传客户端。 | 用量可信度27关联通过；未知费用核对、预算硬边界、并发与恢复仍待实现验证 |
@@ -762,8 +762,8 @@
 | NL07-01 | G02/G08/G09/G10/G11 | doing | tests/agent_acceptance/cases/五类JSONL及holdout.jsonl、manifest.json；100+20人工合成用例已冻结，独立复核及真实模型验证待完成 |
 | NL07-02 | G02/G08/G09/G10/G11 | doing | tests/agent_acceptance/scoring.py及scripts/evaluate_agent_semantics.py；七维标签、分组/安全/留出门禁及冻结校验已实现，真实回放及副作用授权验收未完成 |
 | NL07-03 | G02/G08/G09/G10/G11 | passed | scripts/run_agent_e2e.py：输入消息→结构化理解→明确确认→只读执行→原件哈希复核→不可覆盖证据成果；确定性本地探针不冒充真实模型语义验收；3项专项及控制器/Harness组合22项通过，实跑证据 D:/ZQ-Acceptance/e2e-dff1df8-evidence.json |
-| NL07-04 | G02/G08/G09/G10/G11 | pending | 改  /  TP/release_info.py；SRV/api.py、config.py  /  客户端/服务端构建号、协议及能力版本；缺接口时阻止相关任务而非重复报笼统网络错误  / 
-| NL07-05 | G02/G08/G09/G10/G11 | pending | 改  /  scripts/build_technical_platform.py、package_technical_platform.py、export_client_release.py  /  打包新增模块、迁移、能力契约及资源；校验允许清单，排除日志/数据库/客户附件/密钥  / 
+| NL07-04 | G02/G08/G09/G10/G11 | passed | release_info/API config/RemoteSessionClient：客户端版本、协议、服务端构建SHA、能力及稳定发布可独立验证；缺能力/未来协议在业务POST前按具体能力阻止。兼容邻域62项通过，线上构建SHA与GitHub提交一致。 |
+| NL07-05 | G02/G08/G09/G10/G11 | doing | build/package/export已校验模板、规则、迁移资源和运行时数据排除；新增run_agent_e2e已补入显式源清单并由9项发布清单测试覆盖；最终EXE/ZIP重建及清单哈希复核仍待G10/G11。 |
 | NL07-06 | G02/G08/G09/G10/G11 | pending | 改  /  scripts/smoke_technical_platform_exe.py  /  登录、输入法/快捷键、拖拽、对话路由、取消及成果入口的 EXE 冒烟  / 
 | NL07-07 | G02/G08/G09/G10/G11 | pending | 改  /  DEP/Dockerfile、requirements.txt、start.py、README.md、ZEABUR.md  /  仅按实际新增依赖和启动迁移需求修改；明确密钥、持久卷、清理任务及兼容升级顺序  / 
 | NL07-08 | G02/G08/G09/G10/G11 | pending | 改  /  TTP/test_release_info.py、test_build_dependencies.py；TSRV/test_openapi_contract.py、test_migrations.py  /  新旧协议矩阵、打包资源、迁移及缺能力提示  / 
@@ -802,3 +802,6 @@
 - The admin release surface lists `0.2.6 · windows/x86_64 · stable · sequence 1`. The public `/api/v1/client-releases/current` endpoint independently returned the same stable version and manifest SHA-256 `e43f17ed364cbb578c30832fd94f52478d15ec71b6877c1e61fe3afbafc5f0ac`, with the signed GitHub Release download URL. No second transition was submitted because the release was already stable.
 - GitHub server run `35212126632` and Windows client run `35212126619` both completed successfully for this commit. This closes the repository CI gate for `dff1df8`.
 - NL07-03 now has an executable local acceptance entry point. Three script-contract tests passed, and the AgentController/Harness neighborhood passed 22/22 on a non-system pytest base directory. A real local run produced `D:/ZQ-Acceptance/e2e-dff1df8-evidence.json`, covering message intake, deterministic structured understanding, explicit authorization, read-only execution, source-hash verification and append-only evidence output. The evidence explicitly states that it neither calls a paid model nor proves semantic accuracy or release approval.
+- Follow-up commit `e70b21437ad5b6dc372de4c7713317fccf54627d` was deployed after synchronizing the exact build SHA. GitHub server run `35213084169` and Windows client run `35213084195` both completed successfully. Online health remained `ok`, capabilities reported the exact `e70b214...` build, and the stable signed `v0.2.6` release remained available.
+- GitHub repository settings were inspected read-only: the repository is public, the default branch is `main`, and no classic branch protection is configured. This is an explicit baseline risk, not an implied protected-release guarantee; no permission/ruleset change was made.
+- Protocol/release compatibility verification passed 62/62 tests across release metadata, capability preflight, session, planning and browser-step clients. Unsupported or future capability metadata prevents the relevant business POST and raises a capability-specific error. NL07-04 is signed off; broader G01-04 remains open for the complete data/Skill/template compatibility matrix.
