@@ -9,6 +9,7 @@ import os
 import sqlite3
 import sys
 import threading
+import time
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -143,6 +144,9 @@ class PlatformWindow(QMainWindow):
         self.task_manager = TaskManager()
         self.monitor = None
         self.version_worker = None
+        self.update_worker = None
+        self.available_update = None
+        self._close_after_update = False
         self.network_state = "connected"
         self.setWindowTitle(
             "ZQ 技术平台" + (" · 本地交互预览" if client is None else "")
@@ -236,6 +240,8 @@ class PlatformWindow(QMainWindow):
         self.version_label.setWordWrap(True)
         left.addWidget(self.version_label)
         self.button("检查服务版本兼容性", self.check_versions, left)
+        self.update_button = self.button("下载并安装更新", self.install_update, left)
+        self.update_button.hide()
         splitter.addWidget(sidebar)
 
         center = QWidget()
@@ -1784,6 +1790,8 @@ class PlatformWindow(QMainWindow):
         self.version_worker.start()
 
     def versions_checked(self, info):
+        from .client_update import available_release
+
         supported = "支持用户要求" if info["user_request_supported"] else "不兼容：缺少用户要求字段"
         build = info.get('server_build', '未提供')
         build_label = '服务端构建号未提供' if build == '未提供' else f'服务端构建号 {build}'
@@ -1794,6 +1802,89 @@ class PlatformWindow(QMainWindow):
             f"协议 {info.get('protocol_version') or '未声明'}（API 版本不等于部署版本）"
         )
         self.version_label.setToolTip(release_details(local_release(store=self.store)))
+        self.available_update = available_release(info, CLIENT_VERSION)
+        self.update_button.setVisible(self.available_update is not None)
+
+    def install_update(self):
+        if self.available_update is None or self.update_worker is not None:
+            return
+        from ..report_review_app.services.resource_locks import CLIENT_RESOURCES
+
+        if self.task_manager.active() or CLIENT_RESOURCES.busy():
+            self.status.setText('当前仍有任务或文件操作，完成或停止后才能更新。')
+            return
+        installation = os.environ.get('ZQ_INSTALLATION_ROOT')
+        if not installation:
+            self.status.setText('当前版本尚未纳入托管更新，请先使用托管安装包接管一次；历史项目不会迁移或删除。')
+            return
+        if self.storage_preferences is None:
+            self.status.setText('平台数据目录不可用，不能安全暂存更新。')
+            return
+        try:
+            layout = self.storage_preferences.load(self.store.owner)
+            if layout is None:
+                raise ValueError('请先设置非系统盘的平台数据目录。')
+            layout.prepare()
+            if isinstance(self.store, ProjectCatalog):
+                databases = self.store.update_database_inventory()
+            else:
+                databases = (self.store.path.resolve(),)
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            self.status.setText(str(exc))
+            return
+        if QMessageBox.question(
+            self,
+            '安装客户端更新',
+            f"确认下载并安装客户端 {self.available_update['version']}？\n"
+            '程序将在完成验签、备份和候选健康检查后关闭；业务原件不会修改。',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        from ..report_review_app.workers.function_worker import FunctionWorker
+        from .client_update import stage_update_request
+
+        record = self.available_update
+        self.update_button.setEnabled(False)
+        self.status.setText('正在下载并验签更新包；当前版本仍保持可用。')
+        self.update_worker = FunctionWorker(
+            lambda: stage_update_request(
+                record,
+                installation_root=Path(installation),
+                layout=layout,
+                databases=databases,
+                now=int(time.time()),
+                process_id=os.getpid(),
+            ),
+            self,
+        )
+        self.update_worker.succeeded.connect(self.update_staged)
+        self.update_worker.failed.connect(self.update_failed)
+        self.update_worker.finished.connect(self.update_finished)
+        self.update_worker.start()
+
+    def update_staged(self, request):
+        from .client_update import launch_staged_update
+
+        try:
+            launch_staged_update(request)
+        except OSError:
+            self.status.setText('独立更新器启动失败；当前版本未切换。')
+            self.update_button.setEnabled(True)
+            return
+        self._close_after_update = True
+        self.status.setText('更新已安全暂存，程序关闭后由独立更新器完成切换。')
+
+    def update_failed(self, _detail):
+        self.status.setText('更新准备失败；当前版本和历史数据均未切换。请检查网络、磁盘空间或发布状态。')
+        self.update_button.setEnabled(True)
+
+    def update_finished(self):
+        self.update_worker.wait()
+        self.update_worker.deleteLater()
+        self.update_worker = None
+        if self._close_after_update:
+            QTimer.singleShot(0, self.close)
 
     def version_check_failed(self, _detail):
         self.version_label.setText(f"客户端 {CLIENT_VERSION} · 无法确认服务端兼容性，请核对网络及服务端协议版本。")
@@ -1907,6 +1998,10 @@ class PlatformWindow(QMainWindow):
             return
         if self.version_worker is not None:
             self.status.setText("版本检查尚未结束，请稍后关闭。")
+            event.ignore()
+            return
+        if self.update_worker is not None:
+            self.status.setText('更新包仍在验签或暂存，请稍后关闭。')
             event.ignore()
             return
         if self.task_manager.active():

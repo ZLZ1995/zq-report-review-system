@@ -22,7 +22,14 @@ jobs:
           cache: pip
           cache-dependency-path: deploy/report_review_server/requirements.txt
       - name: Install server dependencies
-        run: python -m pip install -r deploy/report_review_server/requirements.txt pytest pyyaml
+        run: python -m pip install -r deploy/report_review_server/requirements.txt pytest pyyaml ruff
+      - name: Run server static checks
+        run: >-
+          python -m ruff check
+          src/asset_based_agent/report_review_server/models.py
+          src/asset_based_agent/report_review_server/schemas.py
+          src/asset_based_agent/report_review_server/services/skill_release_service.py
+          deploy/report_review_server/migrations/versions/0007_skill_releases.py
       - name: Run server contract and regression tests
         env:
           PYTHONPATH: src

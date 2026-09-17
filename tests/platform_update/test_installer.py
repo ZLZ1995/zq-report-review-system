@@ -67,6 +67,37 @@ def test_installation_preserves_history_and_previous_version(fixture):
     assert (root / 'versions/0.2.6/old.exe').read_bytes() == b'old'
 
 
+def test_additive_schema_upgrade_accepts_candidate_within_signed_range(fixture):
+    root, policy, keys, database, package, signed = fixture
+    journal = UpdateJournal(root / 'update-state.sqlite', policy, keys=keys)
+    original = database.read_bytes()
+
+    def health(_executable, _work, release):
+        return {'client_version': release.version, 'protocol_version': 1,
+                'local_schema_version': 11}
+
+    result = install_candidate(root, journal, signed(), package,
+                               databases=(database,), now=1500, probe=health)
+    assert result.is_file()
+    assert journal.launch_version() == '0.2.7'
+    assert database.read_bytes() == original
+
+
+@pytest.mark.parametrize('candidate_schema', [9, 31])
+def test_candidate_schema_outside_safe_signed_range_is_rejected(
+        fixture, candidate_schema):
+    root, policy, keys, database, package, signed = fixture
+    journal = UpdateJournal(root / 'update-state.sqlite', policy, keys=keys)
+
+    def health(_executable, _work, release):
+        return {'client_version': release.version, 'protocol_version': 1,
+                'local_schema_version': candidate_schema}
+
+    with pytest.raises(ValueError, match='schema'):
+        install_candidate(root, journal, signed(), package,
+                          databases=(database,), now=1500, probe=health)
+
+
 def test_failed_candidate_is_not_selected_and_requires_recovery(fixture):
     root, policy, keys, database, package, signed = fixture
     journal = UpdateJournal(root / 'update-state.sqlite', policy, keys=keys)
@@ -142,4 +173,3 @@ def test_recovery_handles_process_loss_before_failure_is_recorded(fixture, monke
     recover_unchanged(root, reopened)
     assert reopened.launch_version() == '0.2.6'
     assert database.read_bytes() == original
-

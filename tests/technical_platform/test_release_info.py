@@ -2,9 +2,17 @@ import httpx
 import pytest
 
 from asset_based_agent.technical_platform.release_info import (
+    CLIENT_VERSION,
     inspect_server,
     local_release,
 )
+
+
+def test_release_identity_matches_schema_11_delivery():
+    from asset_based_agent.technical_platform.local_migrations import SCHEMA_VERSION
+
+    assert CLIENT_VERSION == '0.2.7'
+    assert SCHEMA_VERSION == 11
 
 
 def test_local_release_contains_actual_rule_hash():
@@ -133,10 +141,49 @@ def test_version_panel_shows_verified_build_not_hardcoded_unknown():
     from asset_based_agent.technical_platform.app import PlatformWindow
     texts = []
     details = []
-    fake = SimpleNamespace(store=None, version_label=SimpleNamespace(setText=texts.append, setToolTip=details.append))
+    visibility = []
+    fake = SimpleNamespace(
+        store=None,
+        version_label=SimpleNamespace(setText=texts.append, setToolTip=details.append),
+        update_button=SimpleNamespace(setVisible=visibility.append),
+        available_update=None,
+    )
     PlatformWindow.versions_checked(fake, {'user_request_supported': True, 'server_api_version': '0.1.0',
                                           'server_build': 'c' * 40, 'protocol_version': 1})
     assert 'c' * 40 in texts[0]
     assert 'template_sha256' in details[0]
     assert 'gongshang-change-history-docx' in details[0]
     assert '不代表项目已迁移' in details[0]
+    assert visibility == [False]
+
+
+def test_version_panel_offers_only_new_stable_signed_release():
+    import hashlib
+    import json
+    from types import SimpleNamespace
+
+    from asset_based_agent.technical_platform.app import PlatformWindow
+
+    manifest = {'payload': {'version': '0.2.8', 'sequence': 3}, 'signature': 'x'}
+    encoded = json.dumps(manifest, sort_keys=True, separators=(',', ':'),
+                         ensure_ascii=True).encode('ascii')
+    record = {'status': 'stable', 'version': '0.2.8', 'sequence': 3,
+              'manifest': manifest,
+              'manifest_sha256': hashlib.sha256(encoded).hexdigest()}
+    visibility = []
+    fake = SimpleNamespace(
+        store=None,
+        version_label=SimpleNamespace(setText=lambda _text: None,
+                                      setToolTip=lambda _text: None),
+        update_button=SimpleNamespace(setVisible=visibility.append),
+        available_update=None,
+    )
+    PlatformWindow.versions_checked(fake, {
+        'user_request_supported': True,
+        'server_api_version': '1',
+        'server_build': 'b' * 40,
+        'protocol_version': 1,
+        'current_release': record,
+    })
+    assert fake.available_update == record
+    assert visibility == [True]

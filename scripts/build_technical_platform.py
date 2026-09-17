@@ -42,7 +42,7 @@ def main():
             os.environ["WINDIR"],
         ]
     )
-    result = subprocess.run(
+    client = subprocess.run(
         [
             sys.executable,
             "-m",
@@ -66,6 +66,20 @@ def main():
             "win32com.client",
             "--hidden-import",
             "pythoncom",
+            "--hidden-import",
+            "asset_based_agent.technical_platform.feedback_service",
+            "--hidden-import",
+            "asset_based_agent.technical_platform.memory_contracts",
+            "--hidden-import",
+            "asset_based_agent.technical_platform.memory_retrieval",
+            "--hidden-import",
+            "asset_based_agent.technical_platform.memory_service",
+            "--hidden-import",
+            "asset_based_agent.technical_platform.review_issues",
+            "--hidden-import",
+            "asset_based_agent.technical_platform.skill_improvement",
+            "--hidden-import",
+            "asset_based_agent.technical_platform.ui.memory_panel",
             "--copy-metadata",
             "python-docx",
             "--copy-metadata",
@@ -93,7 +107,44 @@ def main():
         env=environment,
         check=False,
     ).returncode
-    return result
+    if client:
+        return client
+    bootstrap = ROOT / "dist/technical_platform/bootstrap"
+    bootstrap.mkdir(parents=True, exist_ok=True)
+    for name, script in (
+        ("ZQ技术平台更新器", "run_client_updater.py"),
+        ("ZQ技术平台启动器", "run_client_launcher.py"),
+    ):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "PyInstaller",
+                "--noconfirm",
+                "--clean",
+                "--onefile",
+                "--windowed",
+                "--name",
+                name,
+                "--icon",
+                str(ROOT / "assets/report_review/zq_app_icon.ico"),
+                "--distpath",
+                str(bootstrap),
+                "--workpath",
+                str(build / name),
+                "--specpath",
+                str(build / name),
+                "--paths",
+                str(ROOT / "src"),
+                str(ROOT / "scripts" / script),
+            ],
+            cwd=ROOT,
+            env=environment,
+            check=False,
+        ).returncode
+        if result:
+            return result
+    return 0
 
 
 if __name__ == "__main__":

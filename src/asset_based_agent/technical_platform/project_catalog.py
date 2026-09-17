@@ -145,6 +145,24 @@ class ProjectCatalog:
         self.select_project(identity)
         self.active.restore(identity)
 
+    def update_database_inventory(self) -> tuple[Path, ...]:
+        """Return every durable SQLite file that must survive a client update."""
+        with self.index() as db:
+            rows = db.execute(
+                "SELECT path FROM locations WHERE owner=? ORDER BY rowid", (self.owner,)
+            ).fetchall()
+        paths = [self.index_path.resolve()]
+        for row in rows:
+            path = Path(row[0]).resolve()
+            if not path.is_file():
+                raise OSError("历史项目目录不可用，更新已停止；请先重新连接对应磁盘。")
+            validate_business_directory(path.parent)
+            if path not in paths:
+                paths.append(path)
+        if not paths[0].is_file():
+            raise OSError("项目索引不可用，更新已停止。")
+        return tuple(paths)
+
     def __getattr__(self, name):
         if self.active is None:
             raise ValueError("请先创建或打开非系统盘项目")

@@ -41,6 +41,7 @@ def main() -> int:
     parser.add_argument('--manifest', type=Path)
     parser.add_argument('--package', type=Path)
     parser.add_argument('--databases', type=Path)
+    parser.add_argument('--wait-pid', type=int)
     args = parser.parse_args()
     try:
         root = args.installation_root
@@ -68,10 +69,17 @@ def main() -> int:
         else:
             journal = UpdateJournal(root / 'update-state.sqlite', policy)
             if args.operation == 'recover':
+                if args.wait_pid is not None:
+                    raise ValueError('Recovery does not accept a client wait PID')
                 recover_unchanged(root, journal)
             else:
                 if args.manifest is None or args.package is None or args.databases is None:
                     raise ValueError('Manifest, package and explicit database inventory required')
+                if args.wait_pid is not None:
+                    from asset_based_agent.technical_platform.updates.process_wait import (
+                        wait_for_process_exit,
+                    )
+                    wait_for_process_exit(args.wait_pid)
                 inventory = read_json(args.databases)
                 if not isinstance(inventory, list) or len(inventory) > 1024 or any(
                         not isinstance(path, str) for path in inventory):
@@ -89,4 +97,3 @@ def main() -> int:
 
 if __name__ == '__main__':
     raise SystemExit(main())
-

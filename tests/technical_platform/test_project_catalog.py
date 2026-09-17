@@ -65,3 +65,26 @@ def test_system_drive_rejected_for_new_project():
 
     with pytest.raises(ValueError):
         validate_business_directory(Path("C:/business"), system_drive="C:")
+
+
+def test_update_database_inventory_includes_index_and_every_registered_project(tmp_path):
+    catalog = ProjectCatalog(tmp_path / 'index.sqlite', 'alice')
+    roots = [tmp_path / 'one', tmp_path / 'two']
+    for index, root in enumerate(roots):
+        root.mkdir()
+        catalog.create_project(f'project-{index}', root)
+    inventory = catalog.update_database_inventory()
+    assert inventory[0] == catalog.index_path.resolve()
+    assert set(inventory[1:]) == {
+        (root / '.zq/platform.sqlite').resolve() for root in roots
+    }
+
+
+def test_update_database_inventory_blocks_when_historical_project_is_offline(tmp_path):
+    root = tmp_path / 'business'
+    root.mkdir()
+    catalog = ProjectCatalog(tmp_path / 'index.sqlite', 'alice')
+    catalog.create_project('project', root)
+    root.rename(tmp_path / 'offline')
+    with pytest.raises(OSError, match='不可用'):
+        catalog.update_database_inventory()

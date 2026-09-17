@@ -114,10 +114,11 @@ def install_candidate(root: Path, journal: UpdateJournal, signed_manifest: bytes
             executable = executables[0]
             journal.activating(token)
             info = probe(executable, work, release)
+            candidate_schema = info.get('local_schema_version')
             if (info.get('client_version') != release.version or
                     type(info.get('protocol_version')) is not int or info['protocol_version'] != policy.protocol or
-                    type(info.get('local_schema_version')) is not int or
-                    info['local_schema_version'] != policy.data_schema):
+                    type(candidate_schema) is not int or candidate_schema < policy.data_schema or
+                    not release.data_schema_min <= candidate_schema <= release.data_schema_max):
                 raise ValueError('Candidate requires unsupported schema/protocol transition')
             if any(database_fingerprint(path) != fingerprint for path, fingerprint in before.items()):
                 raise ValueError('Business database changed during update; manual recovery required')
