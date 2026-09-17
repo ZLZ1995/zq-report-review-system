@@ -44,6 +44,27 @@ def test_download_hash_is_cancel_safe_and_checks_actual_size(tmp_path):
     with pytest.raises(InterruptedError): fingerprint_download(path,4,cancelled)
 
 
+def test_download_fingerprint_ignores_windows_ctime_view_difference(tmp_path, monkeypatch):
+    """Path.stat and fstat may expose different Windows ctime views for one file."""
+    from types import SimpleNamespace
+
+    from asset_based_agent.technical_platform import browser_download_artifacts as artifacts
+
+    path=tmp_path/'file.txt'; path.write_bytes(b'data')
+    real_fstat=artifacts.os.fstat
+
+    def differing_ctime(fd):
+        info=real_fstat(fd)
+        values={name:getattr(info,name) for name in (
+            'st_mode','st_nlink','st_dev','st_ino','st_size','st_mtime_ns','st_ctime_ns')}
+        values['st_ctime_ns'] += 1
+        return SimpleNamespace(**values)
+
+    monkeypatch.setattr(artifacts.os,'fstat',differing_ctime)
+    result=artifacts.fingerprint_download(path,4,Event())
+    assert result['sha256']==sha256(b'data').hexdigest()
+
+
 def test_artifact_is_persisted_once_under_consumed_authorization(tmp_path):
     from asset_based_agent.technical_platform.browser_download_artifacts import (
         DownloadArtifacts,

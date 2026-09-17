@@ -39,8 +39,13 @@ class StoredDownload(DownloadFingerprint):
 def _stamp(info):
     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
         raise ValueError('Download is not an independent regular file')
+    # On Windows, stat-by-path and fstat-by-handle can expose different ctime
+    # views for the same open file.  ctime is metadata-change time rather than
+    # file identity, so binding it here rejects legitimate downloads on a
+    # clean runner.  Device/inode/size/mtime plus the streamed SHA-256 retain
+    # replacement and content-change detection without that false mismatch.
     return sha256(json.dumps([info.st_dev, info.st_ino, info.st_size,
-                             info.st_mtime_ns, info.st_ctime_ns]).encode()).hexdigest()
+                             info.st_mtime_ns]).encode()).hexdigest()
 
 
 def _path(value):
