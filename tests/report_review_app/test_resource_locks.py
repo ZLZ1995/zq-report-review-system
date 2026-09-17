@@ -103,3 +103,30 @@ def test_model_limit_is_held_by_real_request_and_cancelled_waiter_never_posts():
             with CLIENT_RESOURCES.lease(('model',)):
                 pass
     client.http_client.close()
+
+
+def test_model_resource_allows_two_calls_and_blocks_the_third():
+    from asset_based_agent.report_review_app.services.resource_locks import (
+        ResourceLocks,
+    )
+
+    resources = ResourceLocks()
+    release = Event()
+    entered = [Event(), Event(), Event()]
+
+    def use_slot(index):
+        with resources.lease(("model",)):
+            entered[index].set()
+            release.wait(5)
+
+    workers = [Thread(target=use_slot, args=(index,)) for index in range(3)]
+    for worker in workers[:2]:
+        worker.start()
+    assert entered[0].wait(2) and entered[1].wait(2)
+    workers[2].start()
+    assert not entered[2].wait(0.2)
+    release.set()
+    assert entered[2].wait(2)
+    for worker in workers:
+        worker.join(2)
+        assert not worker.is_alive()

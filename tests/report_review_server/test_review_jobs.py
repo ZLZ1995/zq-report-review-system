@@ -30,6 +30,9 @@ from asset_based_agent.report_review_server.services.provider_gateway import (
     ProviderCallError,
     ProviderResponse,
 )
+from asset_based_agent.report_review_server.services.review_job_executor import (
+    ReviewJobExecutor,
+)
 from asset_based_agent.report_review_server.services.review_job_service import (
     ReviewJobService,
 )
@@ -602,6 +605,46 @@ def test_async_preflight_failure_marks_job_failed_and_releases_hold(client) -> N
     with client.app.state.session_factory() as db:
         hold = db.get(BalanceHold, hold_id)
         assert hold is not None and hold.status == "released"
+
+
+def test_review_executor_runs_only_one_server_job_at_a_time(client) -> None:
+    release = threading.Event()
+    entered = [threading.Event(), threading.Event()]
+    active = 0
+    maximum_active = 0
+    guard = threading.Lock()
+
+    class BlockingService:
+        def execute_job(self, db, *, user_id, job_id, worker_id):
+            nonlocal active, maximum_active
+            with guard:
+                active += 1
+                maximum_active = max(maximum_active, active)
+            entered[int(job_id)].set()
+            assert release.wait(5)
+            with guard:
+                active -= 1
+
+        def fail_requested_job(self, *args, **kwargs):
+            raise AssertionError("successful jobs must not enter failure fallback")
+
+    executor = ReviewJobExecutor(
+        client.app.state.session_factory,
+        BlockingService(),
+        max_workers=1,
+    )
+    try:
+        assert executor.submit("user", "0")
+        assert executor.submit("user", "1")
+        assert entered[0].wait(2)
+        assert not entered[1].wait(0.2)
+        release.set()
+        assert entered[1].wait(2)
+        assert executor.wait("1", timeout=5)
+        assert maximum_active == 1
+    finally:
+        release.set()
+        executor.shutdown()
 
 
 def test_failed_review_captures_reported_usage_once(client) -> None:
