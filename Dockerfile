@@ -1,9 +1,12 @@
 FROM python:3.12-slim
 
+ARG REPORT_REVIEW_BUILD_SHA=""
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app/src \
-    REPORT_REVIEW_ENV=production
+    REPORT_REVIEW_ENV=production \
+    REPORT_REVIEW_BUILD_SHA=${REPORT_REVIEW_BUILD_SHA}
 
 WORKDIR /app
 COPY deploy/report_review_server/requirements.txt /app/requirements.txt
