@@ -1,0 +1,35 @@
+name: technical-platform-client
+
+on:
+  push:
+    branches: ["main", "codex/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  client-regression:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      PYTHONPATH: src
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install client test dependencies
+        shell: cmd
+        run: >-
+          python -m pip install -r deploy\report_review_server\requirements.txt
+          pytest cryptography httpx pyyaml PySide6 pywin32 python-docx openpyxl pdfplumber
+      - name: Run update and client contract suites
+        shell: cmd
+        run: >-
+          python -m pytest tests\platform_update tests\technical_platform tests\report_review_app
+          -q --basetemp=D:\zq-client-pytest
