@@ -5,6 +5,7 @@
 - G09/G10 build identity hardening: `deploy/report_review_server/Dockerfile` and repository-root `Dockerfile` now accept `ARG REPORT_REVIEW_BUILD_SHA` and expose it as the runtime `REPORT_REVIEW_BUILD_SHA`; no JWT, provider key, or release private key is baked into either image.
 - TDD evidence: Dockerfile asset tests passed 5/5 in the isolated release checkout. The local Docker Desktop Linux daemon was unavailable, so an actual image build remains pending CI/Zeabur verification.
 - Server regression after the change: `tests\\report_review_server` passed 189/189 in 17.59s (one upstream httpx/Starlette deprecation warning).
+- Added `.github/workflows/server-ci.yml` on the release branch: server regression runs before a Docker build, and the image build receives `${{ github.sha }}` as `REPORT_REVIEW_BUILD_SHA`. YAML parsed successfully locally; GitHub Actions execution is pending remote CI observation.
 
 ## 2026-09-17 release sync evidence
 
