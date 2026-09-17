@@ -8,6 +8,7 @@
 - Added `.github/workflows/server-ci.yml` on the release branch: server regression runs before a Docker build, and the image build receives `${{ github.sha }}` as `REPORT_REVIEW_BUILD_SHA`. YAML parsed successfully locally; GitHub Actions execution is pending remote CI observation.
 - G08-05 minimum registry implemented in the release checkout: signed manifest shape is required; admin-only draft→canary/stable/withdrawn transitions are audited; the public current-release endpoint exposes only immutable manifest metadata. Migration `0005_client_releases` is included. Isolated release checkout server regression passed 191/191.
 - The registry now verifies the Ed25519 signature against the client trust root before accepting a release; the server does not import desktop-only updater modules. Both source and isolated registry tests passed 2/2; isolated server regression remains 191/191.
+- Client version inspection now reads `/api/v1/client-releases/current` only when the advertised capability is present, treats HTTP 404 as no release, and fail-closes malformed metadata. Release-info tests passed 11/11 in the isolated checkout.
 
 ## 2026-09-17 release sync evidence
 

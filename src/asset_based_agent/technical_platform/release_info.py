@@ -93,6 +93,7 @@ def inspect_server(base_url: str, *, client: httpx.Client | None = None) -> dict
         "user_request_supported": properties.get("user_request", {}).get("type") == "string",
         "protocol_version": None,
         "capabilities": {},
+        "current_release": None,
     }
     if 'get' in data.get('paths', {}).get('/api/v1/capabilities', {}):
         response = client.get(f'{parsed.scheme}://{parsed.netloc}/api/v1/capabilities')
@@ -111,4 +112,14 @@ def inspect_server(base_url: str, *, client: httpx.Client | None = None) -> dict
                                        not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', build)))):
             raise ValueError('服务端协议元信息无效，已停止兼容性确认。')
         result.update(server_build=build or '未提供', protocol_version=1, capabilities=capabilities)
+        if capabilities.get('client_release') == 1:
+            release_response = client.get(f'{parsed.scheme}://{parsed.netloc}/api/v1/client-releases/current')
+            if release_response.status_code != 404:
+                release_response.raise_for_status()
+                release = release_response.json()
+                if (not isinstance(release, dict) or not isinstance(release.get('manifest'), dict)
+                        or not isinstance(release.get('manifest_sha256'), str)
+                        or len(release['manifest_sha256']) != 64):
+                    raise ValueError('服务端发布清单无效，已停止更新检查。')
+                result['current_release'] = release
     return result

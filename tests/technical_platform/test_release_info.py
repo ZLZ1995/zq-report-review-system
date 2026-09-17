@@ -101,6 +101,20 @@ def test_protocol_inspection_reads_explicit_metadata_and_build():
     assert info['protocol_version'] == 1
 
 
+def test_protocol_inspection_reads_current_signed_release_metadata():
+    def handle(request):
+        if request.url.path == '/openapi.json':
+            return httpx.Response(200, json={'paths': {'/api/v1/capabilities': {'get': {}}}})
+        if request.url.path == '/api/v1/capabilities':
+            return httpx.Response(200, json={'schema_version': 1, 'protocol_version': 1,
+                                             'build_sha': 'b' * 40, 'capabilities': {'client_release': 1}})
+        return httpx.Response(200, json={'status': 'stable', 'version': '0.2.7', 'sequence': 2,
+                                         'manifest_sha256': 'a' * 64, 'manifest': {'payload': {}, 'signature': 'x'}})
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        info = inspect_server('https://server.test', client=client)
+    assert info['current_release']['version'] == '0.2.7'
+
+
 def test_unknown_metadata_schema_is_not_treated_as_compatible():
     def handle(request):
         if request.url.path == '/openapi.json':
