@@ -9,6 +9,7 @@
 - G08-05 minimum registry implemented in the release checkout: signed manifest shape is required; admin-only draft→canary/stable/withdrawn transitions are audited; the public current-release endpoint exposes only immutable manifest metadata. Migration `0005_client_releases` is included. Isolated release checkout server regression passed 191/191.
 - The registry now verifies the Ed25519 signature against the client trust root before accepting a release; the server does not import desktop-only updater modules. Both source and isolated registry tests passed 2/2; isolated server regression remains 191/191.
 - Client version inspection now reads `/api/v1/client-releases/current` only when the advertised capability is present, treats HTTP 404 as no release, and fail-closes malformed metadata. Release-info tests passed 11/11 in the isolated checkout.
+- GitHub Actions run 6 for commit `cf590a2` succeeded: server-tests and server-image both completed successfully in 1m05s. Two upstream Node.js deprecation warnings remain; no functional failure.
 
 ## 2026-09-17 release sync evidence
 
