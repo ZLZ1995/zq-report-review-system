@@ -48,6 +48,7 @@ def collect_paths(root=ROOT, *, require_explicit=True):
         "scripts/export_client_release.py", "assets/report_review/zq_app_icon.ico",
         "scripts/run_client_updater.py", "scripts/run_client_launcher.py",
         "scripts/create_release_signing_key.py", "scripts/sign_client_release.py",
+        "scripts/verify_client_release.py",
         "src/asset_based_agent/__init__.py", "scripts/bootstrap_report_review_admin.py",
         "src/asset_based_agent/agent_contracts.py",
         "src/asset_based_agent/browser_contracts.py",

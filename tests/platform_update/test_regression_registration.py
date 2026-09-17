@@ -20,6 +20,7 @@ def test_release_export_includes_update_tests_and_public_signing_tools_only():
     assert root / 'tests/platform_update/test_manifest.py' in selected
     assert root / 'scripts/create_release_signing_key.py' in selected
     assert root / 'scripts/sign_client_release.py' in selected
+    assert root / 'scripts/verify_client_release.py' in selected
     assert root / 'scripts/run_client_updater.py' in selected
     assert root / 'scripts/run_client_launcher.py' in selected
     assert all(path.is_relative_to(root) and path.name != 'KEY' for path in selected)
