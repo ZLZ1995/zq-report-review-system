@@ -769,3 +769,10 @@
 | NL07-08 | G02/G08/G09/G10/G11 | pending | 改  /  TTP/test_release_info.py、test_build_dependencies.py；TSRV/test_openapi_contract.py、test_migrations.py  /  新旧协议矩阵、打包资源、迁移及缺能力提示  / 
 | NL07-09 | G02/G08/G09/G10/G11 | pending | 增  /  DOC/NL_SEMANTIC_ACCEPTANCE.md、NL_WINDOWS_ACCEPTANCE.md、NL_DEPLOYMENT_ROLLBACK.md、NL_RELEASE_MANIFEST.json  /  用例标签/评分、实机矩阵、发布回退和最终源码/EXE/ZIP/服务端哈希证据  / 
 | NL07-10 | G02/G08/G09/G10/G11 | pending | 改  /  DOC/RELEASE_READINESS_CHECKLIST.md、README.md  /  入口、用户操作、能力边界、已验证及待验证状态更新  / 
+
+## 2026-09-17 signed updater integration
+
+- Release branch commit `77139f8` adds the signed update core: manifest verification, trusted-key allowlist, HTTPS host pinning, bounded ZIP extraction, package hash/size checks, SQLite backup/restore, installation journal, process lock, launcher, health-check mode, and independent updater CLI. User project/history data is kept outside the version directory and is backed up before activation.
+- The client task manager and Office/resource lock now expose an idle update barrier. New work is rejected while the barrier is held; active work is not force-killed. This is a preparation gate, not an implicit installation consent.
+- Local verification on a non-system temporary volume: `tests/platform_update` passed 85/85; combined server and update suites passed 278/278. The update suite covers two sequential versions, failed health recovery, tampered signatures/packages, redirects, archive traversal, process loss, and lock races.
+- A Windows GitHub Actions client workflow was added in commit `bdedd0b` to run the client/update suites on a non-system basetemp. The two workflows for this commit were observed as `in_progress` at ledger update time; their final conclusions and any Zeabur rebuild still require confirmation.
