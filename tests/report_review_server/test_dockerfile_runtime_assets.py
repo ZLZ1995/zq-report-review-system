@@ -22,3 +22,10 @@ def test_legacy_server_context_contains_contract_compatibility_modules():
     assert (root / 'compat_agent_contracts.py').is_file()
     assert (root / 'compat_browser_contracts.py').is_file()
     assert 'legacy Zeabur build context' in (root / 'api.py').read_text(encoding='utf-8')
+
+
+def test_server_entrypoint_embeds_contract_fallback():
+    main = Path(__file__).resolve().parents[2] / 'src' / 'asset_based_agent' / 'report_review_server' / 'main.py'
+    content = main.read_text(encoding='utf-8')
+    assert '_install_compat_contracts' in content
+    assert 'asset_based_agent.agent_contracts' in content
