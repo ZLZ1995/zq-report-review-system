@@ -54,7 +54,8 @@ class ServerSettings:
             access_token_minutes=int(os.environ.get("REPORT_REVIEW_ACCESS_TOKEN_MINUTES", "15")),
             refresh_token_days=int(os.environ.get("REPORT_REVIEW_REFRESH_TOKEN_DAYS", "7")),
             provider_encryption_key=os.environ.get("REPORT_REVIEW_PROVIDER_ENCRYPTION_KEY", ""),
-            build_sha=os.environ.get('REPORT_REVIEW_BUILD_SHA') or None,
+            build_sha=(os.environ.get('REPORT_REVIEW_IMAGE_BUILD_SHA')
+                       or os.environ.get('REPORT_REVIEW_BUILD_SHA') or None),
         )
 
     def encryption_key_bytes(self) -> bytes:

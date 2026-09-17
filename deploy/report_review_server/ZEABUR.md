@@ -11,7 +11,7 @@
 | 变量 | 值 |
 |---|---|
 | REPORT_REVIEW_ENV | production |
-| REPORT_REVIEW_BUILD_SHA | 发布流水线填入本次实际Git提交SHA；不填时能力接口返回null，不伪造部署版本。该值为公开元信息，不能填写密钥。 |
+| REPORT_REVIEW_BUILD_SHA | Zeabur Git部署不要手工固定此值；镜像构建自动采用平台提供的 `ZEABUR_GIT_COMMIT_SHA`。仅非Zeabur流水线可显式传入实际提交SHA；该值为公开元信息，不能填写密钥。 |
 | REPORT_REVIEW_DATABASE_URL | postgresql+psycopg://用户:URL编码密码@私网主机:端口/数据库 |
 | REPORT_REVIEW_JWT_SECRET | secrets.token_urlsafe(48)生成的独立随机值 |
 | REPORT_REVIEW_PROVIDER_ENCRYPTION_KEY | base64.urlsafe_b64encode(secrets.token_bytes(32)).decode()生成的独立值 |

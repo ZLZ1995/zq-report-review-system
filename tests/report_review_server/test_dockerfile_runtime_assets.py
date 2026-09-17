@@ -19,14 +19,19 @@ def test_server_dockerfile_exposes_build_sha_stamp_without_baking_secrets():
         / 'Dockerfile'
     ).read_text(encoding='utf-8')
     assert 'ARG REPORT_REVIEW_BUILD_SHA' in dockerfile
+    assert 'ARG ZEABUR_GIT_COMMIT_SHA' in dockerfile
     assert 'REPORT_REVIEW_BUILD_SHA=${REPORT_REVIEW_BUILD_SHA}' in dockerfile
+    assert 'REPORT_REVIEW_IMAGE_BUILD_SHA=${ZEABUR_GIT_COMMIT_SHA}' in dockerfile
     assert 'REPORT_REVIEW_JWT_SECRET' not in dockerfile
 
 
 def test_repository_root_has_server_build_fallback():
     root_dockerfile = Path(__file__).resolve().parents[2] / 'Dockerfile'
     assert root_dockerfile.is_file()
-    assert 'COPY src/asset_based_agent /app/src/asset_based_agent' in root_dockerfile.read_text(encoding='utf-8')
+    content = root_dockerfile.read_text(encoding='utf-8')
+    assert 'COPY src/asset_based_agent /app/src/asset_based_agent' in content
+    assert 'ARG ZEABUR_GIT_COMMIT_SHA' in content
+    assert 'REPORT_REVIEW_IMAGE_BUILD_SHA=${ZEABUR_GIT_COMMIT_SHA}' in content
 
 
 def test_legacy_server_context_contains_contract_compatibility_modules():

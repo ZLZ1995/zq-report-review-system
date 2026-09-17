@@ -23,3 +23,11 @@ def test_build_identity_is_explicit_and_validated(monkeypatch):
     monkeypatch.setenv('REPORT_REVIEW_BUILD_SHA', 'secret or arbitrary text')
     with pytest.raises(ValueError, match='BUILD_SHA'):
         ServerSettings.from_environment()
+
+
+def test_immutable_image_build_identity_overrides_stale_runtime_value(monkeypatch):
+    from asset_based_agent.report_review_server.config import ServerSettings
+
+    monkeypatch.setenv('REPORT_REVIEW_BUILD_SHA', 'a' * 40)
+    monkeypatch.setenv('REPORT_REVIEW_IMAGE_BUILD_SHA', 'b' * 40)
+    assert ServerSettings.from_environment().build_sha == 'b' * 40
