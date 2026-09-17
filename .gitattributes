@@ -1,0 +1,3 @@
+tests/agent_acceptance/corpus.py text eol=lf
+tests/agent_acceptance/cases/*.jsonl text eol=lf
+tests/agent_acceptance/cases/manifest.json text eol=lf

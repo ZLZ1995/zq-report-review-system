@@ -14,6 +14,14 @@ def loader():
     return module
 
 
+def test_frozen_corpus_files_have_checkout_stable_line_endings():
+    root = Path(__file__).resolve().parents[2]
+    attributes = (root / '.gitattributes').read_text('utf-8').splitlines()
+    assert 'tests/agent_acceptance/corpus.py text eol=lf' in attributes
+    assert 'tests/agent_acceptance/cases/*.jsonl text eol=lf' in attributes
+    assert 'tests/agent_acceptance/cases/manifest.json text eol=lf' in attributes
+
+
 def test_corpus_has_independent_inputs_explicit_scopes_and_holdout():
     cases = loader().load_corpus()
     assert Counter(c['split'] for c in cases) == {'base': 100, 'holdout': 20}
