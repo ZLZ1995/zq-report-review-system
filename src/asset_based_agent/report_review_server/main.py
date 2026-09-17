@@ -1,4 +1,4 @@
-+"""ASGI entrypoint with a legacy-build contract fallback."""
+"""ASGI entrypoint with a legacy-build contract fallback."""
 
 from __future__ import annotations
 
