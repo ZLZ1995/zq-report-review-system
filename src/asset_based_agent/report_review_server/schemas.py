@@ -197,3 +197,23 @@ class ReviewJobResponse(BaseModel):
     progress_percent: int
     issues: list[dict[str, object]] = Field(default_factory=list)
     error_code: str | None = None
+
+
+class ClientReleaseCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    manifest: dict[str, object]
+
+
+class ClientReleaseTransitionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: Literal["canary", "stable", "withdrawn"]
+
+
+class ClientReleaseResponse(BaseModel):
+    release_id: str
+    version: str
+    platform: str
+    arch: str
+    sequence: int
+    status: str
+    manifest_sha256: str
