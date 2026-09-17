@@ -9,9 +9,7 @@ WORKDIR /app
 COPY deploy/report_review_server/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY src/asset_based_agent/__init__.py /app/src/asset_based_agent/__init__.py
-COPY src/asset_based_agent/agent_contracts.py /app/src/asset_based_agent/agent_contracts.py
-COPY src/asset_based_agent/browser_contracts.py /app/src/asset_based_agent/browser_contracts.py
-COPY src/asset_based_agent/report_review_server /app/src/asset_based_agent/report_review_server
+COPY src/asset_based_agent /app/src/asset_based_agent
 COPY deploy/report_review_server/alembic.ini /app/deploy/report_review_server/alembic.ini
 COPY deploy/report_review_server/migrations /app/deploy/report_review_server/migrations
 COPY scripts/bootstrap_report_review_admin.py /app/scripts/bootstrap_report_review_admin.py
