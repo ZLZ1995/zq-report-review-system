@@ -16,13 +16,12 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session
 
-from ..agent_contracts import (
-    PlanningRequest,
-    PlanProposal,
-    TaskUnderstanding,
-    UnderstandingRequest,
-)
-from ..browser_contracts import BrowserStepProposal, BrowserStepRequest
+try:
+    from ..agent_contracts import PlanningRequest, PlanProposal, TaskUnderstanding, UnderstandingRequest
+    from ..browser_contracts import BrowserStepProposal, BrowserStepRequest
+except ModuleNotFoundError:  # pragma: no cover - legacy Zeabur build context
+    from .compat_agent_contracts import PlanningRequest, PlanProposal, TaskUnderstanding, UnderstandingRequest
+    from .compat_browser_contracts import BrowserStepProposal, BrowserStepRequest
 from .config import ServerSettings
 from .crypto import SecretCipher
 from .database import Base, build_engine, build_session_factory
