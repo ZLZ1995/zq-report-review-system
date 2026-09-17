@@ -1,0 +1,44 @@
+{
+  "release": {
+    "version": "0.2.7",
+    "sequence": 2,
+    "source_commit": "05208b17545f464e52d2c2cff0d8b6e3827584be",
+    "platform": "windows",
+    "architecture": "x86_64",
+    "protocol_min": 1,
+    "protocol_max": 1,
+    "data_schema_min": 11,
+    "data_schema_max": 11,
+    "minimum_updater_version": "0.2.7",
+    "trusted_key_id": "zq-release-20260917"
+  },
+  "artifacts": [
+    {
+      "name": "ZQ-Workspace-0.2.7-Windows.zip",
+      "bytes": 252773387,
+      "sha256": "1bb4b712c14363e5a7e32f1dda6e655283dd8a6381e8d4cec67515e9fe084fb0",
+      "purpose": "immutable_update_package"
+    },
+    {
+      "name": "ZQ-Workspace-0.2.7-Managed-Windows.zip",
+      "bytes": 336439826,
+      "sha256": "20efa9c3db3c51fbe05d286e4d2cfad88cf540b3af64a21918385073944c11e4",
+      "purpose": "one_time_managed_transition"
+    }
+  ],
+  "signed_manifest": {
+    "sha256": "c4e47adb5304e516e1d1df295d23e384f3fd32bc42a5153b1c51d327c59a89de",
+    "verified_with_embedded_public_key": true,
+    "private_key_in_repository": false
+  },
+  "verification": {
+    "technical_platform_tests_passed": 901,
+    "platform_update_tests_passed": 98,
+    "packaged_exe_health_passed": true,
+    "clean_windows_machine_passed": false,
+    "authenticode_signed": false,
+    "github_release_published": true,
+    "server_build_sha_verified": true,
+    "stable_channel_activated": false
+  }
+}
