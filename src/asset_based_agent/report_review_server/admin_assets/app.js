@@ -3,10 +3,20 @@ let token = null;
 let discovery = null;
 let connectionVersion = 0;
 let testingConnection = false;
+let billingNextOffset = null;
+const billingUnknown = new Set();
+let billingBusy = false;
 const el = id => document.getElementById(id);
 const notice = text => { el("notice").textContent = text; };
 function clearSession() {
   token = null;
+  billingUnknown.clear();
+  billingNextOffset = null;
+  billingBusy = false;
+  el("billing-choice").replaceChildren();
+  el("billing-result").textContent = "";
+  el("billing-hold").value = "";
+  el("billing-next").disabled = true;
   el("desk").hidden = true;
   el("logout").hidden = true;
   el("login-panel").hidden = false;
@@ -31,10 +41,12 @@ async function api(path, method = "GET", data) {
     }
     if (response.status === 401) clearSession();
     // Do not display validation payloads: rejected inputs may contain secrets.
-    throw new Error(response.status === 401 ? "登录失效或凭据错误，请重新登录。" :
+    const error = new Error(response.status === 401 ? "登录失效或凭据错误，请重新登录。" :
       response.status === 422 && (path === "/admin/users" || path.endsWith("/reset-password")) ? "请核对账号字段；客户密码须为8–16位纯数字或数字+英文，区分大小写。" :
       response.status === 403 ? "无管理权限，或账号需要先修改临时密码。" :
       response.status === 409 ? "记录冲突，请刷新确认是否已保存，不要重复提交。" : "操作失败，请核对输入或联系服务管理员。状态码：" + response.status);
+    error.status = response.status;
+    throw error;
   }
   return response.status === 204 ? null : response.json();
 }
@@ -153,3 +165,74 @@ el("logout").addEventListener("click", async () => {
   catch { notice("本地凭据已清除，服务端退出未确认。"); }
   finally { clearSession(); }
 });
+
+function billingReceipt(record) {
+  el("billing-result").textContent = "核对回执：" + record.reconciliation_id +
+    "；冻结编号：" + record.hold_id + "；已确认总费用：" + record.confirmed_amount +
+    " 元。此操作不会重新执行模型请求。";
+}
+async function loadBillingHolds(offset = 0) {
+  const session = token;
+  if (!session) return;
+  const result = await api("/admin/billing-holds?limit=50&offset=" + offset);
+  if (session !== token) return;
+  el("billing-choice").replaceChildren();
+  option(el("billing-choice"), "", "请选择待核对记录");
+  for (const item of result.items) option(el("billing-choice"), item.hold_id,
+    item.client_request_id + " · 账号ID " + item.user_id + " · 已知费用 " + item.known_amount + " 元");
+  billingNextOffset = result.next_offset;
+  el("billing-next").disabled = billingNextOffset === null;
+  if (!result.items.length) el("billing-result").textContent = "本页无待核对记录。可输入冻结编号查询历史回执。";
+}
+async function queryReconciliation() {
+  const session = token, hold = el("billing-hold").value.trim();
+  if (!session || !hold) return;
+  try {
+    const result = await api("/admin/billing-holds/" + encodeURIComponent(hold) + "/reconciliation");
+    if (session !== token) return;
+    billingUnknown.delete(hold);
+    billingReceipt(result);
+  } catch {
+    if (session === token) el("billing-result").textContent = "尚未取得核对回执，不代表提交失败；请稍后查询或联系管理员，不要重复提交。";
+  }
+}
+async function submitReconciliation(data) {
+  const session = token, hold = data.hold_id.trim();
+  if (!session || !hold || billingBusy) return;
+  if (billingUnknown.has(hold)) {
+    el("billing-result").textContent = "此前提交结果未确认，请先查询回执，不要重复提交。";
+    return;
+  }
+  if (!confirm("确认已有上游凭证，冻结 " + hold + " 的总费用为 " + data.confirmed_amount +
+    " 元？这是总额，不是追加金额；提交后保留审计记录，不可覆盖。")) return;
+  billingBusy = true;
+  billingUnknown.add(hold);
+  try {
+    const result = await api("/admin/billing-holds/" + encodeURIComponent(hold) + "/reconciliation", "POST", {
+      confirmed_amount: data.confirmed_amount, evidence_sha256: data.evidence_sha256,
+      evidence_reference: data.evidence_reference,
+    });
+    if (session !== token) return;
+    billingUnknown.delete(hold);
+    billingReceipt(result);
+  } catch (error) {
+    if (session !== token) return;
+    if (error.status === 422) {
+      billingUnknown.delete(hold);
+      el("billing-result").textContent = "输入校验未通过，未进行结算。请核对金额精度及凭证格式后重新确认。";
+    } else {
+      el("billing-result").textContent = "提交未得到确认，请先查询回执；不要再次扣款或重复提交。";
+    }
+  } finally {
+    if (session === token) billingBusy = false;
+  }
+}
+bind("billing-reconcile", submitReconciliation);
+el("billing-choice").addEventListener("change", () => {el("billing-hold").value = el("billing-choice").value;});
+el("billing-query").addEventListener("click", queryReconciliation);
+for (const [id, offset] of [["billing-load", () => 0], ["billing-next", () => billingNextOffset]]) {
+  el(id).addEventListener("click", async () => {
+    try { if (offset() !== null) await loadBillingHolds(offset()); }
+    catch { if (token) el("billing-result").textContent = "费用核对列表加载失败，请重新登录或稍后刷新。"; }
+  });
+}

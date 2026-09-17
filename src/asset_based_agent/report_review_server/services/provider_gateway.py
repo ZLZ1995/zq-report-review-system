@@ -20,8 +20,8 @@ class NormalizedUsage:
     reasoning_tokens: int = 0
 
     def __post_init__(self) -> None:
-        if any(value < 0 for value in self.values()):
-            raise ValueError("Token usage cannot be negative")
+        if any(type(value) is not int or value < 0 for value in self.values()):
+            raise ValueError("Token usage must be nonnegative integers")
 
     def values(self) -> tuple[int, int, int, int, int]:
         return (
@@ -66,18 +66,27 @@ class ProviderClient(Protocol):
 def normalize_openai_usage(payload: dict[str, object]) -> NormalizedUsage:
     prompt_tokens = _integer(payload.get("prompt_tokens"))
     completion_tokens = _integer(payload.get("completion_tokens"))
-    cache_hit = _integer(payload.get("prompt_cache_hit_tokens"))
-    cache_miss = _integer(payload.get("prompt_cache_miss_tokens"))
+    cache_hit = _integer(payload.get("prompt_cache_hit_tokens", 0))
+    cache_miss = _integer(payload.get("prompt_cache_miss_tokens", 0))
     details = payload.get("completion_tokens_details")
     reasoning = 0
-    if isinstance(details, dict):
-        reasoning = _integer(details.get("reasoning_tokens"))
-    if not reasoning:
-        reasoning = _integer(payload.get("reasoning_tokens"))
+    if details is not None:
+        if not isinstance(details, dict):
+            raise ValueError("Invalid completion token details")
+        reasoning = _integer(details.get("reasoning_tokens", 0))
+    if "reasoning_tokens" in payload:
+        direct = _integer(payload["reasoning_tokens"])
+        if isinstance(details, dict) and "reasoning_tokens" in details and direct != reasoning:
+            raise ValueError("Conflicting reasoning token counts")
+        reasoning = direct
     classified_prompt = cache_hit + cache_miss
+    if classified_prompt > prompt_tokens or reasoning > completion_tokens:
+        raise ValueError("Token partitions exceed totals")
+    if "total_tokens" in payload and _integer(payload["total_tokens"]) != prompt_tokens + completion_tokens:
+        raise ValueError("Token totals do not reconcile")
     return NormalizedUsage(
-        input_tokens=max(prompt_tokens - classified_prompt, 0),
-        output_tokens=max(completion_tokens - reasoning, 0),
+        input_tokens=prompt_tokens - classified_prompt,
+        output_tokens=completion_tokens - reasoning,
         cache_hit_tokens=cache_hit,
         cache_miss_tokens=cache_miss,
         reasoning_tokens=reasoning,
@@ -126,7 +135,7 @@ class HttpProviderClient:
             raise ProviderCallError(
                 "provider_usage_missing",
                 "模型渠道未返回可信Token用量。",
-                retryable=True,
+                retryable=False,
             )
         return ProviderResponse(payload=response_payload, usage=usage)
 
@@ -162,13 +171,17 @@ def _usage_from_response(payload: dict[str, object]) -> NormalizedUsage | None:
     raw_usage = payload.get("usage")
     if not isinstance(raw_usage, dict):
         return None
-    return normalize_openai_usage(raw_usage)
+    try:
+        return normalize_openai_usage(raw_usage)
+    except ValueError as exc:
+        # The upstream may have charged already; do not create another attempt
+        # from untrustworthy accounting data or return a zero-usage success.
+        raise ProviderCallError(
+            "provider_usage_invalid", "模型渠道返回的Token用量无法核验。", retryable=False
+        ) from exc
 
 
 def _integer(value: object) -> int:
-    if not isinstance(value, (int, float, str)):
-        return 0
-    try:
-        return max(int(value or 0), 0)
-    except (TypeError, ValueError):
-        return 0
+    if type(value) is not int or value < 0:
+        raise ValueError("Token count must be a nonnegative integer")
+    return value

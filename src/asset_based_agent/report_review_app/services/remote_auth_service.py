@@ -26,11 +26,24 @@ class NetworkUnavailable(RemoteAuthenticationError):
     pass
 
 
+class ServerCapabilityUnavailable(RemoteAuthenticationError):
+    pass
+
+
 class SessionRevoked(RemoteAuthenticationError):
     pass
 
 
 class InsufficientBalance(RemoteAuthenticationError):
+    pass
+
+
+BILLING_RECONCILIATION_MESSAGE = (
+    "模型请求费用待核对，新的付费调用已暂停。请联系管理员核对原请求，不要重复提交。"
+)
+
+
+class BillingReconciliationRequired(RemoteAuthenticationError):
     pass
 
 
@@ -184,16 +197,170 @@ class RemoteSessionClient:
         return {"balance": balance, "currency": currency}
 
     def create_review_job(self, payload: dict[str, object]) -> dict[str, object]:
+        self.require_capability('review_jobs', '/review-jobs')
         result = self._authenticated_json("POST", "/review-jobs", payload)
         if not isinstance(result, dict):
             raise RemoteAuthenticationError("服务端审核任务格式无效。")
         return result
 
-    def execute_review_job(self, job_id: str) -> dict[str, object]:
-        result = self._authenticated_json("POST", f"/review-jobs/{job_id}/execute")
+    def route_skill(self, payload: dict[str, object], *, cancel=None) -> dict[str, object]:
+        from .task_cancellation import TaskCancelled
+        if cancel is not None and cancel.is_set():
+            raise TaskCancelled()
+        self.require_capability('skill_routing', '/skill-route')
+        if cancel is not None and cancel.is_set():
+            raise TaskCancelled()
+        result = self._model_json('/skill-route', payload, cancel=cancel)
+        if not isinstance(result, dict):
+            raise RemoteAuthenticationError('任务路由响应格式无效')
+        return result
+
+    def route_skill_cancellable(self, payload: dict[str, object], cancel) -> dict[str, object]:
+        return self.route_skill(payload, cancel=cancel)
+
+    def understand_task(self, payload: dict[str, object], *, cancel=None) -> dict[str, object]:
+        from ...agent_contracts import (
+            TaskUnderstanding,
+            UnderstandingRequest,
+            validate_understanding,
+        )
+        from .task_cancellation import TaskCancelled
+        request = UnderstandingRequest.model_validate(payload)
+        if cancel is not None and cancel.is_set():
+            raise TaskCancelled()
+        self.require_capability('task_understanding', '/agent/understand')
+        if cancel is not None and cancel.is_set():
+            raise TaskCancelled()
+        if any(skill.id == 'browser.task' for skill in request.skills):
+            try:
+                self.require_capability('browser_step', '/agent/browser-step')
+            except ServerCapabilityUnavailable:
+                # Older servers must not receive an unsupported adapter enum.
+                # Keep all existing file capabilities; validate the reply against
+                # exactly the reduced catalog sent to this server.
+                request = request.model_copy(update={
+                    'skills': [skill for skill in request.skills if skill.id != 'browser.task']})
+            if cancel is not None and cancel.is_set():
+                raise TaskCancelled()
+        result = self._model_json('/agent/understand', request.model_dump(), cancel=cancel)
+        if cancel is not None and cancel.is_set():
+            raise TaskCancelled()
+        try:
+            return validate_understanding(request, TaskUnderstanding.model_validate(result)).model_dump()
+        except (TypeError, ValueError) as exc:
+            raise RemoteAuthenticationError('任务理解结果无效，未开始业务执行。') from exc
+
+    def propose_browser_step(self, payload: dict[str, object], *, cancel=None) -> dict[str, object]:
+        from ...browser_contracts import (
+            BrowserStepProposal,
+            BrowserStepRequest,
+            validate_browser_step,
+        )
+        from .task_cancellation import TaskCancelled
+        request = BrowserStepRequest.model_validate(payload)
+        if cancel is not None and cancel.is_set():
+            raise TaskCancelled()
+        self.require_capability('browser_step', '/agent/browser-step')
+        if set(request.scope.actions) & {'scroll', 'wait'}:
+            self.require_capability('browser_view_actions', '/agent/browser-step', allow_legacy=False)
+        if 'login' in request.scope.actions:
+            self.require_capability('browser_saved_login', '/agent/browser-step', allow_legacy=False)
+        if 'download' in request.scope.actions:
+            self.require_capability('browser_download', '/agent/browser-step', allow_legacy=False)
+        if request.generated_downloads:
+            try:
+                self.require_capability('browser_generated_download', '/agent/browser-step', allow_legacy=False)
+            except ServerCapabilityUnavailable:
+                # Preserve the old link-only protocol; validate the reply against
+                # this reduced request so an old server cannot suggest a button.
+                request = request.model_copy(update={'generated_downloads': False})
+        if 'upload' in request.scope.actions:
+            self.require_capability('browser_upload', '/agent/browser-step', allow_legacy=False)
+        if cancel is not None and cancel.is_set():
+            raise TaskCancelled()
+        result = self._model_json('/agent/browser-step', request.model_dump(), cancel=cancel)
+        if cancel is not None and cancel.is_set():
+            raise TaskCancelled()
+        try:
+            return validate_browser_step(request, BrowserStepProposal.model_validate(result)).model_dump()
+        except (TypeError, ValueError) as exc:
+            raise RemoteAuthenticationError('浏览器动作建议无效，未执行网页操作。') from exc
+
+    def propose_plan(self, payload: dict[str, object], *, cancel=None) -> dict[str, object]:
+        from ...agent_contracts import PlanningRequest, PlanProposal, validate_proposal
+        from .task_cancellation import TaskCancelled
+        request = PlanningRequest.model_validate(payload)
+        if cancel is not None and cancel.is_set():
+            raise TaskCancelled()
+        self.require_capability('task_planning', '/agent/plan')
+        if cancel is not None and cancel.is_set():
+            raise TaskCancelled()
+        result = self._model_json('/agent/plan', request.model_dump(), cancel=cancel)
+        if cancel is not None and cancel.is_set():
+            raise TaskCancelled()
+        try:
+            return validate_proposal(request, PlanProposal.model_validate(result)).model_dump()
+        except (TypeError, ValueError) as exc:
+            raise RemoteAuthenticationError('任务计划无效，未开始业务执行。') from exc
+
+    def require_capability(self, capability: str, endpoint: str, *, allow_legacy: bool = True) -> None:
+        """Read-only preflight; legacy support is verified, never guessed."""
+        if not self.access_token:
+            raise SessionRevoked('当前没有有效登录会话。')
+        try:
+            response = self.http_client.get(self.base_url + '/capabilities')
+            if response.status_code == 404:
+                if not allow_legacy:
+                    raise ServerCapabilityUnavailable('服务端未声明此浏览器能力，请先升级服务端。')
+                parsed = urlparse(self.base_url)
+                response = self.http_client.get(f'{parsed.scheme}://{parsed.netloc}/openapi.json')
+                response.raise_for_status()
+                data = response.json()
+                operation = data.get('paths', {}).get(parsed.path + endpoint, {}).get('post')
+                supported = isinstance(operation, dict)
+            else:
+                response.raise_for_status()
+                data = response.json()
+                capabilities = data.get('capabilities', {})
+                supported = (type(data.get('schema_version')) is int and data['schema_version'] == 1 and
+                             type(data.get('protocol_version')) is int and data['protocol_version'] == 1 and
+                             isinstance(capabilities, dict) and
+                             type(capabilities.get(capability)) is int and capabilities[capability] == 1)
+        except httpx.RequestError as exc:
+            raise NetworkUnavailable('无法连接服务端进行能力预检，未发起任务。') from exc
+        except (ValueError, AttributeError, TypeError, httpx.HTTPStatusError) as exc:
+            raise ServerCapabilityUnavailable('服务端能力信息不可用，未发起任务。') from exc
+        if not supported:
+            raise ServerCapabilityUnavailable('服务端缺少兼容的任务接口，请联系管理员升级；未发起任务。')
+
+    def analyze_materials(self, payload: dict[str, object], *, cancel=None) -> dict[str, object]:
+        self.require_capability('material_analysis', '/material-analysis')
+        result = self._model_json('/material-analysis', payload, cancel=cancel)
+        if not isinstance(result, dict):
+            raise RemoteAuthenticationError('资料识别返回格式无效。')
+        return result
+
+    def analyze_materials_cancellable(self, payload, cancel):
+        return self.analyze_materials(payload, cancel=cancel)
+
+    def cancel_review_job(self, job_id: str):
+        return self._authenticated_json('POST', f'/review-jobs/{job_id}/cancel')
+
+    def execute_review_job(self, job_id: str, *, cancel=None) -> dict[str, object]:
+        result = self._model_json(f"/review-jobs/{job_id}/execute", cancel=cancel)
         if not isinstance(result, dict):
             raise RemoteAuthenticationError("服务端审核结果格式无效。")
         return result
+
+    def execute_review_job_cancellable(self, job_id, cancel):
+        return self.execute_review_job(job_id, cancel=cancel)
+
+    def _model_json(self, path, payload=None, *, cancel=None):
+        from .resource_locks import CLIENT_RESOURCES
+        # This runs inside the actual HTTP worker: cancelling its caller must
+        # not release a slot while the submitted request is still in flight.
+        with CLIENT_RESOURCES.lease(('model',), cancel):
+            return self._authenticated_json('POST', path, payload)
 
     def get_review_job(self, job_id: str) -> dict[str, object]:
         result = self._authenticated_json("GET", f"/review-jobs/{job_id}")
@@ -240,6 +407,10 @@ class RemoteSessionClient:
             )
         except httpx.RequestError as exc:
             raise NetworkUnavailable("无法连接审核服务，请检查网络。") from exc
+        if (response.status_code in (404, 405) and
+                path in {'/skill-route', '/material-analysis', '/review-jobs'} and
+                _error_detail(response)[0] == 'http_error'):
+            raise ServerCapabilityUnavailable('服务端任务接口不可用，请联系管理员核对部署版本和网关配置。')
         if response.status_code == 401 and retry:
             code, _message = _error_detail(response)
             if code == "session_revoked":
@@ -290,6 +461,8 @@ class RemoteSessionClient:
         if response.status_code < 400:
             return
         code, message = _error_detail(response)
+        if code == "billing_reconciliation_required":
+            raise BillingReconciliationRequired(BILLING_RECONCILIATION_MESSAGE)
         if code == "session_revoked":
             raise SessionRevoked(message or "当前会话已失效。")
         if code == "insufficient_balance":

@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import pytest
 from alembic import command
 from alembic.config import Config
 
@@ -49,3 +50,20 @@ def test_billing_migration_backfills_existing_user_wallet(tmp_path: Path) -> Non
     assert wallet == (0, "CNY")
     assert multiplier == (1,)
     command.downgrade(config, "base")
+
+
+def test_reconciliation_migration_refuses_audit_loss(tmp_path):
+    path = tmp_path / 'audit.db'
+    config = Config(str(ROOT / 'deploy' / 'report_review_server' / 'alembic.ini'))
+    config.set_main_option('sqlalchemy.url', f'sqlite+pysqlite:///{path.as_posix()}')
+    command.upgrade(config, 'head')
+    # Synthetic row tests the downgrade retention gate, not FK integrity.
+    with sqlite3.connect(path) as db:
+        db.execute('''INSERT INTO report_review_billing_reconciliations
+            (reconciliation_id, hold_id, admin_user_id, confirmed_amount, known_amount,
+             evidence_sha256, evidence_reference, created_at)
+            VALUES ('r', 'h', 'a', 0, 0, ?, 'TEST-001', CURRENT_TIMESTAMP)''', ('a'*64,))
+    with pytest.raises(RuntimeError, match='audit records'):
+        command.downgrade(config, '0003_review_jobs')
+    with sqlite3.connect(path) as db:
+        assert db.execute('SELECT COUNT(*) FROM report_review_billing_reconciliations').fetchone()[0] == 1

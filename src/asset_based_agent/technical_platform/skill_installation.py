@@ -8,8 +8,10 @@ from .store import now
 
 
 class SkillInstallation:
-    def __init__(self, store):
+    def __init__(self, store, *, initialize=True):
         self.store = store
+        if not initialize:
+            return
         with store.connect() as db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS installed_skills (
@@ -58,6 +60,29 @@ class SkillInstallation:
                 "WHERE owner=? ORDER BY skill_id,created,version", (self.store.owner,)
             )]
 
+    def release_inventory(self):
+        """Read-only compatibility snapshot, not execution or write permission."""
+        result = []
+        with self.store.connect() as db:
+            rows = db.execute(
+                'SELECT skill_id,version,enabled FROM installed_skills WHERE owner=? '
+                'ORDER BY skill_id,created,version', (self.store.owner,),
+            ).fetchall()
+            for row in rows:
+                item = {'id': row['skill_id'], 'version': row['version'],
+                        'status': 'unavailable_or_changed'}
+                try:
+                    package = self._load(db, row['skill_id'], row['version'])
+                except (ValueError, PermissionError):
+                    result.append(item)
+                    continue
+                item.update(schema_version=package.manifest['schema_version'],
+                            adapter=package.manifest['adapter'], package_sha256=package.sha256,
+                            status=('dependencies_missing' if not package.ready else
+                                    'enabled_compatible' if row['enabled'] else 'disabled'))
+                result.append(item)
+        return result
+
     def _load(self, db, identity, version):
         row = db.execute(
             "SELECT package,sha256 FROM installed_skills WHERE owner=? AND skill_id=? AND version=?",
@@ -86,7 +111,11 @@ class SkillInstallation:
                 snapshot = json.loads(row[0])
             except (ValueError, TypeError) as exc:
                 raise ValueError("未结束任务记录异常，需先核对") from exc
-            if not isinstance(snapshot, dict) or snapshot.get("skill_id") == identity:
+            compound_binding = (isinstance(snapshot, dict) and snapshot.get('mode') == 'compound' and any(
+                value.get('external_skill', {}).get('id') == identity
+                for value in snapshot.get('step_configs', {}).values()))
+            if (not isinstance(snapshot, dict) or snapshot.get("skill_id") == identity
+                    or snapshot.get('external_skill', {}).get('id') == identity or compound_binding):
                 raise ValueError("Skill 存在未结束任务，请先核对任务状态")
 
     def activate(self, identity, version, *, confirmed: bool):

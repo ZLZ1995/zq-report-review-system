@@ -48,5 +48,7 @@ def export_review(store, run_id: str, destination: Path) -> Path:
     finally:
         Path(temporary).unlink(missing_ok=True)
     result['exported_report'] = str(destination)
+    from .delivery_versions import record_delivery
+    record_delivery(result, destination)
     store.save_result(run_id, result)
     return destination

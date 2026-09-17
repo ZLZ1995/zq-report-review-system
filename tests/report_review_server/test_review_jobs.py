@@ -187,6 +187,36 @@ def test_completed_batch_is_available_while_next_batch_runs(client):
         service.execute_job(db, user_id=user_id, job_id=job.job_id)
 
 
+def test_cancel_running_job_stops_next_batch_and_settles_once(client):
+    user_id, model_id = _seed_review_case(client)
+    class CancellingProvider(FakeProviderClient):
+        def call(self, route, payload):
+            with client.app.state.session_factory() as other:
+                service.cancel_job(other, user_id=user_id, job_id=job.job_id)
+            return super().call(route, payload)
+    provider = CancellingProvider([_model_response(1), _model_response(2)])
+    service = ReviewJobService(client.app.state.settings, provider)
+    with client.app.state.session_factory() as db:
+        job = service.create_job(db, user_id=user_id, payload=_job_payload(model_id))
+        result = service.execute_job(db, user_id=user_id, job_id=job.job_id)
+        assert result.status == 'cancelled'
+        assert len(provider.payloads) == 1
+        service.cancel_job(db, user_id=user_id, job_id=job.job_id)
+        assert len(provider.payloads) == 1
+
+
+def test_cancel_queued_job_never_calls_model(client):
+    user_id, model_id = _seed_review_case(client)
+    provider = FakeProviderClient([])
+    service = ReviewJobService(client.app.state.settings, provider)
+    with client.app.state.session_factory() as db:
+        job = service.create_job(db, user_id=user_id, payload=_job_payload(model_id))
+        assert service.cancel_job(db, user_id=user_id, job_id=job.job_id).status == 'cancelled'
+        with pytest.raises(ServiceError):
+            service.execute_job(db, user_id=user_id, job_id=job.job_id)
+        assert not provider.payloads
+
+
 def test_review_chunk_contract_rejects_hidden_sheet(client) -> None:
     _user_id, model_id = _seed_review_case(client)
     login_response = client.post(

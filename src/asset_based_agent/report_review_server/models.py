@@ -234,6 +234,19 @@ class ProviderAttempt(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class BillingReconciliation(Base):
+    __tablename__ = "report_review_billing_reconciliations"
+
+    reconciliation_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    hold_id: Mapped[str] = mapped_column(String(36), ForeignKey("report_review_balance_holds.hold_id", ondelete="RESTRICT"), unique=True)
+    admin_user_id: Mapped[str] = mapped_column(String(36), ForeignKey("report_review_users.user_id", ondelete="RESTRICT"))
+    confirmed_amount: Mapped[Decimal] = mapped_column(Numeric(20, 8))
+    known_amount: Mapped[Decimal] = mapped_column(Numeric(20, 8))
+    evidence_sha256: Mapped[str] = mapped_column(String(64))
+    evidence_reference: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class ReviewJob(Base):
     __tablename__ = "report_review_jobs"
     __table_args__ = (

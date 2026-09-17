@@ -47,6 +47,7 @@ class RemoteReviewLlm:
         self.user_request = user_request
         self.poll_interval = poll_interval
         self.result_wait_seconds = result_wait_seconds
+        self.cancel_event = None
 
     def set_model_id(self, model_id: str) -> None:
         if not model_id:
@@ -71,7 +72,8 @@ class RemoteReviewLlm:
         if not self.model_id:
             raise ReviewResponseSchemaError("远程审核模型尚未选择。")
         try:
-            balance = self.client.get_balance()
+            from .task_cancellation import cancellable_call
+            balance = cancellable_call(self.client.get_balance, self.cancel_event)
             try:
                 available_balance = Decimal(str(balance["balance"]))
             except (InvalidOperation, KeyError, TypeError) as exc:
@@ -104,7 +106,14 @@ class RemoteReviewLlm:
                         "attempt_total": 1,
                     }
                 )
-            created = self.client.create_review_job(payload)
+            def create_job():
+                value = self.client.create_review_job(payload)
+                if (self.cancel_event is not None and self.cancel_event.is_set()
+                        and isinstance(value.get('job_id'), str)
+                        and hasattr(self.client, 'cancel_review_job')):
+                    self.client.cancel_review_job(value['job_id'])
+                return value
+            created = cancellable_call(create_job, self.cancel_event)
             job_id = created.get("job_id")
             if not isinstance(job_id, str) or not job_id:
                 raise ReviewResponseSchemaError("服务端未返回审核任务编号。")
@@ -150,11 +159,24 @@ class RemoteReviewLlm:
 
         def execute() -> None:
             try:
-                result_holder.append(self.client.execute_review_job(job_id))
+                cancellable = getattr(self.client, 'execute_review_job_cancellable', None)
+                result_holder.append(cancellable(job_id, self.cancel_event) if callable(cancellable)
+                                     else self.client.execute_review_job(job_id))
             except BaseException as exc:  # noqa: BLE001 - re-raised in caller thread
                 error_holder.append(exc)
 
         import threading
+
+        from .task_cancellation import TaskCancelled, cancellable_call
+        if self.cancel_event is not None and self.cancel_event.is_set():
+            if hasattr(self.client, 'cancel_review_job'):
+                def cancel_before_start():
+                    try:
+                        self.client.cancel_review_job(job_id)
+                    except Exception:  # noqa: BLE001, S110 - best effort; no confirmation claimed
+                        pass
+                threading.Thread(target=cancel_before_start, daemon=True).start()
+            raise TaskCancelled('已停止，不再启动审核')
 
         worker = threading.Thread(target=execute, daemon=True)
         worker.start()
@@ -177,6 +199,15 @@ class RemoteReviewLlm:
                 delivered = len(raw)
 
         while time.monotonic() < deadline:
+            if self.cancel_event is not None and self.cancel_event.is_set():
+                if hasattr(self.client, 'cancel_review_job'):
+                    def request_stop():
+                        try:
+                            self.client.cancel_review_job(job_id)
+                        except Exception:  # noqa: BLE001, S110 - best effort while disconnected
+                            pass  # Offline cancellation cannot guarantee server acknowledgement.
+                    threading.Thread(target=request_stop, daemon=True).start()
+                raise TaskCancelled('已停止接收；服务端取消请求已发起，当前模型调用可能仍需结算')
             if result_holder:
                 result = result_holder[0]
                 emit_output(result)
@@ -184,11 +215,17 @@ class RemoteReviewLlm:
             # A lost execute response does not mean the server stopped working.
             # Only GET the original job: never resubmit an ambiguous paid call.
             try:
-                state = self.client.get_review_job(job_id)
+                try:
+                    state = cancellable_call(lambda: self.client.get_review_job(job_id), self.cancel_event)
+                except TaskCancelled:
+                    continue  # Top of loop sends the server cancellation request.
             except NetworkUnavailable:
                 if progress_callback is not None:
                     progress_callback({"state": "reconnecting", "job_id": job_id})
-                time.sleep(self.poll_interval)
+                if self.cancel_event is not None:
+                    self.cancel_event.wait(self.poll_interval)
+                else:
+                    time.sleep(self.poll_interval)
                 continue
             emit_output(state)
             if state.get("status") in {"succeeded", "failed", "cancelled", "expired"}:
@@ -213,7 +250,10 @@ class RemoteReviewLlm:
                         "attempt_total": 1,
                     }
                 )
-            time.sleep(self.poll_interval)
+            if self.cancel_event is not None:
+                self.cancel_event.wait(self.poll_interval)
+            else:
+                time.sleep(self.poll_interval)
         if not result:
             raise ReviewNetworkError(
                 f"服务端任务状态尚未确认（任务编号：{job_id}）。请勿重复发起审核，以免重复扣费。"

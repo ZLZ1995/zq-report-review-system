@@ -1,3 +1,5 @@
+import sqlite3
+
 import pytest
 
 from asset_based_agent.technical_platform.skills import (
@@ -20,6 +22,18 @@ def test_projects_sessions_and_messages_survive_restart(tmp_path):
     assert other.projects() == []
     with pytest.raises(PermissionError):
         other.append(session, "user", "cross-user injection")
+
+
+def test_missing_database_after_open_is_not_silently_recreated(tmp_path):
+    path = tmp_path / 'disconnected.sqlite'
+    store = PlatformStore(path, 'alice')
+    store.create_project('synthetic')
+    moved = path.with_suffix('.saved')
+    path.rename(moved)
+    with pytest.raises(sqlite3.OperationalError):
+        store.projects()
+    assert not path.exists()
+    assert moved.is_file()
 
 
 def test_memory_explicit_project_scoped_and_deletable(tmp_path):

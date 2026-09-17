@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import threading
 import uuid
 from pathlib import Path
 
+from ..atomic_json import write_json_atomic
 from ..domain.enums import IssueStatus, ProjectStatus, RoundStatus
 from ..domain.models import (
     AuditProject,
@@ -507,13 +507,7 @@ def _candidate_fingerprint(candidate: IssueCandidate) -> str:
 
 
 def _write_json_atomic(path: Path, payload: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    os.replace(temporary, path)
+    write_json_atomic(path, payload)
 
 
 def _read_progress_percent(path: Path) -> int:

@@ -50,8 +50,7 @@ def test_provider_uploads_visible_excerpt_not_paths_or_hidden_sheets(tmp_path):
     wb['hidden'].sheet_state = 'hidden'
     wb.save(path)
     class Client:
-        def _authenticated_json(self, method, url, payload):
-            assert method == 'POST' and url == '/api/v1/material-analysis'
+        def analyze_materials(self, payload):
             assert 'NEVER_UPLOAD_SECRET' not in str(payload)
             assert str(tmp_path) not in str(payload)
             assert '资产负债表' in payload['files'][0]['text']
@@ -86,7 +85,13 @@ def test_auto_generation_task_authorizes_only_model_analysis_and_copy_writes(tmp
     provider = MaterialAnalysisProvider(None, 'model', spec['skill_instructions'])
     def execute(*args, **kwargs):
         assert kwargs['provider'] is provider
-        return {'passed': True}
+        assert kwargs['manage_run'] is False
+        return {'kind': 'generation', 'ok': False, 'artifacts': [], 'feedback': 'synthetic blocked', 'model_called': True}
     monkeypatch.setattr(generation, 'execute_generation', execute)
     run = store.start_run(session, spec)
-    assert execute_task(store, run, Event(), lambda _: None, provider=provider) == {'passed': True}
+    from asset_based_agent.technical_platform.permissions import PermissionService
+    PermissionService(store).authorize(run, spec, confirmed=True)
+    result = execute_task(store, run, Event(), lambda _: None, provider=provider)
+    assert result['feedback'] == 'synthetic blocked'
+    assert result['ok'] is False
+    assert store.run(run)['state'] == 'failed'

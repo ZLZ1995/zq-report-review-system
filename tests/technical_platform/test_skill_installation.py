@@ -108,3 +108,31 @@ def test_package_replaced_after_confirmation_is_not_installed(tmp_path):
     with pytest.raises(ValueError, match="已变化"):
         manager.install(path, confirmed=True, expected_sha256=expected)
     assert manager.list_versions() == []
+
+
+def test_release_inventory_checks_packages_without_enabling_or_exposing_rules(tmp_path):
+    manager = SkillInstallation(PlatformStore(tmp_path / 'db.sqlite', 'alice'))
+    manager.install(make_package(tmp_path, rules='private synthetic instructions'), confirmed=True)
+    manager.install(make_package(tmp_path, version='2.0.0',
+                                 dependencies={'zq-missing-test-dep': '>=1'}), confirmed=True)
+    before = manager.list_versions()
+    rows = manager.release_inventory()
+    assert [r['status'] for r in rows] == ['disabled', 'dependencies_missing']
+    assert rows[0]['adapter'] == 'report.review'
+    assert rows[0]['schema_version'] == 1
+    assert 'private synthetic instructions' not in str(rows)
+    assert manager.list_versions() == before
+    manager.activate('test.review', '1.0.0', confirmed=True)
+    assert manager.release_inventory()[0]['status'] == 'enabled_compatible'
+    other = SkillInstallation(PlatformStore(manager.store.path, 'bob'))
+    assert other.release_inventory() == []
+
+
+def test_release_inventory_reports_tampered_package_without_raw_error(tmp_path):
+    manager = SkillInstallation(PlatformStore(tmp_path / 'db.sqlite', 'alice'))
+    manager.install(make_package(tmp_path), confirmed=True)
+    with manager.store.connect() as db:
+        db.execute('UPDATE installed_skills SET package=?', (b'private invalid archive',))
+    rows = manager.release_inventory()
+    assert rows[0]['status'] == 'unavailable_or_changed'
+    assert 'private' not in str(rows)

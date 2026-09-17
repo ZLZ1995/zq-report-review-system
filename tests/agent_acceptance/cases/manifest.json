@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "dataset_version": "1.0.0",
+  "status": "frozen_before_live_evaluation",
+  "base_cases": 100,
+  "holdout_cases": 20,
+  "holdout_policy": "Independent rewrites; not used to tune model prompts. Replace exposed holdout cases before retuning and increment dataset version.",
+  "sha256": {
+    "corpus.py": "71313b0a5bdd8960b6663447bed60eff95fb2195d5f3c8ea0e9acea9ffbe9214",
+    "dialogue.jsonl": "a941248ebbc9c0a14919784eecfd4a5d5f7f34ed26cb165b02d5af46034eca4b",
+    "holdout.jsonl": "e1ae06a5c78e7837b5aefb1d45f459243ba4332965018ebbe411ede39da3ff25",
+    "intent.jsonl": "ce8aa5c0a9837706d4a3377cd4f3f91d0a23381f11a1a0ce718112712beb0e35",
+    "permissions.jsonl": "ed0c3d861cebc3640ac792ffa6a771ea163d5559b2651dc96c3aecbc4799eb96",
+    "recovery.jsonl": "d9d8b94a004902cde50543c6815d9ac80bdc86e57518a3c9cb4094f0f7a0a568",
+    "scope.jsonl": "4f4fc02b611c03ddd1ceccf734444c50851ff72e989b54bb787fb7f80c5fbb3d"
+  }
+}

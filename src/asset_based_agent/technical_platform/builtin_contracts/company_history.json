@@ -1,0 +1,11 @@
+{
+  "schema_version": 1, "id": "gongshang-change-history-docx", "version": "0.1.0",
+  "purpose": "根据工商变更Excel在锁定Word模板中生成历史沿革副本",
+  "source_extensions": [".xlsx"],
+  "required_roles": ["source_excel"], "optional_roles": [],
+  "outputs": ["docx_history"],
+  "acceptance_gates": ["source_evidence", "output_validation", "original_hash_unchanged", "template_format_preserved"],
+  "followups": [], "environment": ["内置本地生成组件"],
+  "limitations": ["当前软件适配器只接Excel，原技能的PDF整理流程尚未接入", "不得改变模板字号和结构"],
+  "requires_model": false, "creates_copy": true, "locked_template": true, "modify_originals": false
+}

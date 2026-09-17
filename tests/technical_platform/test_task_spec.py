@@ -23,7 +23,8 @@ def test_spec_captures_scope_versions_and_explicit_readonly_permissions(tmp_path
     spec = build_task_spec(store, session, "check totals", PREFLIGHT,
                            store.files(project), model=None, instructions="")
     snapshot = spec.to_snapshot()
-    assert snapshot["schema_version"] == 1
+    assert snapshot["schema_version"] == 2
+    assert snapshot['request_id']
     assert snapshot["owner"] == "alice"
     assert snapshot["project_id"] == project
     assert snapshot["session_id"] == session
@@ -31,6 +32,10 @@ def test_spec_captures_scope_versions_and_explicit_readonly_permissions(tmp_path
     assert snapshot["permissions"]["modify_originals"] is False
     assert snapshot["permissions"]["call_model"] is False
     assert snapshot["selected_files"][0]["version"] == store.files(project)[0]["sha256"]
+    assert snapshot['file_scope']['targets'][0]['id'] == store.files(project)[0]['id']
+    assert snapshot['file_scope']['session_id'] == session
+    assert snapshot['execution_plan']['steps'][0]['tool'] == 'preflight.execute'
+    assert snapshot['execution_plan']['identity']['task_id'] == snapshot['task_id']
     assert "original_hash_unchanged" in snapshot["acceptance_gates"]
     assert len(snapshot["skill_rules_sha256"]) == 64
     run = store.start_run(session, snapshot)
@@ -61,3 +66,17 @@ def test_legacy_snapshot_is_readable_but_not_replay_authorization():
     assert legacy["permissions"] == {}
     with pytest.raises(ValueError):
         read_snapshot({"schema_version": 999})
+
+
+def test_boolean_snapshot_version_is_rejected():
+    with pytest.raises(ValueError):
+        read_snapshot({'schema_version': True})
+
+
+def test_v1_history_does_not_restore_execution_permissions():
+    snapshot = {'schema_version': 1, 'permissions': {'call_model': True}, 'user_request': 'old task'}
+    history = read_snapshot(snapshot)
+    assert history['user_request'] == 'old task'
+    assert history['permissions'] == {}
+    assert history['requires_confirmation'] is True
+    assert snapshot['permissions'] == {'call_model': True}

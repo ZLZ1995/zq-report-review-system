@@ -31,6 +31,13 @@ description: Build or update a Chinese asset-based valuation detail workbook and
 
 科目余额表和序时账不是所有项目的统一必备资料。资产负债表与银行资料足以支持单一银行资产项目时，使用空的科目明细集合进入轻量流程，不生成虚构科目余额表。其他组合缺少明细证据时列示对应非零项目，不笼统要求固定文件名称。当前自动填报适配器不支持的来源布局须明确说明，不能将模型识别成功等同于填报成功。
 
+### 先识别现有资料，再判断是否缺明细
+
+- 不得因为用户没有单独提供名为“二级明细表”“辅助余额表”或“资产台账”的文件，就直接要求补充资料。
+- 在生成 `missing_materials.json` 或向用户提出补充要求前，必须先检查本次已提供的全部相关来源。至少依次判断：资产负债表能否确认科目总额；科目余额表能否拆出二级科目或辅助核算对象；序时账能否按科目、主体、摘要和发生日期还原明细；其他附件能否证明资产名称、权属或数量。
+- 例如，用户已提供科目余额表、序时账和资产负债表时，应先尝试从科目余额表与序时账还原应收账款、预付账款、其他应收款、应付账款、预收账款和其他应付款等明细；不得跳过识别而笼统要求用户另行提供二级资料。
+- 只有在现有来源已经完成识别、交叉核对后，仍无法证明所需字段或无法拆分到模板要求的明细粒度时，才可列为缺失资料。补充要求必须写明科目、已检查的来源、仍缺少的具体字段或维度，以及为什么现有资料不足。
+
 Produce a complete first-pass valuation declaration workbook from:
 
 - `科目余额表`
@@ -39,6 +46,12 @@ Produce a complete first-pass valuation declaration workbook from:
 - optional detailed schedules such as `固定资产台账`, `无形资产清单`, `长期股权投资明细`, `在建工程明细`
 
 The first pass must be complete enough to circulate internally even when some non-current-asset detail files are still missing.
+
+### 常规业务顺序与特殊项目边界
+
+- 本 skill 的常规职责是先依据账务资料和辅助资料形成评估明细表，为后续评估测算提供资产范围、账面数据和基础参数。
+- 不把正式评估报告中的评估结论作为常规上游数据源，也不默认从既有评估结论反向分配或倒填单项评估值。
+- 用户明确要求处理特殊倒序项目时，只按该项目的明确口径执行并记录为项目级例外；不得把该例外、特定币种、资产组总值分配方式或合并单元格方案固化为通用流程。
 
 ## Mandatory Scope-First Routing
 
@@ -73,7 +86,7 @@ Do not hardcode a cross-project rule such as `某个编号前缀 always maps to 
 - Preserve workbook structure, formulas, links, formatting, and sheet layout.
 - The same protection applies to `汇总表`, `流动资产汇总表`, `存货汇总表`, `非流动资产汇总表`, `可供出售金融资产汇总表`, `固定资产汇总表`, `在建工程汇总表`, `无形资产汇总表`, `流动负债汇总表`, and `非流动负债汇总表`, including short names and trailing spaces. Use the shared `scripts/summary_sheet_policy.py` in registries, writers, footer handling, and validation. Missing registry metadata must never permit writes to a summary sheet. Summary sheets must not be registered as detail pages, cleaned as zero-balance detail bodies, or normalized as detail footers.
 - Protect every existing formula inside the classification summary worksheet, including sheets named `分类汇总表`, `分类汇总`, and `资产评估结果分类汇总表`. Never replace these formulas with source amounts, cached results, zero differences, or a literal `OK`.
-- Capture summary formulas before filling, compare them before each save and again from the saved staging file before publishing, and emit `summary_formula_preservation_report.json`. A removed, replaced, or rebound formula blocks publication. Do not use `balance_sheet_sync` or a post-processing pass to bypass this check.
+- Capture formulas on the touched summary sheets and the required dependency closure before filling, compare them before each save and again from the saved staging file before publishing, and emit `summary_formula_preservation_report.json`. A removed, replaced, or rebound formula blocks publication. Do not use `balance_sheet_sync` or a post-processing pass to bypass this check. Untouched, out-of-scope summary families do not require formula-by-formula revalidation unless a structural edit can affect them.
 - Reconciliation calculations may update formula caches or validation reports only; they must not replace worksheet formulas. Enable automatic recalculation. Verify on a test copy that editing a detail amount changes its linked summary amount and difference, rather than merely checking the initial `J4` value.
 - Treat the prebuilt internal links in `分类汇总`, `流动汇总`, `存货汇总`, `非流动资产汇总`, `固定资产汇总`, `无形资产汇总`, `在建工程汇总`, `流动负债汇总`, and `非流动负债汇总 ` as immutable template assets. Do not modify, delete, recreate, overwrite, rebind, or bulk-refresh these links unless the user explicitly authorizes summary-link structural reconstruction for the current workbook.
 - When a formal financial statement or monthly financial report is provided, it is the authoritative source for the workbook `资产负债表`; do not derive the balance sheet only from the trial balance.
@@ -228,11 +241,14 @@ Typical pages:
 
 Rules:
 
-- Fill book-value totals into the correct aggregate or placeholder locations needed by downstream summary sheets.
-- Keep detailed body rows empty when no detail schedule is available.
+- 在确认现有来源不能可靠拆分二级明细后，如资产负债表、科目余额表或其他可靠来源能够证明科目总额，先将该总额写入模板合法的汇总输入格或明确的总额站位行，使相关汇总表能够完成勾稽核验。总额站位只能表达“已核实总额、明细待补”，不得虚构资产名称、数量、权属编号、交易对手或其他事实。
+- 总额站位行应使用清晰标签，如 `按科目总额暂列（待补明细）`，并在 `placeholder_pages.json`、`missing_materials.json`、`field_lineage_report.json` 和用户交付说明中记录来源、金额、缺失的明细维度及后续替换范围。
+- 如果模板有专用汇总输入格，优先使用该输入格；只有汇总链必须依赖明细行合计且模板没有合法汇总输入格时，才使用总额站位行。
+- 除上述合法的总额站位行外，在没有明细证据时保持其他明细行为空。
 - Preserve all formulas and links.
 - The prebuilt links in `分类汇总`, `流动汇总`, `存货汇总`, `非流动资产汇总`, `固定资产汇总`, `无形资产汇总`, `在建工程汇总`, `流动负债汇总`, and `非流动负债汇总 ` are not fill targets and must remain untouched.
 - Mark these pages as `待补资料回填`, and include them in the missing-materials list.
+- 缺少二级明细只暂停该科目的明细完整性认定，不得阻断其他已有充分证据科目的填报和校验。工作簿可作为“待补明细版”交付，但不得将对应科目标记为 `detail_fillable` 或宣称完整明细已经完成。
 
 #### Zero-balance cleanup pages
 
@@ -289,6 +305,7 @@ Every run must produce:
 23. `reclassification_analysis.json`
 24. `delivery_check_report.json`
 25. `execution_scope.json`
+26. `change_manifest.json`
 
 `missing_materials.json` should list concrete file expectations, for example:
 
@@ -297,7 +314,32 @@ Every run must produce:
 - `长期股权投资明细`
 - `在建工程项目清单`
 
+不得仅按文件名判断资料缺失。每一项缺失资料还必须记录：对应科目、已经检查的来源文件、已经能够确认的总额、尚不能确认的字段或拆分维度，以及建议补充的资料类型。面向用户的交付说明必须逐科目列出这些内容，不能只返回笼统的“请补二级明细”。
+
 ## Validation Gates
+
+### 增量校验边界
+
+每次写入前建立 `change_manifest.json`，至少记录本轮实际修改或计划修改的工作表、单元格/区域、公式、合并区域、行列结构、样式、打印设置、工作表显隐状态，以及是否触及超链接或 worksheet relationship。
+
+默认采用增量校验：
+
+- 校验实际修改区域及其直接依赖的汇总链；
+- 校验因插行、删行、移动或合并而可能受影响的固定页脚、公式和导航；
+- 校验本轮改动对应的来源、金额、语义和显示/打印结果；
+- 保留工作簿可打开、ZIP 结构有效等文件级基础检查。
+
+未修改超链接、超链接所在单元格或 worksheet relationship 时，不得逐一重新打开或复核模板中的全部超链接。只需证明本轮写入路径未触及这些对象，并对实际修改工作表执行必要的结构保护检查。
+
+仅在以下情况扩大为全工作簿结构或链接校验：
+
+- 插入、删除或移动行列可能使范围外引用发生位移；
+- 重命名、删除、复制或移动工作表；
+- 修改跨表公式、定义名称、超链接或 relationship；
+- 进行模板迁移、链接重建，或用户明确要求全量检查；
+- 无法从 `change_manifest.json` 证明改动与范围外结构相互隔离。
+
+全工作簿桌面 Excel/WPS 重算不是默认验收步骤。优先在 Python 中计算并验证必要依赖链；只有公式缓存必须刷新且文件级方法不足时，才执行最多一次最终全工作簿重算。修复后只复核修复点及受其影响的依赖链，不因一次局部修复重复全量检查。
 
 Before declaring completion, validate:
 
@@ -322,6 +364,8 @@ Before declaring completion, validate:
 - Any account present in either source book must remain visible in the delivered workbook, even if it is only a placeholder-only page.
 - If `分类汇总!J4` is not `OK`, `unreconciled_reasons.json` must explain the exact reason, affected rows, current source evidence boundary, and required missing files or structural blockers.
 - When the sources do not support a value, leave it blank, placeholder-only, or explicitly unreconciled; do not guess.
+- 对 `placeholder_only` 科目，应核对总额站位金额与来源科目总额一致，并确认其能够沿必要汇总链勾稽；不得因总表已经勾稽而把总额站位误判为二级明细已完成。
+- 在报告资料缺失前，验证记录必须证明已经检查本次提供的科目余额表、序时账、资产负债表及相关附件，并说明为什么这些来源仍不足以恢复所需明细。
 - Any `detail_fillable` page must also pass semantic validation, not only numeric validation.
 - A run fails if a settlement-object field contains a business label, tax label, currency label, or account label instead of a real subject.
 - A run fails if `结算对象 == 业务内容`, unless the current project has an explicit documented exemption.
@@ -343,6 +387,7 @@ Before declaring completion, validate:
 - Use pure file-level workbook automation as the default writer.
 - In `single_asset_lightweight`, validate stage-1 balance-sheet inputs directly and perform at most one final workbook recalculation. Do not run a desktop full-workbook recalculation merely to decide which pages are in scope.
 - In `scoped_standard`, restrict structure scanning, cleanup, semantic review, and formula-error review to active pages plus their dependency closure.
+- 遵循 `change_manifest.json` 的增量校验范围；模板资产“不得修改”不等于每轮必须逐项重验所有未修改公式和超链接。
 - A switch to `full_template` must be visible in `execution_scope.json` with a concrete structural reason or an explicit user request.
 - Prefer one of these routes:
   - scoped `openpyxl` writes when they do not break workbook structure

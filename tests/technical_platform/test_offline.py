@@ -43,7 +43,7 @@ def test_offline_keeps_review_visible_and_local_actions_enabled(tmp_path):
     assert app
     window = PlatformWindow(PlatformStore(tmp_path / "state.db", "local-preview"))
     try:
-        assert window.skill_combo.findData(REVIEW.id) >= 0
+        assert not hasattr(window, 'skill_combo')
         window.connection_changed("reconnecting")
         assert window.send.isEnabled()
         assert window.attach.isEnabled()
@@ -59,7 +59,9 @@ def test_cancelled_connection_keeps_prompt_and_history(tmp_path):
     session = store.create_session(project)
     window = PlatformWindow(store)
     window.reload_projects(project)
-    window.skill_combo.setCurrentIndex(window.skill_combo.findData(REVIEW.id))
+    source = tmp_path / 'report.docx'
+    source.write_bytes(b'fixture')
+    window.import_files([source])
     window.composer.setPlainText("审核报告")
     called = []
     window.connect_service = lambda: called.append(True) or False

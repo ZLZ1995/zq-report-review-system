@@ -1,6 +1,24 @@
 from .conftest import bearer, login
 
 
+def test_billing_page_and_browser_behavior(client):
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    page = client.get('/admin').text
+    for marker in ['billing-reconcile', 'billing-choice', 'billing-query', '不是追加扣款额']:
+        assert marker in page
+    runtime = shutil.which('node')
+    assert runtime, 'Node.js is required for shipped admin JavaScript behavior tests'
+    root = Path(__file__).resolve().parents[2]
+    for name in ['test_admin_billing_ui.cjs', 'test_admin_discovery_ui.cjs']:
+        result = subprocess.run([runtime, str(Path(__file__).with_name(name))], cwd=root,
+                                capture_output=True, text=True, encoding='utf-8', timeout=30, check=False)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert 'PASS:' in result.stdout
+
+
 def test_admin_assets_are_independent_and_restrict_scripts(client):
     page = client.get("/admin")
     assert page.status_code == 200

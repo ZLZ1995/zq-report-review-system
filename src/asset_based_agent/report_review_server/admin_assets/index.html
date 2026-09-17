@@ -10,6 +10,16 @@
 <form id="adjust"><h3>调整余额</h3><label>客户<select name="user_id" class="user-choice" required></select></label><label>调整金额<input name="amount" type="number" step="0.00000001" required></label><button>确认调整</button></form>
 <form id="reset"><h3>重置密码</h3><label>客户<select name="user_id" class="user-choice" required></select></label><label>新临时密码<input name="temporary_password" type="password" minlength="8" maxlength="16" pattern="[A-Za-z0-9]*[0-9][A-Za-z0-9]*" title="8–16位纯数字或数字与英文字母组合，区分大小写" required autocomplete="new-password"></label><button>重置并使原会话失效</button></form>
 <form id="multiplier"><h3>用户专属倍率</h3><label>客户<select name="user_id" class="user-choice" required></select></label><label>倍率<input name="multiplier" type="number" min="0.000001" step="0.000001" required></label><button>保存倍率</button></form></div></section>
+<section id="billing"><h2>费用待核对</h2>
+<p>必须先取得上游费用凭证。填写整个冻结记录的总费用（元），不是追加扣款额，不得低于已知费用。只填写凭证摘要及非秘密工单编号，不上传密码、密钥或客户文件。</p>
+<button id="billing-load" type="button">加载待核对记录</button><button id="billing-next" type="button" disabled>下一页</button>
+<label>待核对记录<select id="billing-choice"><option value="">请加载并选择</option></select></label>
+<form id="billing-reconcile"><label>冻结编号（也可查询历史回执）<input id="billing-hold" name="hold_id" required maxlength="36"></label>
+<label>确认总费用（元）<input name="confirmed_amount" type="number" min="0" max="999999999999.99999999" step="0.00000001" required></label>
+<label>上游凭证 SHA256<input name="evidence_sha256" pattern="[0-9a-f]{64}" minlength="64" maxlength="64" required autocomplete="off"></label>
+<label>凭证引用/工单编号<input name="evidence_reference" pattern="[A-Za-z0-9][A-Za-z0-9._:-]*" maxlength="128" required autocomplete="off"></label>
+<button>核对并结算</button><button id="billing-query" type="button">查询回执（不扣款）</button></form>
+<p id="billing-result" role="status" aria-live="polite"></p></section>
 <section id="models"><h2>模型与渠道</h2><div id="model-list"></div><div id="route-list"></div><div class="forms">
 <form id="route"><h3>连接并选择模型</h3>
 <p>填写连接信息，测试后从返回清单中手动选择一个模型。不需要提前新增模型。</p>

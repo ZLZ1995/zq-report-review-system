@@ -1,5 +1,9 @@
 """Safe, account-scoped explanations of persisted task failure stages."""
 
+from ..report_review_app.services.remote_auth_service import (
+    BILLING_RECONCILIATION_MESSAGE,
+)
+
 PHASES = {
     "planning": ("计划校验", "请核对选定文件、Skill 版本及模型配置，再重新提交。"),
     "context": ("上下文构建", "请检查当前项目的历史和记忆；保留任务编号供排查。"),
@@ -22,5 +26,7 @@ def failure_message(store, run_id: str) -> str:
             (run_id,),
         ).fetchone()
     phase = row[0].split(":", 1)[0] if row else ""
+    if row and row[0].partition(":")[2].strip() == 'BillingReconciliationRequired':
+        return f"{BILLING_RECONCILIATION_MESSAGE}\n任务编号：{run_id}"
     label, advice = PHASES.get(phase, ("未记录", "请保留任务编号，联系管理员核对日志。"))
     return f"任务未完成。失败阶段：{label}。\n{advice}\n任务编号：{run_id}"

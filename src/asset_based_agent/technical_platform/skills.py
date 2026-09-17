@@ -7,6 +7,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .store import PlatformStore
 
@@ -62,6 +63,13 @@ HISTORY = SkillSpec('gongshang-change-history-docx', '0.1.0', '工商历史沿�
 BUILTINS = (PREFLIGHT, REVIEW, DETAIL, HISTORY)
 GENERATORS = (DETAIL, HISTORY)
 
+# Native capability, not a selectable document skill or an external Skill adapter.
+BROWSER = SkillSpec('browser.task', '0.1.0', '浏览器任务', frozenset({'browser'}))
+
+
+class SourceValidationError(ValueError):
+    stage = 'validation'
+
 
 def preflight(
     store: PlatformStore,
@@ -72,6 +80,10 @@ def preflight(
     provider=None,
     output=None,
     claimed: bool = False,
+    manage_run: bool = True,
+    selected_files=None,
+    client_job_id: str | None = None,
+    reference_file_ids: set[str] | None = None,
 ) -> dict:
     """Uses the existing visibility-filtering extractor; never persists extracted text."""
     import json
@@ -83,19 +95,31 @@ def preflight(
     from ..report_review_app.services.file_role_service import classify_file_role
 
     snapshot = json.loads(store.run(run_id)["snapshot"])
-    files = snapshot["files"]
+    files = snapshot["files"] if selected_files is None else selected_files
     if not files:
         raise ValueError("请先添加审核文件")
-    extractor = DocumentExtractionService()
-    documents = []
-    result = {"kind": "preflight", "model_called": False, "files": []}
-    if not claimed:
+    if not claimed and manage_run:
         store.claim_run(run_id)
     elif store.run(run_id)["state"] != "running":
         raise ValueError("任务未处于执行状态")
+    if cancel.is_set():
+        if manage_run:
+            store.transition(run_id, 'cancelled', '已在文件解析前停止')
+        return {'kind': 'cancelled'}
+    reference_ids = set(reference_file_ids or ())
+    if not reference_ids <= {f['id'] for f in files}:
+        raise ValueError('参考文件不属于本步骤输入')
+    reference_ids.update(f['id'] for f in files if Path(f['path']).suffix.lower() == '.pdf')
+    target_ids = {f['id'] for f in files} - reference_ids
+    if provider is not None and not target_ids:
+        raise ValueError('没有本步骤审核目标，参考文件不能单独送审')
+    extractor = DocumentExtractionService()
+    documents = []
+    result: dict[str, Any] = {"kind": "preflight", "model_called": False, "files": []}
     for index, item in enumerate(files, 1):
         if cancel.is_set():
-            store.transition(run_id, "cancelled", "已在文件边界停止")
+            if manage_run:
+                store.transition(run_id, "cancelled", "已在文件边界停止")
             return {"kind": "cancelled"}
         path = Path(item["path"])
         if digest(path) != item["sha256"]:
@@ -111,14 +135,16 @@ def preflight(
             original_path=str(path),
             role=classify_file_role(path),
         )
-        document = extractor.extract(source)
+        from ..report_review_app.services.task_cancellation import cancellable_call
+        document = cancellable_call(lambda source=source: extractor.extract(source), cancel)
         documents.append(document)
         result["files"].append(
             {
                 "name": path.name,
                 "chunks": len(document.chunks),
                 "characters": sum(len(c.text) for c in document.chunks),
-                "warnings": document.warnings,
+                "warnings": [*document.warnings, *(['本文件仅作参考，不作为审核对象。']
+                                                  if item['id'] in reference_ids else [])],
             }
         )
     if provider is not None and not cancel.is_set():
@@ -126,14 +152,22 @@ def preflight(
 
         progress("资料已解析，正在等待服务端模型审核；可请求停止接收结果。")
         batches = PrivacyChunkSelector().build_batches(documents)
+        # Filter hidden/dependency-tainted workbook chunks with their ORIGINAL
+        # roles first. Relabelling before this gate could resurrect hidden data.
+        from ..report_review_app.domain.enums import FileRole
+        for batch in batches:
+            batch.chunks = [chunk.model_copy(update={'reference_only': True,
+                                                     'role': FileRole.REFERENCE_DOCUMENT})
+                            if chunk.source_file_id in reference_ids else chunk for chunk in batch.chunks]
         if not batches:
             raise ValueError("没有可上传的可见文本，无法执行审核")
-        provider.set_client_job_id(f"PLATFORM-{run_id}")
+        provider.set_client_job_id(client_job_id or f"PLATFORM-{run_id}")
         def review_progress(event):
             state = event.get("state")
             if state == "output":
                 if output is not None:
-                    output(event["issues"])
+                    output([item for item in event["issues"]
+                            if isinstance(item, dict) and item.get('source_file_id') in target_ids])
             elif state == "reconnecting":
                 progress("连接暂时中断，正在查询原审核任务；请勿重复提交。")
             elif state == "completed":
@@ -145,20 +179,27 @@ def preflight(
                 )
 
         issues = provider.review_batches(batches, progress_callback=review_progress)
+        excluded_count = sum(item.source_file_id not in target_ids for item in issues)
+        if excluded_count:
+            warning = f'模型返回的{excluded_count}条参考文件或范围外意见已排除，请核对本轮目标覆盖情况。'
+            result['files'][0]['warnings'].append(warning)
+            progress(warning)
         result = {
             "kind": "review",
             "model_called": True,
             "files": result["files"],
-            "issues": [item.model_dump(mode="json") for item in issues],
+            "issues": [item.model_dump(mode="json") for item in issues if item.source_file_id in target_ids],
         }
-    store.transition(run_id, "validating", "校验所有原文件保持不变")
+    if manage_run:
+        store.transition(run_id, "validating", "校验所有原文件保持不变")
     for item in files:
         if digest(Path(item["path"])) != item["sha256"]:
-            raise ValueError("原文件发生变化，本轮验收失败")
-    store.save_result(run_id, result)
-    store.transition(
-        run_id,
-        "cancelled" if cancel.is_set() else "succeeded",
-        "审核结果已校验" if provider is not None else "预检结束；未执行模型审核",
-    )
+            raise SourceValidationError("原文件发生变化，本轮验收失败")
+    if manage_run:
+        store.save_result(run_id, result)
+        store.transition(
+            run_id,
+            "cancelled" if cancel.is_set() else "succeeded",
+            "审核结果已校验" if provider is not None else "预检结束；未执行模型审核",
+        )
     return result

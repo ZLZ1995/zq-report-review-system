@@ -6,11 +6,21 @@ import argparse
 import html
 import json
 import os
+import sqlite3
 import sys
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QStandardPaths, Qt, QThread, QUrl, Signal
+from PySide6.QtCore import (
+    QEvent,
+    QSignalBlocker,
+    QStandardPaths,
+    Qt,
+    QThread,
+    QTimer,
+    QUrl,
+    Signal,
+)
 from PySide6.QtGui import QDesktopServices, QFont, QFontDatabase
 from PySide6.QtWidgets import (
     QApplication,
@@ -23,21 +33,25 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSplitter,
     QTabWidget,
     QTextBrowser,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
+from .agent_controller import ClarificationContextLimit
+from .composer import ChatComposer
 from .execution import execute_task
 from .project_catalog import ProjectCatalog
-from .release_info import CLIENT_VERSION, inspect_server, local_release
-from .skills import BUILTINS, GENERATORS, PREFLIGHT, REVIEW, SkillRegistry, digest
+from .release_info import CLIENT_VERSION, inspect_server, local_release, release_details
+from .skills import BUILTINS, GENERATORS, REVIEW, SkillRegistry, digest
 from .store import PlatformStore
+from .task_events import CompletionEventRelay, TaskDestination, TaskEventRelay
+from .task_manager import TaskBinding, TaskManager
 from .task_spec import build_task_spec
 
 SERVER_URL = "https://zq-report-review.zeabur.app/api/v1"
@@ -85,11 +99,15 @@ class TaskWorker(QThread):
     completed = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, store, run_id, parent=None, provider=None):
+    def __init__(self, store, run_id, parent=None, provider=None, client=None):
         super().__init__(parent)
-        self.store, self.run_id = store, run_id
+        self.store = store.active if isinstance(store, ProjectCatalog) else store
+        if self.store is None:
+            raise ValueError('执行任务前必须选择项目')
+        self.run_id = run_id
         self.cancel = threading.Event()
         self.provider = provider
+        self.client = client
 
     def run(self):
         try:
@@ -100,6 +118,7 @@ class TaskWorker(QThread):
                 self.progress.emit,
                 provider=self.provider,
                 output=self.output.emit,
+                client=self.client,
             )
             self.completed.emit(result)
         except Exception as exc:  # noqa: BLE001 - worker boundary records failure and reports to UI
@@ -108,16 +127,20 @@ class TaskWorker(QThread):
 
 
 class PlatformWindow(QMainWindow):
-    def __init__(self, store: PlatformStore, *, client=None, models=None):
+    def __init__(self, store: PlatformStore, *, client=None, models=None, storage_preferences=None):
         super().__init__()
         configure_fonts()
         self.store = store
+        self.storage_preferences = storage_preferences
+        self.browser_panel = None
         self.client, self.models = client, models or []
         self.registry = SkillRegistry()
         for skill in BUILTINS:
             self.registry.register(skill)
         self.project_id = self.session_id = self.run_id = None
-        self.worker = None
+        self._draft_binding = None
+        self._unsaved_drafts = {}
+        self.task_manager = TaskManager()
         self.monitor = None
         self.version_worker = None
         self.network_state = "connected"
@@ -127,8 +150,19 @@ class PlatformWindow(QMainWindow):
         self.resize(1440, 900)
         self.setMinimumSize(960, 640)
         self._build()
-        self.reload_projects(self.store.last_project if isinstance(self.store, ProjectCatalog) else None)
+        self.composer.textChanged.connect(self.save_current_draft)
+        self.files.itemChanged.connect(self.save_current_draft)
         self.server_url = SERVER_URL
+        self.session_badge_timer = QTimer(self)
+        self.session_badge_timer.setInterval(1000)
+        self.session_badge_timer.timeout.connect(self.refresh_session_badges)
+        self.session_badge_timer.start()
+        self.reload_projects(self.store.last_project if isinstance(self.store, ProjectCatalog) else None)
+
+    @property
+    def worker(self):
+        """Current conversation's worker; background workers live in TaskManager."""
+        return self.task_manager.for_session(self.store.owner, self.project_id, self.session_id)
 
     def button(self, title, callback, layout):
         button = QPushButton(title)
@@ -156,29 +190,38 @@ class PlatformWindow(QMainWindow):
         self.button("＋  新建项目", self.new_project, left).setObjectName("newProject")
         self.button("打开已有项目 / 重新定位", self.open_project_directory, left)
         left.addSpacing(20)
-        heading = QLabel("项目")
-        heading.setObjectName("sectionLabel")
-        left.addWidget(heading)
-        self.projects = QListWidget()
+        # Retain the existing selection controllers while the visible navigation
+        # is unified in ProjectTree; these lists are not additional UI surfaces.
+        self.projects = QListWidget(self)
+        self.projects.hide()
         self.projects.setMaximumHeight(180)
         self.projects.currentItemChanged.connect(self.choose_project)
-        left.addWidget(self.projects)
         left.addSpacing(12)
         session_header = QHBoxLayout()
-        heading = QLabel("当前项目的会话")
+        heading = QLabel("项目与会话")
         heading.setObjectName("sectionLabel")
         session_header.addWidget(heading, 1)
         self.button("＋", self.new_session, session_header).setToolTip("新建会话")
         left.addLayout(session_header)
-        self.sessions = QListWidget()
+        self.sessions = QListWidget(self)
+        self.sessions.hide()
         self.sessions.currentItemChanged.connect(self.choose_session)
-        left.addWidget(self.sessions, 3)
+        self.sessions.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.sessions.customContextMenuRequested.connect(self.session_menu)
+        from .project_tree import ProjectTree
+        self.project_tree = ProjectTree(self)
+        self.project_tree.currentItemChanged.connect(self.choose_tree_item)
+        self.project_tree.customContextMenuRequested.connect(self.tree_menu)
+        left.addWidget(self.project_tree, 3)
+        self.button("恢复已归档会话", self.restore_session, left).setObjectName("mutedButton")
         self.button("归档项目", self.archive, left).setObjectName("mutedButton")
         self.button("恢复已归档项目", self.restore_project, left).setObjectName(
             "mutedButton"
         )
         self.button("认领旧共享项目", self.claim_legacy_project, left).setObjectName("mutedButton")
         self.button("外部 Skill 管理", self.manage_skills, left).setObjectName("mutedButton")
+        if self.storage_preferences is not None:
+            self.button('平台数据目录', self.configure_storage, left).setObjectName('mutedButton')
         left.addSpacing(12)
         account = QLabel(
             "●  本地预览 <span style='color:#a5a7ae'> / 只读模式</span>"
@@ -204,6 +247,7 @@ class PlatformWindow(QMainWindow):
         self.title.setObjectName("title")
         top.addWidget(self.title, 1)
         self.button("项目面板", self.toggle_details, top).setObjectName("panelButton")
+        self.button('浏览器', self.toggle_browser, top).setToolTip('显示或隐藏独立浏览器')
         middle.addLayout(top)
         self.transcript = QTextBrowser()
         self.transcript.setObjectName("transcript")
@@ -220,26 +264,18 @@ class PlatformWindow(QMainWindow):
         composer_layout = QVBoxLayout(composer_card)
         composer_layout.setContentsMargins(12, 10, 12, 10)
         composer_layout.setSpacing(4)
-        self.composer = QTextEdit()
+        self.composer = ChatComposer()
         self.composer.setObjectName("composer")
         self.composer.setFixedHeight(86)
         self.composer.setPlaceholderText(
-            "描述你想完成的工作…\n例如：检查本项目的审核资料"
+            "描述你想完成的工作…\nEnter 发送 · Alt+Enter 换行"
         )
         composer_layout.addWidget(self.composer)
         actions = QHBoxLayout()
         self.attach = self.button("＋", self.add_files, actions)
         self.attach.setToolTip("添加项目文件")
         self.attach.setFixedWidth(36)
-        self.skill_combo = QComboBox()
-        self.skill_combo.addItem("资料预检", PREFLIGHT.id)
-        self.skill_combo.setToolTip("选择本次执行使用的 Skill；资料预检不调用模型")
-        self.skill_combo.addItem(REVIEW.name, REVIEW.id)
-        for skill in GENERATORS:
-            self.skill_combo.addItem(skill.name, skill.id)
-        if self.client is not None:
-            self.skill_combo.setCurrentIndex(1)
-        actions.addWidget(self.skill_combo)
+        actions.addWidget(QLabel('Agent 自动选择任务能力'))
         actions.addStretch(1)
         self.model_combo = QComboBox()
         for model in self.models:
@@ -249,6 +285,8 @@ class PlatformWindow(QMainWindow):
         self.stop = self.button("停止", self.cancel_run, actions)
         self.stop.setEnabled(False)
         self.send = self.button("执行 ↑", self.submit, actions)
+        self.composer.send_requested.connect(self.send.click)
+        self.send.setToolTip('发送消息（Enter）；输入框内 Alt+Enter 换行')
         self.send.setObjectName("sendButton")
         composer_layout.addLayout(actions)
         middle.addWidget(composer_card)
@@ -307,10 +345,11 @@ class PlatformWindow(QMainWindow):
             QLabel#status { color:#858a95; font-size:11px; padding-left:10px; }
             QLabel#footerHint { color:#a0a4ad; font-size:10px; }
             QLabel#detailTitle { font-size:14px; font-weight:600; }
-            QListWidget { border:0; background:transparent; outline:0; padding:0; }
-            QListWidget::item { padding:11px 10px; border-radius:8px; margin:2px 0; }
-            QListWidget::item:hover { background:#ededf1; }
-            QListWidget::item:selected { background:#e7e8ee; color:#252a37; }
+            QListWidget, QTreeWidget#projectTree { border:0; background:transparent; outline:0; padding:0; }
+            QListWidget::item, QTreeWidget#projectTree::item { padding:11px 10px; border-radius:8px; margin:2px 0; }
+            QListWidget::item:hover, QTreeWidget#projectTree::item:hover { background:#ededf1; }
+            QListWidget::item:selected, QTreeWidget#projectTree::item:selected { background:#e7e8ee; color:#252a37; }
+            QTreeWidget#projectTree { show-decoration-selected:0; selection-background-color:#e7e8ee; }
             QListWidget#fileList::item { background:#f8f9fb; border:1px solid #edf0f4; margin:4px 0; padding:14px 10px; }
             QTextBrowser#transcript { background:white; border:0; padding:12px 6px; }
             QTextBrowser#result { background:white; border:0; padding:20px; }
@@ -349,10 +388,44 @@ class PlatformWindow(QMainWindow):
             if project["id"] == selected:
                 self.projects.setCurrentItem(item)
         self.projects.setFixedHeight(max(52, min(5, self.projects.count()) * 46))
+        self.refresh_project_tree()
+
+    def refresh_project_tree(self):
+        self.project_tree.refresh(self.store, self.task_manager, self.project_id, self.session_id)
+
+    def choose_tree_item(self, item, _previous=None):
+        if item is None:
+            return
+        project, session = item.data(0, Qt.ItemDataRole.UserRole)
+        if project != self.project_id:
+            for index in range(self.projects.count()):
+                row = self.projects.item(index)
+                if row.data(Qt.ItemDataRole.UserRole) == project:
+                    self.projects.setCurrentItem(row)
+                    break
+        if self.project_id == project and session is not None:
+            for index in range(self.sessions.count()):
+                row = self.sessions.item(index)
+                if row.data(Qt.ItemDataRole.UserRole) == session:
+                    self.sessions.setCurrentItem(row)
+                    break
+
+    def tree_menu(self, position):
+        item = self.project_tree.itemAt(position)
+        if item is None:
+            return
+        project, session = item.data(0, Qt.ItemDataRole.UserRole)
+        self.project_tree.setCurrentItem(item)
+        if self.project_id != project:
+            return
+        menu = QMenu(self)
+        menu.addAction('新建会话', self.new_session)
+        if session is not None and self.session_id == session:
+            menu.addAction('重命名会话', self.rename_session)
+            menu.addAction('归档会话', self.archive_session)
+        menu.exec(self.project_tree.viewport().mapToGlobal(position))
 
     def new_project(self):
-        if self.worker:
-            return
         name, ok = QInputDialog.getText(self, "新建项目", "项目名称")
         if ok and name.strip():
             try:
@@ -370,7 +443,7 @@ class PlatformWindow(QMainWindow):
             self.reload_projects(identity)
 
     def open_project_directory(self):
-        if self.worker or not isinstance(self.store, ProjectCatalog):
+        if not isinstance(self.store, ProjectCatalog):
             return
         selected = QFileDialog.getExistingDirectory(self, "打开已有项目或旧工作空间（非系统盘）", "")
         if not selected:
@@ -384,12 +457,20 @@ class PlatformWindow(QMainWindow):
             self.status.setText(str(exc))
 
     def choose_project(self, item, _previous=None):
+        self._draft_binding = None
+        self.session_id = None
         self.project_id = item.data(Qt.ItemDataRole.UserRole) if item else None
+        blocker = QSignalBlocker(self.sessions)
         self.sessions.clear()
+        del blocker
         self.files.clear()
         self.memories.clear()
         if not self.project_id:
             self.title.setText("创建项目，开始工作")
+            self.composer.clear()
+            self.run_id = None
+            self.set_busy(False)
+            self.render_messages()
             return
         if isinstance(self.store, ProjectCatalog):
             try:
@@ -401,7 +482,7 @@ class PlatformWindow(QMainWindow):
                 self.render_messages()
                 return
         self.title.setText(self.store.project(self.project_id)["name"])
-        self.status.setText("添加项目资料，选择 Skill 后执行。原始文件只读。")
+        self.status.setText("添加本轮资料，用自然语言描述任务。原始文件只读。")
         for session in self.store.sessions(self.project_id):
             row = QListWidgetItem(session["title"])
             row.setData(Qt.ItemDataRole.UserRole, session["id"])
@@ -417,25 +498,185 @@ class PlatformWindow(QMainWindow):
         self.refresh_details()
 
     def new_session(self):
-        if self.worker:
-            return
         if self.project_id:
-            self.store.create_session(
+            identity = self.store.create_session(
                 self.project_id, f"会话 {self.sessions.count() + 1}"
             )
-            self.choose_project(self.projects.currentItem())
+            self.reload_sessions(identity)
+
+    def session_menu(self, position):
+        item = self.sessions.itemAt(position)
+        if item is None:
+            return
+        self.sessions.setCurrentItem(item)
+        menu = QMenu(self)
+        menu.addAction('重命名会话', self.rename_session)
+        menu.addAction('归档会话', self.archive_session)
+        menu.exec(self.sessions.viewport().mapToGlobal(position))
+
+    def reload_sessions(self, selected=None):
+        self.sessions.clear()
+        if not self.project_id:
+            return
+        for session in self.store.sessions(self.project_id):
+            row = QListWidgetItem(session['title'])
+            row.setData(Qt.ItemDataRole.UserRole, session['id'])
+            self.sessions.addItem(row)
+            if session['id'] == selected:
+                self.sessions.setCurrentItem(row)
+        if self.sessions.currentItem() is None and self.sessions.count():
+            self.sessions.setCurrentRow(0)
+        self.refresh_project_tree()
+
+    def refresh_session_badges(self):
+        from .navigation_snapshot import navigation_snapshot
+        if not self.project_id:
+            return
+        try:
+            snapshot = navigation_snapshot(self.store)
+            project = next((p for p in snapshot if p['id'] == self.project_id), None)
+            rows = {row['id']: row for row in project['sessions']} if project else {}
+            for index in range(self.sessions.count()):
+                item = self.sessions.item(index)
+                identity = item.data(Qt.ItemDataRole.UserRole)
+                row = rows.get(identity)
+                if row is None:
+                    continue
+                labels = [row['title']]
+                if self.task_manager.for_session(self.store.owner, self.project_id, identity) is not None:
+                    labels.append('运行中')
+                if row['unread_count']:
+                    labels.append(f"未读 {row['unread_count']}")
+                item.setText(' · '.join(labels))
+            self.project_tree.refresh(self.store, self.task_manager, self.project_id,
+                                      self.session_id, snapshot=snapshot)
+        except (OSError, ValueError, PermissionError, sqlite3.Error):
+            # A temporarily unavailable project must not break the Qt event loop.
+            self.session_badge_timer.stop()
+            self.status.setText('会话状态更新失败；请重新打开项目目录。')
+
+    def rename_session(self):
+        from .session_service import SessionService
+        if not self.session_id:
+            return
+        identity = self.session_id
+        title, ok = QInputDialog.getText(self, '重命名会话', '会话名称',
+                                        text=self.store.session(identity)['title'])
+        if ok:
+            try:
+                SessionService(self.store).rename(identity, title)
+                self.reload_sessions(identity)
+            except (OSError, ValueError, PermissionError, sqlite3.Error):
+                self.status.setText('无法重命名会话，请检查名称和项目目录。')
+
+    def archive_session(self):
+        from .session_service import SessionService
+        if not self.session_id:
+            return
+        if self.worker is not None:
+            self.status.setText('请等待本会话任务结束后再归档。')
+            return
+        if QMessageBox.question(self, '归档会话', '归档当前会话？历史内容和成果保留，可随时恢复。') != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            SessionService(self.store).archive(self.session_id, True)
+            self.reload_sessions()
+        except (OSError, ValueError, PermissionError, sqlite3.Error):
+            self.status.setText('会话未归档，请确认任务已结束且项目目录可用。')
+
+    def restore_session(self):
+        from .session_service import SessionService
+        if not self.project_id:
+            return
+        try:
+            service = SessionService(self.store)
+            rows = service.list(self.project_id, archived=True)
+            if not rows:
+                self.status.setText('当前项目没有已归档会话。')
+                return
+            labels = [f"{i + 1}. {row['title']}" for i, row in enumerate(rows)]
+            label, ok = QInputDialog.getItem(self, '恢复会话', '选择会话', labels, 0, False)
+            if ok and label in labels:
+                identity = rows[labels.index(label)]['id']
+                service.archive(identity, False)
+                self.reload_sessions(identity)
+        except (OSError, ValueError, PermissionError, sqlite3.Error):
+            self.status.setText('无法恢复会话，请检查项目目录。')
 
     def choose_session(self, item, _previous=None):
+        from .session_service import SessionService
+        from .task_recovery import reconcile_execution
+
+        self._draft_binding = None
         self.session_id = item.data(Qt.ItemDataRole.UserRole) if item else None
+        self.run_id = getattr(self.worker, 'run_id', None)
+        self.set_busy(self.worker is not None)
+        self._scope_submitted = False
+        self.composer.clear()
+        selected = set()
+        if self.session_id:
+            service = SessionService(self.store)
+            try:
+                key = (str(service.store.path.resolve()), service.store.owner, self.session_id)
+                pending = self._unsaved_drafts.get(key)
+                draft = pending[2] if pending is not None else service.draft(self.session_id)
+                self.composer.setPlainText(draft['text'])
+                selected = set(draft['file_ids'])
+                self._scope_submitted = draft['submitted']
+                self._draft_binding = (service, self.session_id)
+            except (OSError, ValueError, PermissionError, sqlite3.Error):
+                self.status.setText('草稿读取失败，未覆盖已保存草稿。请检查项目目录。')
+        self.refresh_details(selected_ids=selected)
         self.render_messages()
         if self.session_id:
             if isinstance(self.store, ProjectCatalog):
                 self.store.remember_session(self.session_id)
             runs = self.store.runs(self.session_id)
             for run in runs:
+                local_store = self.store.active if isinstance(self.store, ProjectCatalog) else self.store
+                try:
+                    running = self.worker is not None and getattr(self.worker, 'run_id', None) == run['id']
+                    recovery = 'running' if running else reconcile_execution(local_store, run['id'])
+                    if recovery == 'reconciliation_required':
+                        self.status.setText('存在状态待核对的任务；不会自动重跑，请先核对服务端任务状态。')
+                except (OSError, ValueError, PermissionError, sqlite3.Error):
+                    self.status.setText('任务检查点恢复未完成；未自动重新执行任务。')
                 if run["result"]:
                     self.show_result(json.loads(run["result"]), run_id=run["id"])
             self.render_messages()
+
+            try:
+                messages = self.store.messages(self.session_id)
+                if messages:
+                    SessionService(self.store).mark_read(self.session_id, messages[-1]['id'])
+            except (OSError, ValueError, PermissionError, sqlite3.Error):
+                self.status.setText('已读状态未保存，请检查项目目录；历史消息未删除。')
+            self.refresh_session_badges()
+            self.session_badge_timer.start()
+
+    def save_current_draft(self, *_args):
+        if self._draft_binding is None:
+            return
+        service, identity = self._draft_binding
+        key = (str(service.store.path.resolve()), service.store.owner, identity)
+        draft = {'text': self.composer.toPlainText(), 'file_ids': sorted(self.selected_file_ids()),
+                 'submitted': getattr(self, '_scope_submitted', False)}
+        self._unsaved_drafts[key] = (service, identity, draft)
+        try:
+            service.save_draft(identity, **draft)
+            self._unsaved_drafts.pop(key, None)
+        except (OSError, ValueError, PermissionError, sqlite3.Error):
+            self.status.setText('草稿未保存（最多12000字、100个附件）；请保留输入并检查项目目录。')
+
+    def flush_unsaved_drafts(self):
+        for key, (service, identity, draft) in list(self._unsaved_drafts.items()):
+            try:
+                service.save_draft(identity, **draft)
+                self._unsaved_drafts.pop(key, None)
+            except (OSError, ValueError, PermissionError, sqlite3.Error):
+                self.status.setText('仍有草稿未保存，暂不能关闭、切换账号或迁移目录；请恢复目录或返回对应会话调整输入。')
+                return False
+        return True
 
     def render_messages(self):
         scroll = self.transcript.verticalScrollBar()
@@ -443,6 +684,21 @@ class PlatformWindow(QMainWindow):
         follow_output = previous_position >= scroll.maximum() - 24
         rows = self.store.messages(self.session_id) if self.session_id else []
         content = []
+        if self.session_id:
+            from .session_service import SessionService
+            metadata = next((row for row in SessionService(self.store).list(self.project_id)
+                             if row['id'] == self.session_id), None)
+            if metadata and metadata['parent_session']:
+                content.append(f'<p>分支来源：消息 {int(metadata["fork_message"])} · '
+                    f'<a href="zq-parent:{self.session_id}">返回来源会话</a><br>'
+                    '分支不继承附件选择、草稿或执行授权。</p>')
+                try:
+                    references = SessionService(self.store).branch_results(self.session_id)
+                    if references:
+                        content.append('<p>已完成任务的固定版本引用（不自动执行）：<br>' +
+                            '<br>'.join(html.escape(ref['run_id']) for ref in references) + '</p>')
+                except (OSError, ValueError, PermissionError, sqlite3.Error):
+                    content.append('<p>来源结果已变化或无法校验，未采用该分支引用；请返回来源核对。</p>')
         for message in rows:
             text = html.escape(message["text"]).replace("\n", "<br>")
             if message["role"] == "user":
@@ -467,9 +723,48 @@ class PlatformWindow(QMainWindow):
                     ' <span style="font-size:10px;color:#a0a6b1"> / ASSISTANT</span></p>'
                     f'<p style="font-size:14px;line-height:170%;margin-bottom:28px">{text}</p>'
                 )
+            if message['role'] in {'user', 'assistant'}:
+                content.append(f'<p><a href="zq-branch:{self.session_id}/{message["id"]}">'
+                               '从此消息创建分支…</a></p>')
         if self.session_id:
             for run in self.store.runs(self.session_id):
                 result = json.loads(run['result'] or '{}')
+                from .browser_upload_history import upload_history_html
+                try:
+                    content.append(upload_history_html(self.store, run['id']))
+                except (ValueError, OSError, sqlite3.Error):
+                    content.append('<p>上传尝试记录暂不可用；请核对网站状态，不要重复上传。</p>')
+                if result.get('kind') == 'browser':
+                    from .browser_download_delivery import download_links
+                    try:
+                        content.append(download_links(self.store, run['id']))
+                    except (ValueError, OSError, sqlite3.Error):
+                        content.append('<p>下载成果记录暂不可用，请核对本地项目数据。</p>')
+                if result.get('kind') == 'plan' and run['state'] == 'succeeded':
+                    from .plan_results import completed_step_results
+                    try:
+                        records = completed_step_results(self.store, self.session_id, run['id'])
+                        for ordinal, record in enumerate(records):
+                            if record['result'].get('kind') == 'review':
+                                from .review_delivery import step_review_store
+                                scoped = step_review_store(self.store, self.session_id, run['id'], ordinal)
+                                review = json.loads(scoped.run(run['id'])['result'])
+                                link = f'{run["id"]}/{ordinal}'
+                                content.append(f'<p>审核步骤：{html.escape(record["goal"])} '
+                                    f'<a href="zq-step-export:{link}">生成标准Word审核报告…</a></p>')
+                                if review.get('issues'):
+                                    content.append(f'<p><a href="zq-step-annotate:{link}">生成本步骤问题批注副本…</a>（不修改原件）</p>')
+                                for index, path in enumerate(p for batch in review.get('annotations', []) for p in batch['files']):
+                                    content.append(f'<p>📄 {html.escape(Path(path).name)} '
+                                        f'<a href="zq-step-comment:{link}/{index}">打开批注副本</a></p>')
+                                if review.get('exported_report'):
+                                    content.append(f'<p>📄 {html.escape(Path(review["exported_report"]).name)} '
+                                        f'<a href="zq-step-report:{link}">打开审核报告</a></p>')
+                            for index, artifact in enumerate(record['result'].get('artifacts', [])):
+                                content.append(f'<p>📄 {html.escape(artifact["name"])}　'
+                                    f'<a href="zq-step-artifact:{run["id"]}/{ordinal}/{index}">打开步骤成果</a></p>')
+                    except (ValueError, PermissionError, KeyError, OSError):
+                        content.append('<p>组合成果记录校验失败，请核对任务状态。</p>')
                 if result.get('kind') == 'generation':
                     for index, artifact in enumerate(result.get('artifacts', [])):
                         name = html.escape(artifact['name'])
@@ -477,6 +772,11 @@ class PlatformWindow(QMainWindow):
                 if run['state'] == 'succeeded' and result.get('kind') == 'review':
                     identity = run['id']
                     content.append(f'<p>审核任务 {html.escape(identity)}：<a href="zq-export:{identity}">生成标准Word审核报告…</a></p>')
+                    if result.get('issues'):
+                        content.append(f'<p><a href="zq-annotate:{identity}">生成问题标记和批注副本…</a>（不修改原件）</p>')
+                    annotation_files = [p for b in result.get('annotations', []) for p in b['files']]
+                    for index, path in enumerate(annotation_files):
+                        content.append(f'<p>📄 {html.escape(Path(path).name)} <a href="zq-comment:{identity}/{index}">打开批注副本</a></p>')
                     if result.get('exported_report'):
                         name = html.escape(Path(result['exported_report']).name)
                         content.append(f'<p>📄 {name}　<a href="zq-report:{identity}">打开文件</a>　<a href="zq-folder:{identity}">打开所在文件夹</a></p>')
@@ -487,16 +787,140 @@ class PlatformWindow(QMainWindow):
                 '<p style="font-size:28px;color:#303745"><b>从一个项目，开始工作。</b></p>'
                 '<p style="color:#8d95a3;font-size:14px;line-height:180%">'
                 "整理资料，提出问题，让每一步执行都有迹可循。<br>"
-                "添加项目文件后，选择一个 Skill 开始。</p>"
+                "添加本轮文件，直接描述希望完成的工作。</p>"
                 '<p style="margin-top:28px;color:#647087;font-size:12px">'
                 "项目上下文　 /　 只读资料预检　 /　 可追溯的执行记录</p>"
             )
         )
         scroll.setValue(scroll.maximum() if follow_output else previous_position)
 
+    def handle_branch_link(self, url):
+        from .session_service import SessionService
+        try:
+            if not self.session_id or url.hasQuery() or url.hasFragment() or url.host():
+                raise ValueError('Invalid branch link')
+            service = SessionService(self.store)
+            if url.scheme() == 'zq-parent':
+                if url.path() != self.session_id:
+                    raise PermissionError('Stale branch link')
+                metadata = next(row for row in service.list(self.project_id) if row['id'] == self.session_id)
+                parent = metadata['parent_session']
+                if not parent or parent not in {row['id'] for row in service.list(self.project_id)}:
+                    raise ValueError('Source session is archived or unavailable')
+                self.reload_sessions(parent)
+                return
+            parts = url.path().split('/')
+            if len(parts) != 2 or parts[0] != self.session_id or not parts[1].isascii() or not parts[1].isdigit():
+                raise PermissionError('Stale branch link')
+            parent, anchor = parts[0], int(parts[1])
+            if not any(row['id'] == anchor for row in service.store.messages(parent)):
+                raise ValueError('Unknown branch anchor')
+            if not self.flush_unsaved_drafts():
+                return
+            title, accepted = QInputDialog.getText(self, '从消息创建分支',
+                                                  '新会话名称（不复制附件或授权）')
+            if not accepted:
+                return
+            if self.session_id != parent:
+                raise PermissionError('Conversation changed')
+            child = service.fork(parent, anchor, title)
+            self.reload_sessions(child)
+        except (OSError, ValueError, PermissionError, sqlite3.Error, StopIteration):
+            self.status.setText('分支操作未完成：请确认消息属于当前会话、名称有效且来源会话未归档。')
+
     def handle_report_link(self, url):
         from .report_export import export_review
         action = url.scheme()
+        if action == 'zq-download-folder':
+            from .browser_download_delivery import download_folder
+            try:
+                if not self.session_id or url.hasQuery() or url.hasFragment() or url.host():
+                    raise ValueError('Invalid download link')
+                run_id, identity = url.path().split('/')
+                folder = download_folder(self.store, self.session_id, run_id, identity)
+                if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder))):
+                    raise OSError('Unable to open folder')
+            except (ValueError, OSError, sqlite3.Error, KeyError):
+                self.status.setText('下载入口不可用：文件可能已移动或变化，请核对原下载目录。')
+            return
+        if action in {'zq-branch', 'zq-parent'}:
+            self.handle_branch_link(url)
+            return
+        if action in {'zq-step-annotate', 'zq-step-comment'}:
+            try:
+                from .review_delivery import step_review_store
+                parts = url.path().split('/')
+                expected = 2 if action == 'zq-step-annotate' else 3
+                if len(parts) != expected:
+                    raise ValueError('无效步骤链接')
+                run_id, ordinal = parts[:2]
+                task_store = self.store.active if isinstance(self.store, ProjectCatalog) else self.store
+                scoped = step_review_store(task_store, self.session_id, run_id, int(ordinal))
+                if action == 'zq-step-annotate':
+                    self.offer_annotations(run_id, explicit=True, step_index=int(ordinal))
+                else:
+                    result = json.loads(scoped.run(run_id)['result'])
+                    paths = [p for batch in result.get('annotations', []) for p in batch['files']]
+                    index = int(parts[2])
+                    if not 0 <= index < len(paths):
+                        raise ValueError('无效批注文件编号')
+                    path = Path(paths[index])
+                    if not path.is_file() or not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+                        raise ValueError('批注副本已移动或无法打开')
+            except (ValueError, PermissionError, KeyError, OSError) as exc:
+                QMessageBox.warning(self, '步骤批注', str(exc))
+            return
+        if action in {'zq-step-export', 'zq-step-report'}:
+            try:
+                from .project_catalog import validate_business_directory
+                from .review_delivery import step_review_store
+                run_id, ordinal = url.path().split('/')
+                task_store = self.store.active if isinstance(self.store, ProjectCatalog) else self.store
+                scoped = step_review_store(task_store, self.session_id, run_id, int(ordinal))
+                if action == 'zq-step-export':
+                    default_path = task_store.path.parent / f'审核记录-{int(ordinal) + 1}.docx'
+                    selected, _ = QFileDialog.getSaveFileName(self, '保存步骤审核报告', str(default_path), 'Word 文档 (*.docx)')
+                    if not selected:
+                        return
+                    validate_business_directory(Path(selected).parent)
+                    export_review(scoped, run_id, Path(selected))
+                    self.render_messages()
+                    self.status.setText('本步骤标准审核报告已生成，原文件未修改。')
+                else:
+                    path = Path(json.loads(scoped.run(run_id)['result'])['exported_report'])
+                    if not path.is_file() or not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+                        raise ValueError('报告已移动或无法打开，请重新导出或检查默认应用。')
+            except (ValueError, PermissionError, KeyError, OSError) as exc:
+                QMessageBox.warning(self, '步骤审核报告', str(exc))
+            return
+        if action == 'zq-step-artifact':
+            try:
+                from .plan_results import step_artifact_path
+                run_id, step_index, index = url.path().split('/')
+                path = step_artifact_path(self.store, self.session_id, run_id, int(step_index), int(index))
+                if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+                    raise ValueError('无法打开文件，请检查默认应用')
+            except (ValueError, PermissionError, KeyError, OSError) as exc:
+                QMessageBox.warning(self, '步骤成果', str(exc))
+            return
+        if action == 'zq-comment':
+            try:
+                identity, index = url.path().split('/')
+                run = self.store.run(identity)
+                if run['session'] != self.session_id:
+                    return
+                result = json.loads(run['result'])
+                paths = [p for b in result.get('annotations', []) for p in b['files']]
+                path = Path(paths[int(index)])
+                if not path.is_file():
+                    raise ValueError('批注文件已移动或删除，请重新生成。')
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+            except (ValueError, OSError, IndexError, KeyError) as exc:
+                QMessageBox.warning(self, '批注副本', str(exc))
+            return
+        if action == 'zq-annotate':
+            self.offer_annotations(url.path(), explicit=True)
+            return
         if action == 'zq-artifact':
             try:
                 from .generation import artifact_path
@@ -538,13 +962,22 @@ class PlatformWindow(QMainWindow):
         except (ValueError, OSError, KeyError) as exc:
             QMessageBox.warning(self, '报告导出', str(exc))
 
-    def refresh_details(self):
+    def selected_file_ids(self):
+        return {
+            self.files.item(i).data(Qt.ItemDataRole.UserRole)
+            for i in range(self.files.count())
+            if self.files.item(i).checkState() == Qt.CheckState.Checked
+        }
+
+    def refresh_details(self, selected_ids=None):
+        blocker = QSignalBlocker(self.files)
+        if selected_ids is None:
+            selected_ids = self.selected_file_ids()
         self.files.clear()
         self.memories.clear()
         if not self.project_id:
             return
         files = self.store.files(self.project_id)
-        latest = {item["name"]: item["id"] for item in files}
         for item in files:
             row = QListWidgetItem(
                 f"{item['name']}\n{item['size']:,} bytes · {item['sha256'][:10]}"
@@ -553,7 +986,7 @@ class PlatformWindow(QMainWindow):
             row.setFlags(row.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             row.setCheckState(
                 Qt.CheckState.Checked
-                if latest[item["name"]] == item["id"]
+                if item["id"] in selected_ids
                 else Qt.CheckState.Unchecked
             )
             self.files.addItem(row)
@@ -561,6 +994,8 @@ class PlatformWindow(QMainWindow):
             row = QListWidgetItem(item["text"])
             row.setData(Qt.ItemDataRole.UserRole, item["id"])
             self.memories.addItem(row)
+        del blocker
+        self.save_current_draft()
 
     def add_files(self):
         if not self.project_id or not self.attach.isEnabled():
@@ -591,7 +1026,10 @@ class PlatformWindow(QMainWindow):
     def import_files(self, paths):
         if not self.project_id or not self.attach.isEnabled():
             return
-        known = {(f["name"], f["sha256"]) for f in self.store.files(self.project_id)}
+        existing = self.store.files(self.project_id)
+        known = {(f["name"], f["sha256"]): f['id'] for f in existing}
+        selected = set() if getattr(self, '_scope_submitted', False) else self.selected_file_ids()
+        imported = {}
         added = skipped = 0
         errors = []
         for raw in paths:
@@ -605,18 +1043,22 @@ class PlatformWindow(QMainWindow):
                     continue
                 hashed = digest(path)
                 if (path.name, hashed) not in known:
-                    self.store.add_file(self.project_id, path, hashed)
-                    known.add((path.name, hashed))
+                    identity = self.store.add_file(self.project_id, path, hashed)
+                    known[(path.name, hashed)] = identity
                     added += 1
                 else:
                     skipped += 1
+                imported[path.name] = known[(path.name, hashed)]
             except OSError:
                 errors.append(f"{Path(raw).name}：文件无法读取或复制")
-        if added:
-            self.refresh_details()
+        if imported:
+            selected -= {f['id'] for f in existing if f['name'] in imported}
+            selected.update(imported.values())
+            self._scope_submitted = False
+            self.refresh_details(selected_ids=selected)
             self.details.show()
             self.details.setCurrentIndex(0)
-        message = f"已添加 {added} 个文件，跳过 {skipped} 个重复文件。点击执行后才开始任务。"
+        message = f"已添加 {added} 个文件，复用 {skipped} 个重复文件。本轮选中 {len(self.selected_file_ids())} 个文件，历史资料不会自动加入。"
         if errors:
             message += "\n" + "；".join(errors)
         self.status.setText(message)
@@ -627,32 +1069,183 @@ class PlatformWindow(QMainWindow):
         prompt = self.composer.toPlainText().strip()
         if not prompt:
             return
-        if (
-            self.skill_combo.currentData() in {REVIEW.id, 'valuation-detail-workbook-fill'}
-            and (self.client is None or self.network_state != "connected")
-            and not self.connect_service()
-        ):
+        if (self.client is None or self.network_state != 'connected') and not self.connect_service():
             return
-        # Authentication may switch the owner and clear the previous session.
         if not self.session_id:
             self.status.setText("账号已切换，请选择当前账号的项目后重新输入任务。")
             return
-        self.store.append(self.session_id, "user", prompt)
+        model_id = self.model_combo.currentData()
+        if not model_id:
+            self.status.setText('请先连接模型服务；自动判断任务需要联网验证。')
+            return
+        from .agent_controller import AgentController
+        from .routing import UnderstandingWorker
+        from .skill_installation import SkillInstallation
+        manager = SkillInstallation(self.store)
+        self._routing_packages = {}
+        candidates = []
+        for version in manager.list_versions():
+            if not version['enabled'] or version['skill_id'] in {s.id for s in BUILTINS}:
+                continue
+            package = manager.load(version['skill_id'], version['version'])
+            if package.ready:
+                self._routing_packages[version['skill_id']] = package
+                candidates.append({'id': version['skill_id'], 'name': package.manifest['name'],
+                                   'adapter': package.manifest['adapter'], 'description': package.instructions[:1000]})
+        controller = AgentController(self.store)
+        try:
+            pending = controller.prepare(self.session_id, prompt, model_id=model_id,
+                                         selected_ids=list(self.selected_file_ids()), candidates=candidates,
+                                         browser_enabled=callable(getattr(self.client, 'propose_browser_step', None)))
+        except (ValueError, PermissionError):
+            self.status.setText('本轮要求或文件范围无效，请检查后重试。')
+            return
+        worker = UnderstandingWorker(self.client, pending, self)
+        worker.controller = controller
+        self.register_understanding_worker(worker)
         self.composer.clear()
-        files = self.store.files(self.project_id)
-        selected_ids = {
-            self.files.item(i).data(Qt.ItemDataRole.UserRole)
-            for i in range(self.files.count())
-            if self.files.item(i).checkState() == Qt.CheckState.Checked
-        }
-        files = [item for item in files if item["id"] in selected_ids]
+        self.render_messages()
+        self.set_busy(True)
+        self.status.setText('Agent 正在理解本轮要求并选择执行能力…')
+        worker.start()
+
+    def routing_finished(self, worker, destination):
+        if not self.release_worker(worker, destination):
+            return
+        plan, pending, error = worker.plan, worker.pending, worker.error
+        cancelled = worker.cancel.is_set()
+        worker.deleteLater()
+        if error or cancelled:
+            try:
+                worker.controller.cancel(pending)
+                worker.controller.store.append(pending.session_id, 'assistant', error or '任务理解已取消。')
+            except (ValueError, PermissionError):
+                pass
+            if destination.visible(self):
+                self.status.setText(error or '任务理解已取消。')
+                self.render_messages()
+            return
+        try:
+            understanding = worker.controller.complete(pending, plan)
+        except ClarificationContextLimit as exc:
+            worker.controller.store.append(pending.session_id, 'assistant', str(exc))
+            if destination.visible(self):
+                self.status.setText(str(exc))
+                self.render_messages()
+            return
+        except (ValueError, PermissionError):
+            if destination.visible(self):
+                self.status.setText('理解结果或文件范围已失效，请重新提交；未执行业务。')
+                self.render_messages()
+            return
+        if not destination.visible(self):
+            if understanding.next_action in {'plan', 'browser'}:
+                destination.store.append(pending.session_id, 'assistant',
+                    '任务理解已完成；当前已切换会话，未自动执行。请返回本会话确认后重新发起。')
+            return
+        self.render_messages()
+        if understanding.next_action == 'browser':
+            from .browser_window import start_browser_task
+            start_browser_task(self, pending, understanding)
+            return
+        if understanding.next_action != 'plan':
+            self.status.setText('等待补充信息' if understanding.next_action == 'ask' else '已回复')
+            return
+        if (self.store.owner != pending.owner or self.session_id != pending.session_id
+                or self.project_id != pending.project_id):
+            self.status.setText('理解结果已保存在原会话；当前会话已变化，未自动执行。')
+            return
+        if len(understanding.skill_ids) != 1 or understanding.references:
+            self.execute_compound(pending, understanding, worker.proposal)
+            return
+        files = [f for f in pending.files if f['id'] in understanding.targets]
+        skill_id = understanding.skill_ids[0]
+        package = worker.routing_packages.get(skill_id)
+        spec = self.registry.get(package.manifest['adapter'] if package else skill_id)
+        prompt = pending.request.prompt
+        if pending.request.context:
+            prompt = ('本轮用户对话：\n' + '\n'.join(
+                m.text for m in pending.request.context if m.role == 'user') + '\n' + prompt)
+        self.execute_plan(prompt, spec, package=package, selected_files=files, record_user=False)
+
+    def confirm_compound_plan(self, snapshot):
+        from .plan_confirmation import PlanConfirmationDialog
+        return PlanConfirmationDialog(snapshot, self.store.path.parent, self).exec() == QDialog.DialogCode.Accepted
+
+    def execute_compound(self, pending, understanding, proposal):
+        from .compound_task import build_compound_task_spec
+        from .conversation_state import ConversationState
+        from .permissions import PermissionService
+        task_store = self.store.active if isinstance(self.store, ProjectCatalog) else self.store
+        created_run = None
+        def current():
+            if (self.session_id != pending.session_id or self.project_id != pending.project_id
+                    or self.store.owner != pending.owner or self.model_combo.currentData() != pending.request.model_id):
+                return False
+            state = ConversationState(task_store).read(pending.session_id)
+            # AgentController.complete closes this understanding revision once.
+            return (state['task_id'] == pending.task_id and state['revision'] == pending.revision + 1
+                    and state['cancelled'])
+        try:
+            if self.worker or task_store is None or not current():
+                raise ValueError('模型或任务状态已变化，请重新提交')
+            snapshot = build_compound_task_spec(task_store, pending.session_id,
+                {'request': pending.request.model_dump(), 'understanding': understanding.model_dump()},
+                proposal, list(pending.files), revision=pending.revision).to_snapshot()
+            if not self.confirm_compound_plan(snapshot):
+                self.status.setText('已取消计划，未启动业务步骤。')
+                return
+            if not current():
+                raise ValueError('确认期间项目、会话或模型已变化，请重新提交')
+            created_run = task_store.start_run(pending.session_id, snapshot)
+            PermissionService(task_store).authorize(created_run, snapshot, confirmed=True)
+        except (ValueError, PermissionError, OSError, sqlite3.Error):
+            if created_run is not None:
+                task_store.transition(created_run, 'failed', 'authorization: confirmation persistence failed')
+            self.status.setText('计划或授权校验未通过，未启动业务步骤。')
+            return
+        self.run_id = created_run
+        self._scope_submitted = True
+        self.save_current_draft()
+        self.store.append(pending.session_id, 'event', '已确认组合计划：\n' + '\n'.join(
+            f"{index}. {step['goal']}" for index, step in enumerate(snapshot['execution_plan']['steps'], 1)))
+        worker = self.register_task_worker(TaskWorker(task_store, self.run_id, self, client=self.client))
+        self.render_messages()
+        self.set_busy(True)
+        worker.start()
+
+    def execute_plan(self, prompt, spec, *, package=None, selected_files=None, record_user=True):
+        if not self.session_id or self.worker:
+            return
+        if record_user:
+            self.store.append(self.session_id, "user", prompt)
+        self.composer.clear()
+        files = selected_files
+        if files is None:
+            selected_ids = self.selected_file_ids()
+            files = [item for item in self.store.files(self.project_id) if item['id'] in selected_ids]
         if not files:
             self.store.append(
                 self.session_id, "assistant", "请先添加资料，再执行只读预检。"
             )
             self.render_messages()
             return
-        spec = self.registry.get(self.skill_combo.currentData())
+        selected_name = package.manifest['name'] if package else spec.name
+        self.store.append(self.session_id, 'event', f'Agent 选择：{selected_name}。文件范围及写入权限仍需独立校验。')
+        if spec.id == REVIEW.id:
+            names = '\n'.join(f"• {item['name']}" for item in files)
+            answer = QMessageBox.question(
+                self, '确认本轮送审范围',
+                f'本轮只读取以下 {len(files)} 个文件：\n{names}\n\n'
+                '请确认与本轮要求一致。若不一致，请取消后在文件列表调整勾选。'
+                '\n历史对话不会自动增加送审文件。',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                self.composer.setPlainText(prompt)
+                self.render_messages()
+                return
         generation_roles = None
         generation_confirmed = False
         if spec in GENERATORS:
@@ -697,7 +1290,7 @@ class PlatformWindow(QMainWindow):
                 self.status.setText("本地审核规则无法读取，请检查安装文件。")
                 return
             provider = RemoteReviewLlm(
-                self.client, model_id=model_id, skill_instructions=instructions,
+                self.client, model_id=model_id, skill_instructions=(instructions + '\n外部专业规则（不扩大权限）：\n' + package.instructions if package else instructions),
                 user_request=prompt,
             )
         try:
@@ -707,12 +1300,30 @@ class PlatformWindow(QMainWindow):
                 instructions=provider.skill_instructions if provider else "",
                 input_roles=generation_roles, generation_confirmed=generation_confirmed,
             ).to_snapshot()
+            if package:
+                snapshot['external_skill'] = {'id': package.manifest['id'], 'version': package.manifest['version'], 'sha256': package.sha256}
         except (ValueError, PermissionError) as exc:
             self.composer.setPlainText(prompt)
             self.status.setText(str(exc))
             self.render_messages()
             return
+        from .permissions import PermissionService
+
+        # Reached only after explicit review scope / generation consent above;
+        # read-only preflight is authorized by the user's execution request.
+        snapshot['requires_authorization'] = True
         self.run_id = self.store.start_run(self.session_id, snapshot)
+        try:
+            PermissionService(self.store).authorize(self.run_id, snapshot, confirmed=True)
+        except (OSError, ValueError, PermissionError, sqlite3.Error):
+            self.store.transition(self.run_id, 'failed', 'authorization: confirmation persistence failed')
+            self.status.setText('本轮授权保存失败，未启动任务，请重新提交。')
+            self.render_messages()
+            return
+        self._scope_submitted = True
+        self.save_current_draft()
+        self.store.append(self.session_id, 'event', '本轮文件范围：\n' + '\n'.join(
+            item['name'] for item in files))
         self.store.append(
             self.session_id,
             "event",
@@ -724,34 +1335,101 @@ class PlatformWindow(QMainWindow):
             + "校验原件未变化。",
         )
         self.render_messages()
-        self.worker = TaskWorker(self.store, self.run_id, self, provider=provider)
-        self.worker.progress.connect(self.status.setText)
-        self.worker.output.connect(self.receive_output)
-        self.worker.completed.connect(self.completed)
-        self.worker.failed.connect(self.failed)
-        self.worker.finished.connect(self.finished)
+        worker = self.register_task_worker(TaskWorker(self.store, self.run_id, self, provider=provider))
         self.set_busy(True)
-        self.worker.start()
+        worker.start()
+
+    def register_task_worker(self, worker):
+        # Capture immutable identity before start; do not derive it from whichever
+        # project happens to be selected when cancellation/termination arrives.
+        destination = TaskDestination.resolve(worker.store, worker.run_id)
+        worker.binding = destination.binding
+        self.task_manager.register(worker.binding, worker)
+        relay = TaskEventRelay(self, worker, destination)
+        worker.event_relay = relay
+        worker.progress.connect(relay.progress)
+        worker.output.connect(relay.output)
+        worker.completed.connect(relay.completed)
+        worker.failed.connect(relay.failed)
+        worker.finished.connect(relay.finished)
+        return worker
+
+    def register_understanding_worker(self, worker):
+        pending, store = worker.pending, worker.controller.store
+        session = store.session(pending.session_id)
+        if store.owner != pending.owner or session['project'] != pending.project_id:
+            raise PermissionError('Understanding belongs to a different conversation')
+        destination = TaskDestination(store, TaskBinding(pending.owner, pending.project_id,
+            pending.session_id, f'understanding:{pending.task_id}:{pending.revision}'))
+        worker.routing_packages = dict(getattr(self, '_routing_packages', {}))
+        return self.register_completion_worker(worker, destination, 'understanding')
+
+    def register_annotation_worker(self, worker):
+        return self.register_completion_worker(worker,
+            TaskDestination.resolve(worker.store, worker.run_id), 'annotation')
+
+    def register_completion_worker(self, worker, destination, kind):
+        worker.binding = destination.binding
+        self.task_manager.register(worker.binding, worker)
+        relay = CompletionEventRelay(self, worker, destination, kind)
+        worker.event_relay = relay
+        worker.finished.connect(relay.finished)
+        return worker
+
+    def release_worker(self, worker, destination):
+        if not self.task_manager.finish(destination.binding, worker):
+            return False
+        self.set_busy(self.worker is not None)
+        return True
 
     def set_busy(self, busy):
+        # Explicit preparation guards remain valid before worker registration;
+        # clearing them must not unlock a conversation with an active worker.
+        busy = bool(busy) or self.worker is not None
+        self.sidebar.setEnabled(True)
         for widget in (
-            self.sidebar,
             self.attach,
             self.send,
             self.composer,
-            self.skill_combo,
             self.model_combo,
         ):
             widget.setEnabled(not busy)
         self.stop.setEnabled(busy)
 
-    def completed(self, result):
-        state = self.store.run(self.run_id)["state"]
+    def completed(self, result, *, destination=None):
+        target = destination or TaskDestination.resolve(self.store, self.run_id)
+        store, run_id, session_id = target.store, target.binding.task_id, target.binding.session_id
+        state = store.run(run_id)["state"]
+        if result.get('kind') == 'browser':
+            summary = self.show_browser_result(result, target)
+            if target.visible(self):
+                self.status.setText(summary)
+                self.render_messages()
+            return
+        if result.get('kind') == 'plan':
+            from .plan_results import completed_step_results
+            try:
+                records = completed_step_results(store, session_id, run_id)
+                store.append(session_id, 'assistant', f'组合任务完成，共 {len(records)} 个步骤；原文件未变化。')
+                for record in records:
+                    self.append_output('步骤：' + record['goal'], destination=target)
+                    if record['result'].get('kind') == 'generation':
+                        self.append_output(record['result'].get('feedback', '生成完成。'), destination=target)
+                    else:
+                        self.show_result(record['result'], destination=target)
+                message = '组合任务完成，成果已列在对话中。'
+            except (ValueError, PermissionError, KeyError, OSError):
+                message = '组合成果校验失败，请核对任务状态。'
+            if target.visible(self):
+                self.status.setText(message)
+                self.render_messages()
+            return
         if result.get('kind') == 'generation':
             summary = ('任务已取消，未发布正式成果。' if state == 'cancelled' else result['feedback'])
-            self.store.append(self.store.run(self.run_id)['session'], 'assistant', summary)
-            self.status.setText('生成校验通过' if result.get('ok') else '生成未完成，详见对话反馈')
-            self.render_messages()
+            store.append(session_id, 'assistant', summary)
+            if target.visible(self):
+                self.status.setText('生成校验通过' if result.get('ok') else '生成未完成，详见对话反馈')
+                self.render_messages()
             return
         summary = (
             "任务已停止，已经产生的模型用量仍按服务端记录结算。"
@@ -760,12 +1438,113 @@ class PlatformWindow(QMainWindow):
             if result.get("kind") == "review"
             else "资料预检完成，原文件未变化；尚未执行模型审核。"
         )
-        self.store.append(self.store.run(self.run_id)["session"], "assistant", summary)
-        self.status.setText(summary)
-        self.show_result(result)
-        self.render_messages()
+        store.append(session_id, "assistant", summary)
+        if state == 'succeeded' and result.get('kind') == 'review' and not result.get('issues'):
+            store.append(session_id, 'assistant', '本轮没有审核问题，无需生成批注副本。')
+        self.show_result(result, destination=target)
+        if target.visible(self):
+            self.status.setText(summary)
+            self.render_messages()
 
-    def show_result(self, result, run_id=None):
+    def offer_annotations(self, run_id, *, explicit=False, step_index=None):
+        from .annotation_followup import ensure_questions
+        from .annotations import AnnotationWorker, annotation_offer, default_selected
+        if self.worker:
+            return
+        task_store = self.store.active if isinstance(self.store, ProjectCatalog) else self.store
+        message_store = task_store
+        run = task_store.run(run_id)
+        if run['session'] != self.session_id:
+            return
+        result = json.loads(run['result'] or '{}')
+        if step_index is None and result.get('kind') == 'plan':
+            from .plan_results import completed_step_results
+            try:
+                records = completed_step_results(task_store, self.session_id, run_id)
+                for ordinal, record in enumerate(records):
+                    if record['result'].get('kind') == 'review':
+                        self.offer_annotations(run_id, explicit=explicit, step_index=ordinal)
+                    if self.worker or self.session_id != run['session']:
+                        break
+            except (ValueError, PermissionError, KeyError, OSError):
+                self.status.setText('步骤审核记录校验失败，未启动批注。')
+            return
+        if step_index is not None:
+            from .review_delivery import step_review_store
+            task_store = step_review_store(task_store, self.session_id, run_id, step_index)
+            run = task_store.run(run_id)
+            result = json.loads(run['result'])
+        if run['session'] != self.session_id or not annotation_offer(run['state'], result):
+            return
+        label = f'第 {step_index + 1} 个步骤：' if step_index is not None else ''
+        if explicit and not result.get('annotation_prompted'):
+            result['annotation_prompted'] = True
+            task_store.save_result(run_id, result)
+        if not explicit:
+            if not ensure_questions(message_store, run_id, step_indices=[step_index]):
+                return
+            self.render_messages()
+            if QMessageBox.question(self, '审核完成', label + '是否生成带问题标记和批注的文件副本？原始文件不会修改。',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+                return
+        dialog = QDialog(self)
+        dialog.setWindowTitle('确认本轮批注问题及文件')
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel('仅生成副本。支持 DOCX 唯一完整正文段落及 Excel 可见单元格。\nPDF、复杂锚点、无法保真追加旧批注的位置会跳过。未知性质的意见默认不勾选，请逐条确认。'))
+        listing = QListWidget()
+        for number, issue in enumerate(result['issues'], 1):
+            row = QListWidgetItem(f"{number}. {issue.get('source_file_name', '')}：{issue['description']}")
+            row.setData(Qt.ItemDataRole.UserRole, number)
+            row.setFlags(row.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            row.setCheckState(Qt.CheckState.Checked if default_selected(issue) else Qt.CheckState.Unchecked)
+            listing.addItem(row)
+        layout.addWidget(listing)
+        self.button('确认问题并选择保存目录', dialog.accept, layout)
+        self.button('取消', dialog.reject, layout)
+        dialog.resize(850, 500)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        selected = [listing.item(i).data(Qt.ItemDataRole.UserRole) for i in range(listing.count())
+                    if listing.item(i).checkState() == Qt.CheckState.Checked]
+        if not selected:
+            return
+        directory = QFileDialog.getExistingDirectory(self, '选择批注副本保存目录')
+        if not directory:
+            return
+        if self.session_id != run['session']:
+            return
+        worker = self.register_annotation_worker(
+            AnnotationWorker(task_store, run_id, selected, directory, self))
+        self.set_busy(True)
+        self.status.setText('正在生成批注副本；可在文件边界停止。')
+        worker.start()
+
+    def annotation_finished(self, worker, destination):
+        if not self.release_worker(worker, destination):
+            return
+        if worker.result:
+            records, artifacts = worker.result
+            destination.store.append(destination.binding.session_id, 'assistant', f'已生成 {len(artifacts)} 个批注副本。\n' + '\n'.join(
+                f"问题 {r['issue']}：{r['reason']}" for r in records))
+        message = worker.error or ('批注已停止，已完成的副本保留。' if worker.cancel.is_set()
+                                   else '批注处理完成，详见成功及跳过清单。')
+        if worker.error or worker.cancel.is_set():
+            destination.store.append(destination.binding.session_id, 'assistant', message)
+        if destination.visible(self):
+            self.render_messages()
+            self.status.setText(message)
+        worker.deleteLater()
+        if destination.visible(self) and not worker.cancel.is_set() and not worker.error:
+            self.offer_annotations(worker.run_id)
+
+    def show_result(self, result, run_id=None, *, destination=None):
+        if result.get('kind') == 'cancelled':
+            return
+        if result.get('kind') == 'browser':
+            target = destination or TaskDestination.resolve(self.store, run_id or self.run_id)
+            self.show_browser_result(result, target)
+            return
         lines = (
             ["审核结果", ""]
             if result.get("kind") == "review"
@@ -782,16 +1561,41 @@ class PlatformWindow(QMainWindow):
             )
         if result.get("kind") == "cancelled":
             lines.append("预检已停止。")
-        self.append_output("\n".join(lines), run_id)
-        self.receive_output(result.get("issues", []), run_id)
+        self.append_output("\n".join(lines), run_id, destination=destination)
+        self.receive_output(result.get("issues", []), run_id, destination=destination)
 
-    def append_output(self, text, run_id=None):
-        identity = run_id or self.run_id
+    def show_browser_result(self, result, target):
+        state = target.store.run(target.binding.task_id)['state']
+        summary = ('浏览器任务已完成，并通过结果验证。'
+                   if state == 'succeeded' and result.get('verified') is True
+                   else '浏览器任务已取消；已发生的网站操作不会自动撤销。'
+                   if state == 'cancelled'
+                   else '浏览器任务需要补充信息，请在对话中回复。'
+                   if result.get('status') == 'needs_input'
+                   else '浏览器任务尚未通过完成验证，请核对网站状态，不要重复提交。')
+        if (state == 'succeeded' and result.get('verified') is True
+                and result.get('verification', {}).get('method') == 'user_confirmed_readonly'):
+            summary = '只读查询结果已由你核对确认；此记录不表示网站写入经过自动验证。'
+        if (state == 'succeeded' and result.get('verified') is True
+                and result.get('verification', {}).get('method') == 'user_confirmed_download'):
+            summary = '下载文件已通过本地完整性校验，并由你确认满足本轮目标；此记录不表示网站写入成功。'
+        if isinstance(result.get('summary'), str) and result['summary']:
+            summary += '\n\n' + result['summary']
+        if isinstance(result.get('evidence'), str) and result['evidence']:
+            summary += '\n\n网页依据（未经独立信任）：\n' + result['evidence']
+        self.append_output(summary, destination=target)
+        return summary
+
+    def append_output(self, text, run_id=None, *, destination=None):
+        target = destination or TaskDestination.resolve(self.store, run_id or self.run_id)
+        identity = target.binding.task_id
         text = f"任务 {identity}\n\n{text}"
-        if self.session_id and text not in {m["text"] for m in self.store.messages(self.session_id)}:
-            self.store.append(self.session_id, "assistant", text)
+        session_id = target.binding.session_id
+        if text not in {m["text"] for m in target.store.messages(session_id)}:
+            target.store.append(session_id, "assistant", text)
 
-    def receive_output(self, issues, run_id=None):
+    def receive_output(self, issues, run_id=None, *, destination=None):
+        target = destination or TaskDestination.resolve(self.store, run_id or self.run_id)
         for item in issues:
             location = "；".join(f"{key}：{value}" for key, value in item.get("location", {}).items() if value is not None)
             self.append_output("\n".join([
@@ -800,25 +1604,33 @@ class PlatformWindow(QMainWindow):
                 "位置：" + (location or "未提供"),
                 "依据：" + "；".join(item.get("evidence_summaries", [])),
                 "建议：" + item.get("recommendation", ""),
-            ]), run_id)
-        self.render_messages()
+            ]), destination=target)
+        if target.visible(self):
+            self.render_messages()
 
-    def failed(self, message):
+    def failed(self, message, *, destination=None):
         from .diagnostics import failure_message
 
-        self.store.append(
-            self.store.run(self.run_id)["session"],
+        target = destination or TaskDestination.resolve(self.store, self.run_id)
+        target.store.append(
+            target.binding.session_id,
             "assistant",
-            failure_message(self.store, self.run_id),
+            failure_message(target.store, target.binding.task_id),
         )
-        self.status.setText("任务状态及处理建议已记录在对话中。")
-        self.render_messages()
+        if target.visible(self):
+            self.status.setText("任务状态及处理建议已记录在对话中。")
+            self.render_messages()
 
-    def finished(self):
-        self.worker.deleteLater()
-        self.worker = None
-        self.set_busy(False)
+    def finished(self, worker, destination):
+        if not self.release_worker(worker, destination):
+            return
+        worker.deleteLater()
         self.refresh_balance()
+        if destination.visible(self) and self.worker is None:
+            self.offer_annotations(destination.binding.task_id)
+        else:
+            from .annotation_followup import ensure_questions
+            ensure_questions(destination.store, destination.binding.task_id)
 
     def balance_updated(self, amount):
         self.account_label.setText(f"余额：{amount} 元")
@@ -838,8 +1650,78 @@ class PlatformWindow(QMainWindow):
     def force_network_exit(self):
         self.connection_changed("offline")
 
+    def ensure_storage_layout(self):
+        """Lazy setup: login/startup never forces directory selection."""
+        import sqlite3
+        if self.storage_preferences is None:
+            self.status.setText('当前启动模式未配置平台数据目录管理。')
+            return None
+        try:
+            layout = self.storage_preferences.load(self.store.owner)
+            if layout is None:
+                directory = QFileDialog.getExistingDirectory(
+                    self, '选择非系统盘平台数据目录（缓存、浏览器及更新包；项目资料仍在项目目录）')
+                if not directory:
+                    return None
+                layout = self.storage_preferences.select(self.store.owner, Path(directory))
+            return layout
+        except (ValueError, OSError, sqlite3.Error):
+            self.status.setText('平台数据目录不可用或位置不合规，请恢复原目录；不会回落系统盘或创建替代目录。')
+            return None
+
+    def toggle_browser(self):
+        if self.browser_panel is not None:
+            if self.details.isVisible() and self.details.currentWidget() is self.browser_panel:
+                self.details.hide()
+            else:
+                self.details.show()
+                self.details.setCurrentWidget(self.browser_panel)
+            return
+        if self.ensure_storage_layout() is None:
+            return
+        from .browser_panel import BrowserPanel
+        from .browser_profile import BrowserSession
+        session = BrowserSession(self.storage_preferences, self.store.owner)
+        try:
+            session.__enter__()
+            panel = BrowserPanel(session, self.details, task_manager=self.task_manager)
+        except (ValueError, OSError, RuntimeError):
+            session.close()
+            self.status.setText('浏览器无法启动，请检查平台数据目录或是否已在其他进程打开。')
+            return
+        self.browser_panel = panel
+        self.details.setMinimumWidth(420)
+        self.details.addTab(panel, '浏览器')
+        self.details.show()
+        self.details.setCurrentWidget(panel)
+
+    def close_browser(self):
+        if self.browser_panel is not None:
+            panel = self.browser_panel
+            self.browser_panel = None
+            self.details.removeTab(self.details.indexOf(panel))
+            self.details.setMinimumWidth(250)
+            panel.shutdown()
+            panel.deleteLater()
+
+    def configure_storage(self):
+        if not self.flush_unsaved_drafts():
+            return
+        if self.task_manager.active():
+            self.status.setText('请等待当前任务结束后管理平台数据目录。')
+            return
+        layout = self.ensure_storage_layout()
+        if layout is not None:
+            from .storage_dialog import StorageDialog
+            StorageDialog(self.storage_preferences, self.store.owner, self).exec()
+            self.status.setText('平台数据目录设置已关闭；原有项目资料位置不变。')
+
     def connect_service(self):
-        if self.worker:
+        if not self.flush_unsaved_drafts():
+            return False
+        from ..report_review_app.services.resource_locks import CLIENT_RESOURCES
+        if self.task_manager.active() or CLIENT_RESOURCES.busy():
+            self.status.setText('任务或已提交的请求尚未结束，请稍后切换登录账号。')
             return False
         result = authenticate(self)
         if result is None:
@@ -848,6 +1730,7 @@ class PlatformWindow(QMainWindow):
         if client is None:
             return False
         if payload["owner"] != self.store.owner:
+            self.close_browser()
             self.store = (ProjectCatalog(self.store.index_path, payload["owner"])
                           if isinstance(self.store, ProjectCatalog)
                           else PlatformStore(self.store.path, payload["owner"]))
@@ -874,8 +1757,12 @@ class PlatformWindow(QMainWindow):
 
     def cancel_run(self):
         if self.worker:
-            self.worker.cancel.set()
-            self.status.setText("已请求停止，等待当前文件解析结束。")
+            if getattr(self.worker, 'binding', None) is not None:
+                self.task_manager.cancel(self.worker.binding)
+            else:
+                # Compatibility for independently supplied preview workers.
+                self.worker.cancel.set()
+            self.status.setText("正在停止；已提交的模型调用可能仍需结束并结算，本地不再继续生成。")
             self.stop.setEnabled(False)
 
     def check_versions(self):
@@ -892,15 +1779,18 @@ class PlatformWindow(QMainWindow):
 
     def versions_checked(self, info):
         supported = "支持用户要求" if info["user_request_supported"] else "不兼容：缺少用户要求字段"
+        build = info.get('server_build', '未提供')
+        build_label = '服务端构建号未提供' if build == '未提供' else f'服务端构建号 {build}'
         self.version_label.setText(
             f"客户端 {CLIENT_VERSION} · Skill {REVIEW.version}\n"
             f"服务端 API {info['server_api_version']} · {supported}\n"
-            "服务端构建号未提供（API 版本不等于部署版本）"
+            f"{build_label} · "
+            f"协议 {info.get('protocol_version') or '未声明'}（API 版本不等于部署版本）"
         )
-        self.version_label.setToolTip(f"本地审核规则 SHA256：{local_release()['review_rules_sha256']}")
+        self.version_label.setToolTip(release_details(local_release(store=self.store)))
 
     def version_check_failed(self, _detail):
-        self.version_label.setText(f"客户端 {CLIENT_VERSION} · 服务端版本检查失败，请检查网络后重试。")
+        self.version_label.setText(f"客户端 {CLIENT_VERSION} · 无法确认服务端兼容性，请核对网络及服务端协议版本。")
 
     def version_check_finished(self):
         self.version_worker.wait()
@@ -927,7 +1817,7 @@ class PlatformWindow(QMainWindow):
             self.refresh_details()
 
     def archive(self):
-        if self.worker or not self.project_id:
+        if self.task_manager.active() or not self.project_id:
             return
         if (
             QMessageBox.question(
@@ -939,7 +1829,7 @@ class PlatformWindow(QMainWindow):
             self.reload_projects()
 
     def restore_project(self):
-        if self.worker:
+        if self.task_manager.active():
             return
         projects = self.store.archived_projects()
         if not projects:
@@ -958,7 +1848,7 @@ class PlatformWindow(QMainWindow):
         if isinstance(self.store, ProjectCatalog) and self.store.active is None:
             self.status.setText("请先打开非系统盘项目；Skill 包也保存在该项目目录，不写入系统盘。")
             return
-        if self.worker is not None:
+        if self.task_manager.active():
             self.status.setText("请等待当前任务结束后管理 Skill。")
             return
         from .skill_manager import SkillManagerDialog
@@ -969,7 +1859,7 @@ class PlatformWindow(QMainWindow):
         if isinstance(self.store, ProjectCatalog) and self.store.active is None:
             self.status.setText("请先打开包含旧数据的项目目录。")
             return
-        if self.worker:
+        if self.task_manager.active():
             return
         if self.client is None:
             self.status.setText("请先登录账号，再认领此数据目录中的旧共享项目。")
@@ -999,12 +1889,21 @@ class PlatformWindow(QMainWindow):
         self.status.setText("旧项目已认领，历史记录及附件保留。已归档项目可从恢复入口打开。")
 
     def closeEvent(self, event):
+        from ..report_review_app.services.resource_locks import CLIENT_RESOURCES
+        if not self.flush_unsaved_drafts():
+            event.ignore()
+            return
         if self.version_worker is not None:
             self.status.setText("版本检查尚未结束，请稍后关闭。")
             event.ignore()
             return
-        if self.worker and self.worker.isRunning():
-            self.cancel_run()
+        if self.task_manager.active():
+            self.task_manager.cancel_all()
+            self.status.setText('正在停止所有会话中的任务；等待线程结束后才能关闭。')
+            event.ignore()
+            return
+        if CLIENT_RESOURCES.busy():
+            self.status.setText('已停止任务等待，但后台请求或文件操作尚未结束，请稍后关闭。')
             event.ignore()
             return
         if self.monitor is not None:
@@ -1013,6 +1912,8 @@ class PlatformWindow(QMainWindow):
                 self.status.setText("正在结束网络检查，请稍后关闭。")
                 event.ignore()
                 return
+        self.session_badge_timer.stop()
+        self.close_browser()
         event.accept()
 
 
@@ -1032,15 +1933,18 @@ def main():
         app.setQuitOnLastWindowClosed(True)
         return 0
     client, payload = result
+    from .storage_preferences import StoragePreferences
+    settings = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)) / "ZQPlatform"
+    program_root = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).resolve().parents[3]
+    storage_preferences = StoragePreferences(settings / 'storage-locations.sqlite', program_root)
     if args.data_dir is None:
-        settings = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)) / "ZQPlatform"
         store = ProjectCatalog(settings / "project-locations.sqlite", payload["owner"])
     else:
         # Explicit legacy/test entry point; normal startup never creates business data here.
         store = PlatformStore(args.data_dir / "platform.sqlite", payload["owner"])
     window = PlatformWindow(
         store,
-        client=client, models=payload["models"],
+        client=client, models=payload["models"], storage_preferences=storage_preferences,
     )
     if client is not None:
         window.balance_updated(payload["balance"]["balance"])

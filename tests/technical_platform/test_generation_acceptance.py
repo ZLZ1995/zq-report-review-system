@@ -118,8 +118,12 @@ def test_history_task_runs_subprocess_and_exposes_conversation_artifact(tmp_path
     spec = build_task_spec(store, session, '生成工商历史沿革', HISTORY, files,
                            input_roles={'source_excel': files[0]['id']}, generation_confirmed=True)
     run = store.start_run(session, spec.to_snapshot())
+    from asset_based_agent.technical_platform.permissions import PermissionService
+    PermissionService(store).authorize(run, spec.to_snapshot(), confirmed=True)
     result = execute_task(store, run, Event(), lambda _: None)
     assert result['ok'] is True
     assert store.run(run)['state'] == 'succeeded'
     assert result['model_called'] is False
+    with store.connect() as db:
+        assert db.execute('SELECT COUNT(*) FROM execution_results WHERE run=?', (run,)).fetchone()[0] == 1
     assert artifact_path(store, session, run, 0).name == 'history_fragment.docx'

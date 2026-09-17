@@ -19,6 +19,25 @@ class PlatformStore:
     def __init__(self, path: Path, owner: str, *, create: bool = True) -> None:
         if not owner.strip():
             raise ValueError("owner is required")
+        from .local_migrations import (
+            SCHEMA_VERSION,
+            apply_v1,
+            apply_v2,
+            apply_v3,
+            apply_v4,
+            apply_v5,
+            apply_v6,
+            apply_v7,
+            apply_v8,
+            apply_v9,
+            apply_v10,
+            migrate_database,
+        )
+
+        existing = path.is_file()
+        if existing:
+            # Reject future schemas and back up legacy state before any CREATE.
+            migrate_database(path)
         self.existing_only = not create
         if create:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -59,6 +78,21 @@ class PlatformStore:
                   previous_owner TEXT NOT NULL, new_owner TEXT NOT NULL,
                   created TEXT NOT NULL);
             """)
+            if not existing:
+                apply_v1(db)
+                apply_v2(db)
+                apply_v3(db)
+                apply_v4(db)
+                apply_v5(db)
+                apply_v6(db)
+                apply_v7(db)
+                apply_v8(db)
+                apply_v9(db)
+                apply_v10(db)
+                db.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
+        # Creation is allowed only during explicit initialization. Later requests
+        # must fail closed if a disk disappears or the database is moved.
+        self.existing_only = True
 
     @contextmanager
     def connect(self):
@@ -160,15 +194,8 @@ class PlatformStore:
         return identity
 
     def sessions(self, project_id: str) -> list[dict]:
-        self.project(project_id)
-        with self.connect() as db:
-            return [
-                dict(r)
-                for r in db.execute(
-                    "SELECT * FROM sessions WHERE project=? ORDER BY created",
-                    (project_id,),
-                )
-            ]
+        from .session_service import SessionService
+        return SessionService(self).list(project_id)
 
     def append(self, session_id: str, role: str, text: str) -> None:
         self.session(session_id)
@@ -248,7 +275,7 @@ class PlatformStore:
         session = self.session(session_id)
         identity = uuid4().hex
         if "schema_version" in snapshot:
-            if snapshot["schema_version"] != 1:
+            if type(snapshot["schema_version"]) is not int or snapshot["schema_version"] not in (1, 2):
                 raise ValueError("不支持的任务版本")
             if (snapshot.get("owner") != self.owner
                     or snapshot.get("session_id") != session_id
@@ -256,6 +283,10 @@ class PlatformStore:
                 raise PermissionError("任务归属与当前会话不一致")
             identity = snapshot["task_id"]
         with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            metadata = db.execute('SELECT archived FROM session_metadata WHERE session=?', (session_id,)).fetchone()
+            if metadata is not None and metadata['archived']:
+                raise ValueError('会话已归档，请先恢复后再执行任务')
             db.execute(
                 "INSERT INTO runs VALUES(?,?,?, ?,NULL,?)",
                 (

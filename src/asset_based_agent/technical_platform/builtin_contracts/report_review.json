@@ -1,0 +1,12 @@
+{
+  "schema_version": 1, "id": "report.review", "version": "0.2.0",
+  "purpose": "对本轮指定的评估报告、说明和明细表开展只读专业审核",
+  "source_extensions": [".docx", ".xlsx", ".xlsm", ".pdf"],
+  "required_roles": ["review_targets"], "optional_roles": ["reference_documents"],
+  "outputs": ["review_issues"],
+  "acceptance_gates": ["visible_content_only", "original_hash_unchanged"],
+  "followups": ["export_word_review_report", "authorize_annotation_copy"],
+  "environment": ["模型调用需登录联网验证"],
+  "limitations": ["PDF只作参考", "隐藏表格不参与审核或上传", "批注另需用户同意，仅写副本"],
+  "requires_model": true, "creates_copy": false, "locked_template": false, "modify_originals": false
+}

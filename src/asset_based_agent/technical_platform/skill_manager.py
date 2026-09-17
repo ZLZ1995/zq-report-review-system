@@ -29,7 +29,7 @@ class SkillManagerDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(16)
-        notice = QLabel("安装本地 Skill ZIP 包 · 默认停用 · 不执行包内脚本\n当前安装管理已开放，外部 Skill 尚未接入任务执行。")
+        notice = QLabel("安装本地 Skill ZIP 包 · 默认停用 · 不执行包内脚本\n启用后由 Agent 根据对话选择；仅使用受支持的只读适配器，不授予原件修改权限。")
         notice.setWordWrap(True)
         layout.addWidget(notice)
         self.versions = QListWidget()
@@ -67,7 +67,7 @@ class SkillManagerDialog(QDialog):
     def reload(self):
         self.versions.clear()
         for row in self.manager.list_versions():
-            state = "已启用（尚未接入任务执行）" if row["enabled"] else "已安装·停用"
+            state = "已启用·可由Agent选择" if row["enabled"] else "已安装·停用"
             item = QListWidgetItem(f"{row['name']}  {row['version']} — {state}")
             item.setData(Qt.ItemDataRole.UserRole, row)
             self.versions.addItem(item)
@@ -97,7 +97,7 @@ class SkillManagerDialog(QDialog):
                 f"依赖：{info['dependencies'] or '无'}\n"
                 f"缺失或不兼容依赖：{', '.join(package.missing_dependencies) or '无'}\n"
                 f"SHA256：{package.sha256}\n仅代表完整性校验，不代表发布者可信。\n"
-                "尚未接入任务执行；安装及启用不授予修改原件或执行脚本权限。")
+                "启用后由Agent通过受支持的适配器使用规则；安装及启用不授予修改原件或执行脚本权限。")
 
     def install_package(self):
         path, _ = QFileDialog.getOpenFileName(self, "选择外部 Skill 包", "", "Skill 包 (*.zip)")
@@ -133,6 +133,6 @@ class SkillManagerDialog(QDialog):
             else:
                 self.manager.disable(row["skill_id"], confirmed=True)
             self.reload()
-            self.status.setText("操作已保存；尚未接入任务执行，不会自动调用模型。")
+            self.status.setText("操作已保存；规则可用于后续任务，当前不会自动调用模型。")
         except (ValueError, PermissionError, OSError) as exc:
             self.status.setText(str(exc))

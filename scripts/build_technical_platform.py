@@ -56,6 +56,8 @@ def main():
             str(ROOT / "assets/report_review/zq_app_icon.ico"),
             "--add-data",
             f"{ROOT / 'src/asset_based_agent/technical_platform/review_rules.txt'}{os.pathsep}asset_based_agent/technical_platform",
+            "--add-data",
+            f"{ROOT / 'src/asset_based_agent/technical_platform/builtin_contracts'}{os.pathsep}asset_based_agent/technical_platform/builtin_contracts",
             "--hidden-import",
             "win32cred",
             "--hidden-import",

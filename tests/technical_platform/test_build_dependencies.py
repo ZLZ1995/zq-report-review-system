@@ -16,3 +16,5 @@ def test_build_includes_office_modules_used_by_bundled_scripts(monkeypatch):
     imports = [args[i + 1] for i, arg in enumerate(args[:-1]) if arg == '--hidden-import']
     assert 'win32com.client' in imports
     assert 'pythoncom' in imports
+    resources = [args[i + 1] for i, arg in enumerate(args[:-1]) if arg == '--add-data']
+    assert any('builtin_contracts' in item for item in resources)

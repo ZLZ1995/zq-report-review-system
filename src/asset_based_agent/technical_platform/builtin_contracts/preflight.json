@@ -1,0 +1,11 @@
+{
+  "schema_version": 1, "id": "review.preflight", "version": "0.1.0",
+  "purpose": "只读检查本轮资料的可读取性，不等于专业审核",
+  "source_extensions": [".docx", ".xlsx", ".xlsm", ".pdf"],
+  "required_roles": ["selected_files"], "optional_roles": [],
+  "outputs": ["readability_summary"],
+  "acceptance_gates": ["visible_content_only", "original_hash_unchanged"],
+  "followups": [], "environment": [],
+  "limitations": ["不调用专业审核模型", "隐藏表格不参与处理"],
+  "requires_model": false, "creates_copy": false, "locked_template": false, "modify_originals": false
+}

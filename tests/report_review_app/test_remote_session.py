@@ -39,6 +39,84 @@ def _token_payload(access: str, refresh: str) -> dict[str, object]:
     }
 
 
+@pytest.mark.parametrize('invalid', [False, True])
+def test_understanding_client_preflights_and_revalidates_model_output(invalid):
+    calls = []
+    def handler(request):
+        calls.append(request.url.path)
+        if request.method == 'GET':
+            return httpx.Response(200, json={'schema_version': 1, 'protocol_version': 1,
+                                           'capabilities': {'task_understanding': 1}})
+        assert request.url.path == '/api/v1/agent/understand'
+        assert request.headers['authorization'] == 'Bearer synthetic'
+        return httpx.Response(200, json={
+            'schema_version': 1, 'message_intent': 'consult', 'goal': '',
+            'targets': ['invented'] if invalid else [], 'references': [], 'excluded': [],
+            'constraints': [], 'deliverables': [], 'missing_inputs': [],
+            'evidence_message_ids': ['msg'], 'skill_ids': [], 'next_action': 'answer',
+            'reply': '只读审核，不改原文件。',
+        })
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        client = RemoteSessionClient('https://review.example/api/v1', client_instance_id='test',
+                                     credential_store=MemoryCredentialStore(), http_client=http)
+        client.access_token = 'synthetic'
+        payload = {'request_id': 'r', 'model_id': 'm', 'message_id': 'msg', 'prompt': '解释审核'}
+        if invalid:
+            with pytest.raises(RemoteAuthenticationError, match='理解'):
+                client.understand_task(payload)
+        else:
+            assert client.understand_task(payload)['next_action'] == 'answer'
+    assert calls == ['/api/v1/capabilities', '/api/v1/agent/understand']
+
+
+@pytest.mark.parametrize('cancel_before', [True, False])
+def test_understanding_cancel_during_precheck_does_not_post(cancel_before):
+    import threading
+
+    from asset_based_agent.report_review_app.services.task_cancellation import (
+        TaskCancelled,
+    )
+    cancel = threading.Event()
+    calls = []
+    if cancel_before:
+        cancel.set()
+    def handler(request):
+        calls.append(request.method)
+        assert request.method == 'GET'
+        cancel.set()
+        return httpx.Response(200, json={'schema_version': 1, 'protocol_version': 1,
+                                       'capabilities': {'task_understanding': 1}})
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        client = RemoteSessionClient('https://review.example/api/v1', client_instance_id='test',
+                                     credential_store=MemoryCredentialStore(), http_client=http)
+        client.access_token = 'synthetic'
+        with pytest.raises(TaskCancelled):
+            client.understand_task({'request_id': 'r', 'model_id': 'm', 'message_id': 'msg',
+                                    'prompt': '解释审核'}, cancel=cancel)
+    assert calls == ([] if cancel_before else ['GET'])
+
+
+def test_missing_routing_endpoint_has_compatibility_error_without_retry():
+    from asset_based_agent.report_review_app.services.remote_auth_service import (
+        ServerCapabilityUnavailable,
+    )
+    calls = []
+    def handler(request):
+        calls.append(request)
+        if request.url.path.endswith('/capabilities'):
+            return httpx.Response(200, json={'schema_version': 1, 'protocol_version': 1,
+                                           'capabilities': {'skill_routing': 1}})
+        return httpx.Response(404, json={'detail': 'Not Found'})
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        client = RemoteSessionClient('https://review.example', client_instance_id='test',
+                                     credential_store=MemoryCredentialStore(), http_client=http)
+        client.access_token = 'synthetic-token'
+        with pytest.raises(ServerCapabilityUnavailable, match='接口'):
+            client.route_skill({'prompt': 'synthetic'})
+    assert len(calls) == 2
+    assert sum(request.method == 'POST' for request in calls) == 1
+
+
 def test_remote_login_persists_only_refresh_token() -> None:
     requests: list[httpx.Request] = []
 
@@ -163,6 +241,9 @@ def test_remote_client_exposes_model_balance_and_review_job_business_endpoints()
             )
         if request.url.path.endswith("/account/balance"):
             return httpx.Response(200, json={"balance": "12.34", "currency": "CNY"})
+        if request.url.path.endswith('/capabilities'):
+            return httpx.Response(200, json={'schema_version': 1, 'protocol_version': 1,
+                                           'capabilities': {'review_jobs': 1}})
         if request.url.path.endswith("/review-jobs"):
             return httpx.Response(201, json={"job_id": "JOB-1", "status": "queued"})
         if request.url.path.endswith("/execute"):
@@ -197,6 +278,7 @@ def test_remote_client_exposes_model_balance_and_review_job_business_endpoints()
         "/api/v1/auth/login",
         "/api/v1/models",
         "/api/v1/account/balance",
+        "/api/v1/capabilities",
         "/api/v1/review-jobs",
         "/api/v1/review-jobs/JOB-1/execute",
     ]
@@ -204,6 +286,9 @@ def test_remote_client_exposes_model_balance_and_review_job_business_endpoints()
 
 def test_remote_client_preserves_insufficient_balance_business_error() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith('/capabilities'):
+            return httpx.Response(200, json={'schema_version': 1, 'protocol_version': 1,
+                                           'capabilities': {'review_jobs': 1}})
         if request.url.path.endswith("/auth/login"):
             return httpx.Response(200, json=_token_payload("ACCESS", "REFRESH"))
         return httpx.Response(

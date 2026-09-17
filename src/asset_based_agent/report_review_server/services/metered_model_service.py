@@ -42,6 +42,12 @@ class MeteredExecutionError(ServiceError):
         super().__init__(code, "所有模型渠道均调用失败。", 502)
 
 
+class BillingReconciliationRequired(ServiceError):
+    def __init__(self) -> None:
+        super().__init__("billing_reconciliation_required",
+                         "模型请求费用待核对，已暂停新的付费调用，请联系管理员；不要重复提交。", 409)
+
+
 @dataclass(frozen=True)
 class MeteredResult:
     payload: dict[str, object]
@@ -129,6 +135,19 @@ class MeteredModelService:
             try:
                 response = self.provider_client.call(route, payload)
             except ProviderCallError as exc:
+                if exc.usage is None and exc.code in {
+                    "provider_usage_invalid", "provider_usage_missing",
+                    "provider_network_error", "provider_invalid_json",
+                }:
+                    billing_request.status = "uncertain"
+                    billing_request.error_code = exc.code
+                    hold.status = "uncertain"
+                    hold.settled_amount = money(hold.settled_amount + total_charge)
+                    self._record_attempt(
+                        db, billing_request, route, attempt_number, "uncertain",
+                        NormalizedUsage(), model, user, exc.code,
+                    )
+                    raise BillingReconciliationRequired() from exc
                 usage = exc.usage or NormalizedUsage()
                 attempt_charge = _charge_for_usage(route, usage, model, user)
                 total_charge = money(total_charge + attempt_charge)
@@ -191,6 +210,7 @@ class MeteredModelService:
         commit: bool = True,
         hold_minutes: int = 30,
     ) -> BalanceHold:
+        self._require_reconciled(db, user_id)
         existing = db.scalar(
             select(BalanceHold).where(
                 BalanceHold.user_id == user_id,
@@ -215,10 +235,11 @@ class MeteredModelService:
                     for usage in estimated_usages
                     for route in routes
                 ),
-                Decimal("0"),
+                Decimal(0),
             )
         )
         wallet = self.wallet_service.get_wallet(db, user_id, lock=True)
+        self._require_reconciled(db, user_id)
         active_holds = db.scalar(
             select(func.coalesce(func.sum(BalanceHold.reserved_amount), 0)).where(
                 BalanceHold.user_id == user_id,
@@ -251,6 +272,8 @@ class MeteredModelService:
         )
         if hold is None:
             raise ServiceError("hold_not_found", "费用冻结记录不存在。", 404)
+        if hold.status == "uncertain":
+            raise BillingReconciliationRequired()
         if hold.status == "captured":
             return hold
         if hold.status != "active":
@@ -279,9 +302,17 @@ class MeteredModelService:
         )
         if hold is None or hold.user_id != user_id or hold.model_id != model_id:
             raise ServiceError("hold_not_found", "费用冻结记录不存在。", 404)
+        self._require_reconciled(db, user_id)
         if hold.status != "active" or is_expired(hold.expires_at):
             raise ServiceError("hold_not_active", "费用冻结记录已失效。", 409)
         return hold
+
+    def _require_reconciled(self, db: Session, user_id: str) -> None:
+        uncertain = db.scalar(select(BalanceHold.hold_id).where(
+            BalanceHold.user_id == user_id, BalanceHold.status == "uncertain",
+        ).limit(1))
+        if uncertain is not None:
+            raise BillingReconciliationRequired()
 
     def _load_billable_configuration(
         self,
@@ -418,6 +449,8 @@ class MeteredModelService:
             )
         if request.status == "pending":
             raise ServiceError("request_in_progress", "请求仍在处理中。", 409)
+        if request.status == "uncertain":
+            raise BillingReconciliationRequired()
         if request.status == "failed":
             raise MeteredExecutionError(request.error_code or "all_providers_failed")
         if (
@@ -451,7 +484,7 @@ def _base_cost(route: ProviderRoute, usage: NormalizedUsage) -> Decimal:
         + Decimal(usage.cache_miss_tokens) * route.cache_miss_rate
         + Decimal(usage.reasoning_tokens) * route.reasoning_rate
     )
-    return (weighted / Decimal("1000000")).quantize(MONEY_QUANTUM, rounding=ROUND_HALF_UP)
+    return (weighted / Decimal(1000000)).quantize(MONEY_QUANTUM, rounding=ROUND_HALF_UP)
 
 
 def _charge_for_usage(

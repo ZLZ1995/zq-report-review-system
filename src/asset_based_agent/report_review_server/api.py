@@ -16,6 +16,13 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session
 
+from ..agent_contracts import (
+    PlanningRequest,
+    PlanProposal,
+    TaskUnderstanding,
+    UnderstandingRequest,
+)
+from ..browser_contracts import BrowserStepProposal, BrowserStepRequest
 from .config import ServerSettings
 from .crypto import SecretCipher
 from .database import Base, build_engine, build_session_factory
@@ -39,10 +46,14 @@ from .schemas import (
     UserResponse,
 )
 from .services.auth_service import AuthContext, AuthService, ServiceError
+from .services.browser_step import propose_browser_step
 from .services.material_analysis import MaterialPlan, MaterialRequest, analyze_materials
 from .services.model_admin_service import ModelAdminService
 from .services.provider_gateway import HttpProviderClient
 from .services.review_job_service import ReviewJobService
+from .services.skill_routing import RoutePlan, RouteRequest, route_skill
+from .services.task_planning import propose_plan
+from .services.task_understanding import understand_task
 from .services.temporary_data_cleanup import cleanup_expired_temporary_data
 from .services.wallet_service import WalletService, display_money
 
@@ -125,6 +136,30 @@ def create_app(
     def health(db: Session = Depends(get_db)) -> dict[str, str]:
         db.execute(text("SELECT 1"))
         return {"status": "ok", "service": "report-review-server"}
+
+    @app.get('/api/v1/capabilities')
+    def capabilities():
+        # Advertise protocol support, not provider availability or authorization.
+        # No credentials, prices, database addresses or deployment environment.
+        routes = {(route.path, method) for route in app.routes
+                  for method in getattr(route, 'methods', ())}
+        supported = {
+            'skill_routing': ('/api/v1/skill-route', 'POST'),
+            'task_understanding': ('/api/v1/agent/understand', 'POST'),
+            'task_planning': ('/api/v1/agent/plan', 'POST'),
+            'browser_step': ('/api/v1/agent/browser-step', 'POST'),
+            'browser_view_actions': ('/api/v1/agent/browser-step', 'POST'),
+            'browser_saved_login': ('/api/v1/agent/browser-step', 'POST'),
+            'browser_download': ('/api/v1/agent/browser-step', 'POST'),
+            'browser_generated_download': ('/api/v1/agent/browser-step', 'POST'),
+            'browser_upload': ('/api/v1/agent/browser-step', 'POST'),
+            'material_analysis': ('/api/v1/material-analysis', 'POST'),
+            'review_jobs': ('/api/v1/review-jobs', 'POST'),
+            'review_cancel': ('/api/v1/review-jobs/{job_id}/cancel', 'POST'),
+        }
+        return {'schema_version': 1, 'protocol_version': 1,
+                'build_sha': actual_settings.build_sha,
+                'capabilities': {name: 1 for name, route in supported.items() if route in routes}}
 
     @app.post("/api/v1/auth/login", response_model=TokenResponse)
     def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)):
@@ -330,6 +365,28 @@ def create_app(
             enabled=route.enabled,
         )
 
+    @app.post('/api/v1/agent/understand', response_model=TaskUnderstanding)
+    def task_understanding(payload: UnderstandingRequest, request: Request,
+                           context: AuthContext = Depends(get_context), db: Session = Depends(get_db)):
+        return understand_task(request.app.state.review_job_service.metered, db,
+                               context.user.user_id, payload)
+
+    @app.post('/api/v1/agent/plan', response_model=PlanProposal)
+    def task_planning(payload: PlanningRequest, request: Request,
+                      context: AuthContext = Depends(get_context), db: Session = Depends(get_db)):
+        return propose_plan(request.app.state.review_job_service.metered, db,
+                            context.user.user_id, payload)
+
+    @app.post('/api/v1/agent/browser-step', response_model=BrowserStepProposal)
+    def browser_step(payload: BrowserStepRequest, request: Request,
+                     context: AuthContext = Depends(get_context), db: Session = Depends(get_db)):
+        return propose_browser_step(request.app.state.review_job_service.metered, db, context.user.user_id, payload)
+
+    @app.post('/api/v1/skill-route', response_model=RoutePlan)
+    def skill_route(payload: RouteRequest, request: Request,
+                    context: AuthContext = Depends(get_context), db: Session = Depends(get_db)):
+        return route_skill(request.app.state.review_job_service.metered, db, context.user.user_id, payload)
+
     @app.post('/api/v1/material-analysis', response_model=MaterialPlan)
     def material_analysis(payload: MaterialRequest, request: Request,
                           context: AuthContext = Depends(get_context), db: Session = Depends(get_db)):
@@ -353,6 +410,11 @@ def create_app(
             payload=payload,
         )
         return request.app.state.review_job_service.to_response(job)
+
+    @app.post('/api/v1/review-jobs/{job_id}/cancel', response_model=ReviewJobResponse)
+    def cancel_review_job(job_id: str, request: Request,
+                          context: AuthContext = Depends(get_context), db: Session = Depends(get_db)):
+        return request.app.state.review_job_service.cancel_job(db, user_id=context.user.user_id, job_id=job_id)
 
     @app.post(
         "/api/v1/review-jobs/{job_id}/execute",
@@ -389,6 +451,8 @@ def create_app(
     from .admin_web import install_admin_web
 
     install_admin_web(app, get_context, get_db)
+    from .billing_admin_api import register_billing_admin_routes
+    register_billing_admin_routes(app, get_context, get_db)
     return app
 
 

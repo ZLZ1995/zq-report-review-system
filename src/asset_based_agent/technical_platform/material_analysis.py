@@ -39,11 +39,15 @@ class MaterialAnalysisProvider:
         )
         from ..report_review_app.services.file_role_service import classify_file_role
         from ..report_review_app.services.privacy_filter import PrivacyChunkSelector
+        from ..report_review_app.services.task_cancellation import (
+            TaskCancelled,
+            cancellable_call,
+        )
 
         documents = []
         for item in files:
             if cancel.is_set():
-                raise ValueError('资料分析已取消')
+                raise TaskCancelled('资料分析已取消')
             path = Path(item['path'])
             if digest(path) != item['sha256']:
                 raise ValueError('资料已变化，请重新添加')
@@ -51,7 +55,7 @@ class MaterialAnalysisProvider:
             source = SourceFile(file_id=item['id'], original_name=item['name'], extension=path.suffix.lower(),
                                 sha256=item['sha256'], size_bytes=path.stat().st_size, round_number=1,
                                 original_path=str(path), role=classify_file_role(path))
-            documents.append(DocumentExtractionService().extract(source))
+            documents.append(cancellable_call(lambda source=source: DocumentExtractionService().extract(source), cancel))
         batches = PrivacyChunkSelector().build_batches(documents)
         texts = {item['id']: [] for item in files}
         for batch in batches:
@@ -61,8 +65,10 @@ class MaterialAnalysisProvider:
         payload_files = [{'file_id': item['id'], 'name': item['name'],
                           'text': '\n'.join(texts[item['id']])[:6000]} for item in files]
         if cancel.is_set():
-            raise ValueError('资料分析已取消')
+            raise TaskCancelled('资料分析已取消')
         progress('正在联网验证并调用模型识别资料；识别不会编造缺失数据。')
-        plan = self.client._authenticated_json('POST', '/api/v1/material-analysis', payload={
-            'model_id': self.model_id, 'request_id': 'MATERIAL-' + run_id, 'files': payload_files})
+        payload = {'model_id': self.model_id, 'request_id': 'MATERIAL-' + run_id, 'files': payload_files}
+        cancellable = getattr(self.client, 'analyze_materials_cancellable', None)
+        plan = cancellable_call(lambda: cancellable(payload, cancel) if callable(cancellable)
+                                else self.client.analyze_materials(payload), cancel)
         return resolve_roles(plan, files), plan

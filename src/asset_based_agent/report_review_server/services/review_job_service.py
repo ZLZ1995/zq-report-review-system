@@ -15,7 +15,7 @@ from ..crypto import SecretCipher
 from ..models import ModelDefinition, ReviewJob, utc_now
 from ..schemas import ReviewJobCreateRequest, ReviewJobResponse
 from .auth_service import ServiceError, is_expired
-from .metered_model_service import MeteredModelService
+from .metered_model_service import BillingReconciliationRequired, MeteredModelService
 from .provider_gateway import NormalizedUsage, ProviderClient
 from .server_review_agent import ServerReviewAgent, ServerReviewBatch
 
@@ -110,6 +110,8 @@ class ReviewJobService:
         if job.status == "succeeded":
             return self.to_response(job)
         if job.status == "failed":
+            if job.error_code == "billing_reconciliation_required":
+                raise BillingReconciliationRequired()
             raise ServiceError(
                 "review_job_failed",
                 "审核任务已失败，请创建新任务后重试。",
@@ -150,6 +152,9 @@ class ReviewJobService:
         issues: list[dict[str, object]] = []
         try:
             for index, batch in enumerate(batches, start=1):
+                db.refresh(job)
+                if job.error_code == 'cancel_requested':
+                    return self._finish_cancel(db, job)
                 request_payload = self.agent.request_payload(batch)
                 metered_result = self.metered.execute(
                     db,
@@ -161,6 +166,9 @@ class ReviewJobService:
                     external_hold_id=job.hold_id,
                     defer_settlement=True,
                 )
+                db.refresh(job)
+                if job.error_code == 'cancel_requested':
+                    return self._finish_cancel(db, job)
                 issues.extend(
                     self.agent.parse_issues(metered_result.payload, batch=batch)
                 )
@@ -179,6 +187,8 @@ class ReviewJobService:
             job.error_code = getattr(exc, "code", "review_execution_failed")
             job.completed_at = utc_now()
             db.commit()
+            if isinstance(exc, BillingReconciliationRequired):
+                raise
             self.metered.capture_hold(
                 db,
                 hold_id=job.hold_id,
@@ -208,6 +218,30 @@ class ReviewJobService:
 
     def get_job(self, db: Session, *, user_id: str, job_id: str) -> ReviewJobResponse:
         return self.to_response(self._get_owned_job(db, user_id=user_id, job_id=job_id))
+
+    def _finish_cancel(self, db, job):
+        job.status = 'cancelled'
+        job.completed_at = utc_now()
+        db.commit()
+        self.metered.capture_hold(db, hold_id=job.hold_id, reference_id=job.job_id)
+        db.refresh(job)
+        return self.to_response(job)
+
+    def cancel_job(self, db: Session, *, user_id: str, job_id: str) -> ReviewJobResponse:
+        job = self._get_owned_job(db, user_id=user_id, job_id=job_id)
+        cancelled = db.scalar(update(ReviewJob).where(
+            ReviewJob.job_id == job_id, ReviewJob.user_id == user_id, ReviewJob.status == 'queued'
+        ).values(status='cancelled', error_code='cancel_requested', completed_at=utc_now())
+            .returning(ReviewJob.job_id))
+        if cancelled is None:
+            db.execute(update(ReviewJob).where(
+                ReviewJob.job_id == job_id, ReviewJob.user_id == user_id, ReviewJob.status == 'running'
+            ).values(error_code='cancel_requested'))
+        db.commit()
+        if cancelled is not None:
+            self.metered.capture_hold(db, hold_id=job.hold_id, reference_id=job.job_id)
+        db.refresh(job)
+        return self.to_response(job)
 
     def to_response(self, job: ReviewJob) -> ReviewJobResponse:
         issues: list[dict[str, object]] = []

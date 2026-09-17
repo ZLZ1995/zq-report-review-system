@@ -32,7 +32,8 @@ def test_install_cancel_confirm_and_version_controls(tmp_path, monkeypatch):
     assert dialog.versions.count() == 1
     assert not dialog.manager.list_versions()[0]["enabled"]
     dialog.versions.setCurrentRow(0)
-    assert "尚未接入任务执行" in dialog.details.toPlainText()
+    assert "受支持的适配器" in dialog.details.toPlainText()
+    assert "尚未接入任务执行" not in dialog.details.toPlainText()
     dialog.activate_selected()
     assert dialog.manager.list_versions()[0]["enabled"]
     dialog.disable_selected()

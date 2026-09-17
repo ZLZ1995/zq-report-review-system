@@ -121,6 +121,13 @@ class ProjectCatalog:
 
     def select_project(self, identity):
         self.active = None
+        self.active = self.project_store(identity)
+        with self.index() as db:
+            db.execute("INSERT INTO selection VALUES(?,?) ON CONFLICT(owner) DO UPDATE SET project=excluded.project",
+                       (self.owner, identity))
+
+    def project_store(self, identity):
+        """Read another project's conversations without changing active selection."""
         with self.index() as db:
             row = db.execute("SELECT path FROM locations WHERE owner=? AND project=?",
                              (self.owner, identity)).fetchone()
@@ -132,10 +139,7 @@ class ProjectCatalog:
         validate_business_directory(path.resolve().parent)
         store = PlatformStore(path, self.owner, create=False)
         store.project(identity)
-        self.active = store
-        with self.index() as db:
-            db.execute("INSERT INTO selection VALUES(?,?) ON CONFLICT(owner) DO UPDATE SET project=excluded.project",
-                       (self.owner, identity))
+        return store
 
     def restore(self, identity):
         self.select_project(identity)

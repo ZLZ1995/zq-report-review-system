@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import re
 from dataclasses import dataclass
 
 
@@ -16,8 +17,11 @@ class ServerSettings:
     access_token_minutes: int = 15
     refresh_token_days: int = 7
     provider_encryption_key: str = ""
+    build_sha: str | None = None
 
     def __post_init__(self) -> None:
+        if self.build_sha is not None and not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', self.build_sha):
+            raise ValueError('REPORT_REVIEW_BUILD_SHA must be a lowercase Git commit SHA')
         if len(self.jwt_secret) < 32:
             raise ValueError("REPORT_REVIEW_JWT_SECRET must contain at least 32 characters")
         if self.access_token_minutes < 1:
@@ -50,6 +54,7 @@ class ServerSettings:
             access_token_minutes=int(os.environ.get("REPORT_REVIEW_ACCESS_TOKEN_MINUTES", "15")),
             refresh_token_days=int(os.environ.get("REPORT_REVIEW_REFRESH_TOKEN_DAYS", "7")),
             provider_encryption_key=os.environ.get("REPORT_REVIEW_PROVIDER_ENCRYPTION_KEY", ""),
+            build_sha=os.environ.get('REPORT_REVIEW_BUILD_SHA') or None,
         )
 
     def encryption_key_bytes(self) -> bytes:

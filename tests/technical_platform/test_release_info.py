@@ -14,6 +14,60 @@ def test_local_release_contains_actual_rule_hash():
     assert info["review_skill_version"]
 
 
+def test_local_release_includes_external_inventory_without_rules(tmp_path):
+    from asset_based_agent.technical_platform.release_info import release_details
+    from asset_based_agent.technical_platform.skill_installation import (
+        SkillInstallation,
+    )
+    from asset_based_agent.technical_platform.store import PlatformStore
+
+    store = PlatformStore(tmp_path / 'db.sqlite', 'alice')
+    SkillInstallation(store)
+    info = local_release(store=store)
+    assert info['external_skills'] == []
+    assert info['external_skills_status'] == 'checked'
+    assert '执行授权' in release_details(info)
+
+
+def test_version_inspection_does_not_initialize_external_skill_tables(tmp_path):
+    from asset_based_agent.technical_platform.store import PlatformStore
+
+    store = PlatformStore(tmp_path / 'db.sqlite', 'alice')
+    with store.connect() as db:
+        before = db.execute('SELECT name FROM sqlite_master ORDER BY name').fetchall()
+    assert local_release(store=store)['external_skills_status'] == 'unavailable'
+    with store.connect() as db:
+        assert db.execute('SELECT name FROM sqlite_master ORDER BY name').fetchall() == before
+
+
+def test_local_release_reports_all_builtin_skills_and_verified_templates():
+    from asset_based_agent.technical_platform.generation import locked_template
+    from asset_based_agent.technical_platform.local_migrations import SCHEMA_VERSION
+    from asset_based_agent.technical_platform.skills import BUILTINS, GENERATORS, digest
+    info = local_release()
+    assert info['local_schema_version'] == SCHEMA_VERSION
+    assert {s['id'] for s in info['skills']} == {s.id for s in BUILTINS}
+    assert info['protocol_version'] == 1
+    indexed = {s['id']: s for s in info['skills']}
+    for skill in GENERATORS:
+        item = indexed[skill.id]
+        assert item['status'] == 'verified'
+        assert item['template_sha256'] == digest(locked_template(skill.id))
+        assert len(item['bundle_sha256']) == 64
+
+
+def test_missing_template_is_reported_without_hiding_client_version(monkeypatch):
+    from asset_based_agent.technical_platform import generation
+    def missing(_skill):
+        raise ValueError('private path and secret must not leak')
+    monkeypatch.setattr(generation, 'locked_template', missing)
+    info = local_release()
+    assert info['client_version']
+    generators = [s for s in info['skills'] if s['id'] in generation.INPUT_ROLES]
+    assert all(s['status'] == 'unavailable_or_changed' for s in generators)
+    assert 'private' not in str(info)
+
+
 @pytest.mark.parametrize("supported", [True, False])
 def test_protocol_check_does_not_invent_server_build_version(supported):
     def handle(request):
@@ -29,3 +83,46 @@ def test_protocol_check_does_not_invent_server_build_version(supported):
     assert info["user_request_supported"] is supported
     assert info["server_api_version"] == "0.1.0"
     assert info["server_build"] == "未提供"
+
+
+def test_protocol_inspection_reads_explicit_metadata_and_build():
+    def handle(request):
+        if request.url.path == '/openapi.json':
+            return httpx.Response(200, json={'paths': {'/api/v1/capabilities': {'get': {}}}})
+        assert request.url.path == '/api/v1/capabilities'
+        return httpx.Response(200, json={
+            'schema_version': 1, 'protocol_version': 1, 'build_sha': 'b' * 40,
+            'capabilities': {'skill_routing': 1},
+        })
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        info = inspect_server('https://server.test', client=client)
+    assert info['server_build'] == 'b' * 40
+    assert info['capabilities'] == {'skill_routing': 1}
+    assert info['protocol_version'] == 1
+
+
+def test_unknown_metadata_schema_is_not_treated_as_compatible():
+    def handle(request):
+        if request.url.path == '/openapi.json':
+            return httpx.Response(200, json={'paths': {'/api/v1/capabilities': {'get': {}}}})
+        return httpx.Response(200, json={'schema_version': 999})
+    with (
+        httpx.Client(transport=httpx.MockTransport(handle)) as client,
+        pytest.raises(ValueError, match='协议'),
+    ):
+        inspect_server('https://server.test', client=client)
+
+
+def test_version_panel_shows_verified_build_not_hardcoded_unknown():
+    from types import SimpleNamespace
+
+    from asset_based_agent.technical_platform.app import PlatformWindow
+    texts = []
+    details = []
+    fake = SimpleNamespace(store=None, version_label=SimpleNamespace(setText=texts.append, setToolTip=details.append))
+    PlatformWindow.versions_checked(fake, {'user_request_supported': True, 'server_api_version': '0.1.0',
+                                          'server_build': 'c' * 40, 'protocol_version': 1})
+    assert 'c' * 40 in texts[0]
+    assert 'template_sha256' in details[0]
+    assert 'gongshang-change-history-docx' in details[0]
+    assert '不代表项目已迁移' in details[0]

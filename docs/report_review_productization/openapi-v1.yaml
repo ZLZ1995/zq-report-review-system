@@ -1,0 +1,346 @@
+openapi: 3.1.0
+info:
+  title: ZQ Report Review Control API
+  version: 0.1.0
+servers:
+  - url: https://demo-domain.invalid/api/v1
+paths:
+  /agent/browser-step:
+    post:
+      operationId: proposeBrowserStep
+      security: [{bearerAuth: []}]
+      description: >-
+        Metered next-action proposal only; never operates the browser or grants
+        permissions. Uses BrowserStepRequest and BrowserStepProposal from the
+        generated /openapi.json as the authoritative schemas. Request includes
+        request_id, model_id, task_id, sequence (1..32), goal, scoped HTTPS origins
+        and actions, and an optional bounded native-filtered observation. No raw
+        files, cookies, password records or arbitrary executable code fields.
+        generated_downloads is an optional strict boolean, omitted when false.
+        It requires download scope and explicit browser_generated_download capability
+        negotiation; only then may download target an observed button. Otherwise
+        download remains link-only. The client confirms the specific control and
+        captures one same-origin resource; dispatched does not mean verified content.
+        Client revalidates target, origin, task scope and one-use native consent.
+        finish requires a quote from current visible text and is not proof of
+        business success. Request IDs are stable across response recovery.
+        Upload requires explicit browser_upload capability and upload action scope.
+        upload_artifacts is a bounded metadata-only candidate list (id, name,
+        size, sha256), never paths or file bytes. An upload proposal must reference
+        one listed artifact_id and an observed file control, and provide a specific
+        object_label. Candidates and proposals grant no native upload permission.
+      responses:
+        "200": {description: Validated BrowserStepProposal; not execution authorization}
+        "401": {description: Login required}
+        "402": {description: Insufficient balance or unresolved billing hold}
+        "422": {description: Invalid or oversized structured request}
+        "502": {description: Invalid model proposal; no browser action executed}
+  /admin/billing-holds:
+    get:
+      operationId: uncertainBillingHolds
+      security: [{bearerAuth: []}]
+      description: Administrator only. Paginated uncertain holds, without provider secrets or request bodies.
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 50}}
+        - {name: offset, in: query, schema: {type: integer, minimum: 0, default: 0}}
+      responses:
+        "200": {description: Items and nullable next_offset}
+        "401": {description: Login required}
+        "403": {description: Administrator required}
+  /admin/billing-holds/{hold_id}/reconciliation:
+    parameters:
+      - {name: hold_id, in: path, required: true, schema: {type: string}}
+    get:
+      operationId: getBillingReconciliation
+      security: [{bearerAuth: []}]
+      responses:
+        "200": {description: Administrator-only audit record}
+        "401": {description: Login required}
+        "403": {description: Administrator required}
+        "404": {description: No reconciliation record}
+    post:
+      operationId: submitBillingReconciliation
+      security: [{bearerAuth: []}]
+      description: Verified total customer charge for the whole hold, not an additional amount. Identical submission is idempotent. Actor is taken from authentication, never request data.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BillingReconciliationRequest'
+      responses:
+        "200": {description: Committed or identical existing reconciliation}
+        "401": {description: Login required}
+        "403": {description: Administrator required}
+        "404": {description: Hold missing}
+        "409": {description: Conflicting decision or ineligible state}
+        "422": {description: Invalid input, rejected values not echoed}
+  /health:
+    get:
+      operationId: health
+      responses:
+        "200":
+          description: Service health
+  /auth/login:
+    post:
+      operationId: login
+      responses:
+        "200":
+          description: New single-user session
+        "401":
+          description: Invalid credentials
+  /auth/refresh:
+    post:
+      operationId: refresh
+      responses:
+        "200":
+          description: Rotated access and refresh tokens
+        "401":
+          description: Invalid or revoked session
+  /auth/heartbeat:
+    post:
+      operationId: heartbeat
+      responses:
+        "200":
+          description: Session is active
+        "401":
+          description: Session was revoked or expired
+  /auth/logout:
+    post:
+      operationId: logout
+      responses:
+        "204":
+          description: Session revoked
+  /auth/change-password:
+    post:
+      operationId: changePassword
+      responses:
+        "204":
+          description: Password changed and other sessions revoked
+  /admin/users:
+    post:
+      operationId: createUser
+      responses:
+        "201":
+          description: User created with a temporary password
+  /admin/users/{user_id}/reset-password:
+    post:
+      operationId: resetUserPassword
+      parameters:
+        - in: path
+          name: user_id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Password reset and active sessions revoked
+  /account/balance:
+    get:
+      operationId: getBalance
+      responses:
+        "200":
+          description: Current CNY balance only; no usage or cost details
+  /models:
+    get:
+      operationId: listEnabledModels
+      responses:
+        "200":
+          description: Enabled model names and tiers without prices
+  /review-jobs:
+    post:
+      operationId: createReviewJob
+      description: >-
+        Accepts only client-extracted visible text chunks. Raw files, local paths,
+        hidden sheets, and veryHidden sheets are not accepted. Reserves the
+        estimated amount once for the complete review round.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReviewJobCreate"
+      responses:
+        "201":
+          description: Encrypted temporary review job created
+        "402":
+          description: Balance is insufficient to start the complete round
+        "422":
+          description: Context contains invalid or non-visible data
+  /review-jobs/{job_id}:
+    get:
+      operationId: getReviewJob
+      parameters:
+        - in: path
+          name: job_id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Job progress and structured issues without billing details
+        "404":
+          description: Job does not belong to the authenticated user
+  /review-jobs/{job_id}/execute:
+    post:
+      operationId: executeReviewJob
+      parameters:
+        - in: path
+          name: job_id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Review completed using the server-owned Agent
+        "409":
+          description: Job is already running or its reservation is invalid
+        "410":
+          description: Encrypted temporary context has expired
+  /admin/users/{user_id}/balance-adjustments:
+    post:
+      operationId: adjustBalance
+      parameters:
+        - in: path
+          name: user_id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Balance adjusted and ledger entry recorded
+  /admin/users/{user_id}/billing-multiplier:
+    patch:
+      operationId: setUserBillingMultiplier
+      parameters:
+        - in: path
+          name: user_id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: User multiplier updated
+  /admin/models:
+    post:
+      operationId: createModel
+      responses:
+        "201":
+          description: Billable model created
+  /admin/models/{model_id}/routes:
+    post:
+      operationId: createProviderRoute
+      parameters:
+        - in: path
+          name: model_id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "201":
+          description: Encrypted provider route and category rates created
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    BillingReconciliationRequest:
+      type: object
+      additionalProperties: false
+      required: [confirmed_amount, evidence_sha256, evidence_reference]
+      properties:
+        confirmed_amount:
+          description: Nonnegative finite decimal, at most 8 decimal places, less than 1000000000000. Decimal string recommended to preserve precision.
+          type: [number, string]
+        evidence_sha256: {type: string, pattern: '^[0-9a-f]{64}$'}
+        evidence_reference: {type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$'}
+    ReviewJobCreate:
+      type: object
+      additionalProperties: false
+      required: [client_job_id, model_id, round_number, chunks]
+      properties:
+        client_job_id:
+          type: string
+          maxLength: 128
+        model_id:
+          type: string
+          format: uuid
+        round_number:
+          type: integer
+          minimum: 1
+        chunks:
+          type: array
+          minItems: 1
+          maxItems: 2000
+          items:
+            $ref: "#/components/schemas/ReviewChunk"
+    ReviewChunk:
+      type: object
+      additionalProperties: false
+      required:
+        - chunk_id
+        - source_file_id
+        - source_file_name
+        - file_type
+        - role
+        - text
+      properties:
+        chunk_id:
+          type: string
+          maxLength: 128
+        source_file_id:
+          type: string
+          maxLength: 128
+        source_file_name:
+          type: string
+          maxLength: 512
+        file_type:
+          type: string
+          enum: [word, excel, pdf]
+        role:
+          type: string
+          maxLength: 64
+        text:
+          type: string
+          maxLength: 12000
+        location:
+          $ref: "#/components/schemas/ReviewLocation"
+        reference_only:
+          type: boolean
+          default: false
+        sheet_name:
+          type: [string, "null"]
+        sheet_state:
+          type: string
+          enum: [visible]
+          default: visible
+    ReviewLocation:
+      type: object
+      additionalProperties: false
+      properties:
+        chapter:
+          type: [string, "null"]
+          maxLength: 256
+        page:
+          type: [integer, "null"]
+          minimum: 1
+        paragraph:
+          type: [integer, "null"]
+          minimum: 1
+        table:
+          type: [string, "null"]
+          maxLength: 256
+        cell:
+          type: [string, "null"]
+          maxLength: 64
+        sheet:
+          type: [string, "null"]
+          maxLength: 255

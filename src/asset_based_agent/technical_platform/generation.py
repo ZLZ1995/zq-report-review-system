@@ -7,10 +7,13 @@ import shutil
 import subprocess
 import sys
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
+from ..report_review_app.services.resource_locks import CLIENT_RESOURCES
+from .generation_paths import generation_work_directory
 from .project_catalog import validate_business_directory
-from .skills import DETAIL, HISTORY, digest
+from .skills import DETAIL, HISTORY, SourceValidationError, digest
 
 # role, user-facing label, accepted extensions, required
 INPUT_ROLES = {
@@ -96,7 +99,18 @@ def artifact_path(store, session_id, run_id, index):
     return path
 
 
-def execute_generation(store, run_id, snapshot, cancel, progress, *, provider=None):
+def execute_generation(store, run_id, snapshot, cancel, progress, *, provider=None, manage_run=True,
+                       step_id=None):
+    root = validate_business_directory(store.path.parent)
+    work = generation_work_directory(root, run_id, step_id)
+    with CLIENT_RESOURCES.lease(('output:' + os.path.normcase(str(work)),), cancel):
+        return _execute_generation(store, run_id, snapshot, cancel, progress, provider=provider,
+                                   manage_run=manage_run, step_id=step_id)
+
+
+def _execute_generation(store, run_id, snapshot, cancel, progress, *, provider=None, manage_run=True,
+                        step_id=None):
+    from ..report_review_app.services.task_cancellation import TaskCancelled
     skill_id = snapshot['skill_id']
     roles, files = snapshot.get('input_roles', {}), snapshot['files']
     automatic = snapshot.get('automatic_materials') is True
@@ -107,18 +121,14 @@ def execute_generation(store, run_id, snapshot, cancel, progress, *, provider=No
             or snapshot.get('capabilities') != ['generate_artifacts', 'read_selected_files']):
         raise PermissionError('生成规则或任务能力已变化，请重新确认任务')
     root = validate_business_directory(store.path.parent)
-    work = root / 'runs' / run_id
-    # New task only. A preexisting or redirected run directory is not reusable authorization.
-    work.parent.mkdir(exist_ok=True)
-    if work.parent.resolve() != root / 'runs':
-        raise PermissionError('任务目录被重定向')
-    work.mkdir(exist_ok=False)
+    work = generation_work_directory(root, run_id, step_id, create=True)
     if automatic:
         if provider is None or not snapshot['permissions'].get('call_model'):
             raise PermissionError('资料识别缺少模型授权')
-        roles, plan = provider.analyze(files, run_id, cancel, progress)
+        request_id = run_id if step_id is None else run_id + '-' + hashlib.sha256(step_id.encode()).hexdigest()
+        roles, plan = provider.analyze(files, request_id, cancel, progress)
         if cancel.is_set():
-            raise ValueError('资料识别已取消，未开始生成')
+            raise TaskCancelled('资料识别已取消，未开始生成')
         if any(digest(Path(f['path'])) != f['sha256'] for f in files):
             raise ValueError('识别过程中资料已变化，请重新添加')
         (work / 'material_analysis.json').write_text(json.dumps(plan, ensure_ascii=False), encoding='utf-8')
@@ -131,9 +141,10 @@ def execute_generation(store, run_id, snapshot, cancel, progress, *, provider=No
                         '请补充该资料或说明现有文件中哪一部分提供这些信息；没有生成正式工作簿。')
             result = {'kind': 'generation', 'model_called': True, 'ok': False,
                       'artifacts': [], 'feedback': feedback}
-            store.transition(run_id, 'validating', '资料识别及生成范围检查')
-            store.save_result(run_id, result)
-            store.transition(run_id, 'failed', '资料已识别，尚需确认范围依据')
+            if manage_run:
+                store.transition(run_id, 'validating', '资料识别及生成范围检查')
+                store.save_result(run_id, result)
+                store.transition(run_id, 'failed', '资料已识别，尚需确认范围依据')
             return result
         bound_files = [f for f in files if f['id'] in roles.values()]
         if 'trial_balance' in roles:
@@ -152,6 +163,8 @@ def execute_generation(store, run_id, snapshot, cancel, progress, *, provider=No
     selected['template'] = str(copied_template)
     by_id = {f['id']: f for f in files}
     for role, identity in roles.items():
+        if cancel.is_set():
+            raise TaskCancelled('任务已取消，未开始生成')
         item = by_id[identity]
         source = Path(item['path'])
         if digest(source) != item['sha256']:
@@ -171,8 +184,12 @@ def execute_generation(store, run_id, snapshot, cancel, progress, *, provider=No
     environment['TEMP'] = environment['TMP'] = str(work)
     environment['PYTHONIOENCODING'] = 'utf-8'
     progress('正在本地生成副本；不上传资料，不调用模型。')
-    started = time.monotonic()
-    with (work / 'worker.log').open('w', encoding='utf-8') as log:
+    if cancel.is_set():
+        raise TaskCancelled('任务已取消，未启动生成进程')
+    progress('等待本地生成资源；可取消排队。')
+    office_lease = CLIENT_RESOURCES.lease(('office',), cancel) if skill_id == DETAIL.id else nullcontext()
+    with office_lease, (work / 'worker.log').open('w', encoding='utf-8') as log:
+        started = time.monotonic()
         process = subprocess.Popen(command, cwd=work, env=environment, stdout=log, stderr=log,
                                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         try:
@@ -188,9 +205,10 @@ def execute_generation(store, run_id, snapshot, cancel, progress, *, provider=No
             if process.poll() is None:
                 process.kill()
                 process.wait()
-    store.transition(run_id, 'validating', '重新校验选定原件与生成状态')
+    if manage_run:
+        store.transition(run_id, 'validating', '重新校验选定原件与生成状态')
     if digest(template) != template_digest or any(digest(Path(f['path'])) != f['sha256'] for f in files):
-        raise ValueError('来源文件已变化，本轮成果不得发布')
+        raise SourceValidationError('来源文件已变化，本轮成果不得发布')
     status_path = work / 'status.json'
     status = json.loads(status_path.read_text(encoding='utf-8')) if status_path.exists() else {}
     succeeded = not cancel.is_set() and process.returncode == 0 and status.get('ok') is True
@@ -208,7 +226,8 @@ def execute_generation(store, run_id, snapshot, cancel, progress, *, provider=No
             artifacts.append({'name': name, 'path': str(path), 'sha256': digest(path)})
     result = {'kind': 'generation', 'model_called': automatic, 'artifacts': artifacts,
               'feedback': feedback, 'ok': succeeded}
-    store.save_result(run_id, result)
-    store.transition(run_id, 'cancelled' if cancel.is_set() else 'succeeded' if succeeded else 'failed',
-                     '生成与校验通过' if succeeded else '生成被阻断，未发布正式成果')
+    if manage_run:
+        store.save_result(run_id, result)
+        store.transition(run_id, 'cancelled' if cancel.is_set() else 'succeeded' if succeeded else 'failed',
+                         '生成与校验通过' if succeeded else '生成被阻断，未发布正式成果')
     return result
