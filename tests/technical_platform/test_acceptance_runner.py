@@ -46,7 +46,7 @@ def test_productization_runner_includes_platform_with_isolated_processes(monkeyp
 
     monkeypatch.setattr(module.subprocess, "run", run)
     assert module.main() == 0
-    assert len(calls) == 3
+    assert len(calls) == 4
     bases = []
     for args, kwargs in calls:
         assert args[1:3] == ["-X", "utf8"]
@@ -59,7 +59,7 @@ def test_productization_runner_includes_platform_with_isolated_processes(monkeyp
         # on Windows installations without extended-length path support.
         assert len(str(base.relative_to(ROOT))) <= 65
         bases.append(base)
-    assert len(set(bases)) == 3
+    assert len(set(bases)) == 4
     assert any("technical_platform" in str(args) for args, _ in calls)
 
 
