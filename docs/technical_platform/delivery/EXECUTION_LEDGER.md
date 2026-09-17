@@ -5,6 +5,7 @@
 - Deployment follow-up: commit `8a19de9` corrected a release-entrypoint newline-encoding defect that caused `SyntaxError: from __future__ imports must occur at the beginning of the file` in Zeabur runtime logs. Source and isolated release entrypoints now compile successfully.
 - Zeabur service `zq-report-review-system` redeployed from `main` and reached 1/1 running. Public checks returned HTTP 200 for `/api/v1/health` and `/api/v1/capabilities`; the latter exposed `review_jobs`, `review_cancel`, browser actions, and material analysis capabilities.
 - Online service is now reachable for protocol smoke tests. Paid model execution, OA upload receipt, signed EXE installation, Office/WPS matrix, and online-update client acceptance remain unverified and are not marked complete.
+- Online authenticated smoke test passed with authorized test account `001`: login returned HTTP 200; `/api/v1/account/balance` and `/api/v1/models` both returned HTTP 200. The access token was not printed or persisted.
 
 - Local release candidate was rebuilt in the isolated checkout `D:/ZQ-Acceptance/release-checkout` from the explicit 550-file manifest. The final staged set was 344 changed/added files; no user working-tree files were staged.
 - Release checkout targeted tests passed: 200 passed, 1 warning, exit 0 (`D:/ZQ-Acceptance/release-checkout-tests2`). The earlier full local regression remains 1280 passed (`D:/ZQ-Acceptance/r-3f89ea42c59140d8a3`).
