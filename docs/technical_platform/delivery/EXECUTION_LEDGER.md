@@ -1,5 +1,10 @@
 # 执行账本
 
+## 2026-09-17 build identity follow-up
+
+- G09/G10 build identity hardening: `deploy/report_review_server/Dockerfile` and repository-root `Dockerfile` now accept `ARG REPORT_REVIEW_BUILD_SHA` and expose it as the runtime `REPORT_REVIEW_BUILD_SHA`; no JWT, provider key, or release private key is baked into either image.
+- TDD evidence: Dockerfile asset tests passed 5/5 in the isolated release checkout. The local Docker Desktop Linux daemon was unavailable, so an actual image build remains pending CI/Zeabur verification.
+
 ## 2026-09-17 release sync evidence
 
 - Deployment follow-up: commit `8a19de9` corrected a release-entrypoint newline-encoding defect that caused `SyntaxError: from __future__ imports must occur at the beginning of the file` in Zeabur runtime logs. Source and isolated release entrypoints now compile successfully.
