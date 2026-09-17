@@ -7,6 +7,7 @@
 - Secret-pattern scan returned no match outside tests. Staged diff was checked after rebuilding the checkout; the first temporary copy was discarded because a formatting helper had written literal `\\n` text, so it was never committed.
 - GitHub branch pushed successfully: `codex/platform-sync-20260917`, commit `b43dc39`, remote `origin` = `https://github.com/ZLZ1995/zq-report-review-system.git`. Main was not overwritten. Zeabur has not been switched or redeployed yet; online `/api/v1/capabilities` remains 404 on the old Release 0.2.5 deployment.
 - First Zeabur deployment of `b0ae89e` built but crashed at startup with `ModuleNotFoundError: asset_based_agent.agent_contracts`; the runtime log is retained as failed evidence. The Dockerfile was changed to copy the complete shared `src/asset_based_agent` package, guarded by `test_dockerfile_runtime_assets.py`; server tests passed 185/185 in both source and release checkout. Fix commit `1b5ee9c` was fast-forwarded to `main` and the release branch; redeployment is pending verification.
+- The second deployment of `1b5ee9c` reproduced the same import failure, proving the Zeabur service was not honoring the configured nested Dockerfile path. A root `Dockerfile` fallback was added and tested (2/2 asset tests), then commit `e2b8f4a` was fast-forwarded to `main` and the release branch. The service is currently paused/crash-looping; redeploy must be triggered and its runtime logs must pass before claiming online readiness.
 
 启动日期：2026-09-16。目标 active；未发布、未部署。所有passed必须附验证证据。
 
