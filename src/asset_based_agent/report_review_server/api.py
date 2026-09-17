@@ -189,6 +189,11 @@ def create_app(
         request.app.state.auth_service.require_admin(context)
         return request.app.state.client_release_service.create(db, admin_user_id=context.user.user_id, manifest=payload.manifest)
 
+    @app.get('/api/v1/admin/client-releases', response_model=list[ClientReleaseResponse])
+    def list_client_releases(request: Request, context: AuthContext = Depends(get_context), db: Session = Depends(get_db)):
+        request.app.state.auth_service.require_admin(context)
+        return request.app.state.client_release_service.list(db)
+
     @app.post('/api/v1/admin/client-releases/{release_id}/transition', response_model=ClientReleaseResponse)
     def transition_client_release(release_id: str, payload: ClientReleaseTransitionRequest, request: Request,
                                   context: AuthContext = Depends(get_context), db: Session = Depends(get_db)):

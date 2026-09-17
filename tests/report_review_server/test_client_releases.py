@@ -40,3 +40,17 @@ def test_release_registry_requires_signed_manifest_and_audits_transitions(client
 
 def test_release_registry_does_not_allow_non_admin_mutation(client):
     assert client.post("/api/v1/admin/client-releases", json={"manifest": _manifest()}).status_code == 401
+
+
+def test_admin_release_listing_is_available_to_admin_only(client):
+    token = login(client, "admin", "AdminPassword123!", instance="release-list")["access_token"]
+    response = client.get("/api/v1/admin/client-releases", headers=bearer(token))
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_admin_page_exposes_client_release_controls(client):
+    page = client.get("/admin")
+    assert page.status_code == 200
+    assert "client-releases" in page.text
+    assert "创建发布草稿" in page.text

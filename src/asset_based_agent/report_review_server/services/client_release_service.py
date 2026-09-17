@@ -60,6 +60,9 @@ def _manifest(raw: Mapping[str, object]) -> tuple[str, dict[str, object], str]:
 
 
 class ClientReleaseService:
+    def list(self, db: Session) -> list[ClientRelease]:
+        return list(db.scalars(select(ClientRelease).order_by(ClientRelease.sequence.desc())))
+
     def create(self, db: Session, *, admin_user_id: str, manifest: Mapping[str, object]) -> ClientRelease:
         encoded, payload, digest = _manifest(manifest)
         sequence = int(payload["sequence"])

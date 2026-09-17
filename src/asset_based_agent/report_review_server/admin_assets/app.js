@@ -6,6 +6,7 @@ let testingConnection = false;
 let billingNextOffset = null;
 const billingUnknown = new Set();
 let billingBusy = false;
+let releaseItems = [];
 const el = id => document.getElementById(id);
 const notice = text => { el("notice").textContent = text; };
 function clearSession() {
@@ -20,10 +21,63 @@ function clearSession() {
   el("desk").hidden = true;
   el("logout").hidden = true;
   el("login-panel").hidden = false;
-  for (const id of ["users", "stats", "model-list", "route-list", "model-choice"]) el(id).replaceChildren();
+  for (const id of ["users", "stats", "model-list", "route-list", "model-choice", "release-choice", "release-list"]) el(id).replaceChildren();
   document.querySelectorAll("form").forEach(form => form.reset());
   document.querySelectorAll(".user-choice").forEach(select => select.replaceChildren());
   invalidateConnection();
+}
+function releaseLabel(item) {
+  return item.version + " · " + item.platform + "/" + item.arch + " · " + item.status + " · 序号 " + item.sequence;
+}
+function updateReleaseButtons() {
+  const selected = releaseItems.find(item => item.release_id === el("release-choice").value);
+  for (const id of ["release-canary", "release-stable", "release-withdraw"]) el(id).disabled = !selected;
+}
+async function refreshReleases() {
+  const data = await api("/admin/client-releases");
+  releaseItems = Array.isArray(data) ? data : [];
+  const choice = el("release-choice");
+  choice.replaceChildren();
+  option(choice, "", releaseItems.length ? "请选择发布版本" : "暂无发布版本");
+  for (const item of releaseItems) option(choice, item.release_id, releaseLabel(item));
+  const list = el("release-list");
+  list.replaceChildren();
+  for (const item of releaseItems) {
+    const p = document.createElement("p");
+    p.textContent = releaseLabel(item) + " · 清单 SHA256 " + item.manifest_sha256;
+    list.append(p);
+  }
+  updateReleaseButtons();
+}
+async function createReleaseDraft(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector("button");
+  button.disabled = true;
+  try {
+    let manifest;
+    try { manifest = JSON.parse(form.elements.manifest.value); }
+    catch { throw new Error("发布清单不是有效 JSON。"); }
+    await api("/admin/client-releases", "POST", {manifest});
+    form.reset();
+    notice("发布草稿已创建，签名校验通过。");
+    await refreshReleases();
+  } catch (error) { notice(error instanceof TypeError ? "网络异常，请刷新核对发布状态。" : error.message); }
+  finally { button.disabled = false; }
+}
+async function transitionRelease(status) {
+  const releaseId = el("release-choice").value;
+  if (!releaseId) return;
+  const selected = releaseItems.find(item => item.release_id === releaseId);
+  if (!selected) return;
+  const label = status === "stable" ? "激活稳定" : status === "canary" ? "切换灰度" : "撤回版本";
+  if (!confirm("确认对 " + selected.version + " 执行“" + label + "”？")) return;
+  for (const id of ["release-canary", "release-stable", "release-withdraw"]) el(id).disabled = true;
+  try {
+    await api("/admin/client-releases/" + encodeURIComponent(releaseId) + "/transition", "POST", {status});
+    notice(label + "已提交并完成状态更新。");
+    await refreshReleases();
+  } catch (error) { notice(error instanceof TypeError ? "网络异常，请刷新核对发布状态。" : error.message); updateReleaseButtons(); }
 }
 async function api(path, method = "GET", data) {
   const response = await fetch("/api/v1" + path, {
@@ -95,7 +149,7 @@ bind("login", async data => {
     try { await api("/auth/logout", "POST"); } finally { clearSession(); }
     throw new Error("仅支持已完成初始化的管理员账号。临时密码请先通过认证入口修改。");
   }
-  try { await refresh(); } catch (error) { clearSession(); throw error; }
+  try { await refresh(); await refreshReleases(); } catch (error) { clearSession(); throw error; }
   el("desk").hidden = false; el("login-panel").hidden = true; el("logout").hidden = false;
   notice("已登录总控。凭据仅保存在当前页面内存中。");
 });
@@ -165,6 +219,12 @@ el("logout").addEventListener("click", async () => {
   catch { notice("本地凭据已清除，服务端退出未确认。"); }
   finally { clearSession(); }
 });
+el("client-release-create").addEventListener("submit", createReleaseDraft);
+el("release-choice").addEventListener("change", updateReleaseButtons);
+el("release-refresh").addEventListener("click", async () => { try { await refreshReleases(); notice("发布列表已刷新。"); } catch (error) { notice(error.message); } });
+el("release-canary").addEventListener("click", () => transitionRelease("canary"));
+el("release-stable").addEventListener("click", () => transitionRelease("stable"));
+el("release-withdraw").addEventListener("click", () => transitionRelease("withdrawn"));
 
 function billingReceipt(record) {
   el("billing-result").textContent = "核对回执：" + record.reconciliation_id +
