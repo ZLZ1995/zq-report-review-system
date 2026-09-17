@@ -22,7 +22,7 @@ jobs:
           cache: pip
           cache-dependency-path: deploy/report_review_server/requirements.txt
       - name: Install server dependencies
-        run: python -m pip install -r deploy/report_review_server/requirements.txt pytest
+        run: python -m pip install -r deploy/report_review_server/requirements.txt pytest pyyaml
       - name: Run server contract and regression tests
         env:
           PYTHONPATH: src
