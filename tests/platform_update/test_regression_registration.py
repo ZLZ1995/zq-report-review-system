@@ -60,6 +60,8 @@ def test_release_asset_workflow_only_promotes_an_exact_successful_ci_artifact():
     assert '[[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]' in workflow
     assert 'gh release view "$RELEASE_TAG"' in workflow
     assert "grep -qx true" in workflow
-    assert 'ZQ-Workspace-0.2.7-Windows.zip' in workflow
-    assert 'ZQ-Workspace-0.2.7-Managed-Windows.zip' in workflow
+    assert 'VERSION="${RELEASE_TAG#v}"' in workflow
+    assert 'ZQ-Workspace-$VERSION-Windows.zip' in workflow
+    assert 'ZQ-Workspace-$VERSION-Managed-Windows.zip' in workflow
+    assert 'ZQ-Workspace-0.2.7-Windows.zip' not in workflow
     assert '--clobber' in workflow

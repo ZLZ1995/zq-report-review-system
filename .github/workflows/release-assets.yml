@@ -49,11 +49,14 @@ jobs:
             --dir release-assets
       - name: Verify immutable asset allowlist
         shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          test -f release-assets/ZQ-Workspace-0.2.7-Windows.zip
-          test -f release-assets/ZQ-Workspace-0.2.7-Managed-Windows.zip
-          test -f release-assets/ZQ-Workspace-0.2.7-Windows.json
-          test -f release-assets/ZQ-Workspace-0.2.7-Managed-Windows.json
+          VERSION="${RELEASE_TAG#v}"
+          test -f "release-assets/ZQ-Workspace-$VERSION-Windows.zip"
+          test -f "release-assets/ZQ-Workspace-$VERSION-Managed-Windows.zip"
+          test -f "release-assets/ZQ-Workspace-$VERSION-Windows.json"
+          test -f "release-assets/ZQ-Workspace-$VERSION-Managed-Windows.json"
           test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 4
           sha256sum release-assets/*
       - name: Upload build assets to existing draft release
@@ -62,11 +65,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
+          VERSION="${RELEASE_TAG#v}"
           gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft' | grep -qx true
           gh release upload "$RELEASE_TAG" \
-            release-assets/ZQ-Workspace-0.2.7-Windows.zip \
-            release-assets/ZQ-Workspace-0.2.7-Managed-Windows.zip \
-            release-assets/ZQ-Workspace-0.2.7-Windows.json \
-            release-assets/ZQ-Workspace-0.2.7-Managed-Windows.json \
+            "release-assets/ZQ-Workspace-$VERSION-Windows.zip" \
+            "release-assets/ZQ-Workspace-$VERSION-Managed-Windows.zip" \
+            "release-assets/ZQ-Workspace-$VERSION-Windows.json" \
+            "release-assets/ZQ-Workspace-$VERSION-Managed-Windows.json" \
             --repo "$GITHUB_REPOSITORY" \
             --clobber

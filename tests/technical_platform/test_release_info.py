@@ -11,7 +11,7 @@ from asset_based_agent.technical_platform.release_info import (
 def test_release_identity_matches_schema_11_delivery():
     from asset_based_agent.technical_platform.local_migrations import SCHEMA_VERSION
 
-    assert CLIENT_VERSION == '0.2.7'
+    assert CLIENT_VERSION == '0.2.8'
     assert SCHEMA_VERSION == 11
 
 
@@ -164,10 +164,10 @@ def test_version_panel_offers_only_new_stable_signed_release():
 
     from asset_based_agent.technical_platform.app import PlatformWindow
 
-    manifest = {'payload': {'version': '0.2.8', 'sequence': 3}, 'signature': 'x'}
+    manifest = {'payload': {'version': '0.2.9', 'sequence': 4}, 'signature': 'x'}
     encoded = json.dumps(manifest, sort_keys=True, separators=(',', ':'),
                          ensure_ascii=True).encode('ascii')
-    record = {'status': 'stable', 'version': '0.2.8', 'sequence': 3,
+    record = {'status': 'stable', 'version': '0.2.9', 'sequence': 4,
               'manifest': manifest,
               'manifest_sha256': hashlib.sha256(encoded).hexdigest()}
     visibility = []

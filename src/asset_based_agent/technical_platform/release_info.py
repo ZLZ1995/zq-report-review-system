@@ -10,9 +10,9 @@ import httpx
 from .local_migrations import SCHEMA_VERSION
 from .skills import BUILTINS, GENERATORS, REVIEW, digest
 
-CLIENT_VERSION = "0.2.7"
-CLIENT_RELEASE_SEQUENCE = 2
-UPDATER_VERSION = "0.2.7"
+CLIENT_VERSION = "0.2.8"
+CLIENT_RELEASE_SEQUENCE = 3
+UPDATER_VERSION = "0.2.8"
 
 
 def local_release(*, store=None) -> dict:
