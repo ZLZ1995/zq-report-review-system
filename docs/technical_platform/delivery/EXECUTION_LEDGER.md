@@ -776,3 +776,8 @@
 - The client task manager and Office/resource lock now expose an idle update barrier. New work is rejected while the barrier is held; active work is not force-killed. This is a preparation gate, not an implicit installation consent.
 - Local verification on a non-system temporary volume: `tests/platform_update` passed 85/85; combined server and update suites passed 278/278. The update suite covers two sequential versions, failed health recovery, tampered signatures/packages, redirects, archive traversal, process loss, and lock races.
 - A Windows GitHub Actions client workflow was added in commit `bdedd0b` to run the client/update suites on a non-system basetemp. The two workflows for this commit were observed as `in_progress` at ledger update time; their final conclusions and any Zeabur rebuild still require confirmation.
+
+## 2026-09-17 client CI collection fix
+
+- GitHub client run `35203892656` for commit `24563dc` failed during test collection because the release checkout omitted the existing support module `scripts/windows_file_owners.py`; this was a packaging/repository completeness defect, not an updater assertion failure.
+- Restored the support module in commit `f42beb1` and pushed it to `main`. Targeted local verification (`tests/technical_platform/test_file_owners_probe.py` plus `tests/platform_update`) passed 91/91. The new GitHub client run must complete before this gate is considered passed.
