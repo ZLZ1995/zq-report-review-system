@@ -132,6 +132,30 @@ panel.navigate()
 assert '不安全' in panel.status.text()
 panel.loading(panel.current_view(), True)
 assert '不安全' in panel.status.text(), 'Late load completion erased validation error'
+panel.current_view().setProperty('notice', None)
+panel.current_view().setProperty('noticeKind', None)
+panel.loading(panel.current_view(), None)
+assert panel.status.text() == '正在加载网页…'
+panel.loading(panel.current_view(), False)
+assert panel.status.text() == '网页加载失败，请检查网络后重试。'
+assert '安全策略' not in panel.status.text()
+panel.loading(panel.current_view(), None)
+panel.stop_loading()
+assert panel.status.text() == '已停止加载。'
+panel.loading(panel.current_view(), False)
+assert panel.status.text() == '已停止加载。'
+panel.loading(panel.current_view(), None)
+panel.loading_timed_out(panel.current_view())
+assert '长时间未完成加载' in panel.status.text()
+assert panel.retry_button.isVisibleTo(panel)
+assert panel.external_button.isVisibleTo(panel)
+panel.loading(panel.current_view(), True)
+assert panel.status.text() == '加载完成'
+assert not panel.retry_button.isVisibleTo(panel)
+assert not panel.external_button.isVisibleTo(panel)
+panel.security_blocked(panel.current_view(), '已阻止不安全的网页请求。')
+panel.loading(panel.current_view(), False)
+assert panel.status.text() == '已阻止不安全的网页请求。'
 panel.address.setText('https://typed.example/')
 panel.address.textEdited.emit('https://typed.example/')
 other = panel.new_tab()

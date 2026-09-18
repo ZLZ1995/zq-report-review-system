@@ -2,7 +2,8 @@
 import sqlite3
 from typing import cast
 
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QTimer, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWebEngineCore import QWebEngineNewWindowRequest
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
@@ -30,12 +31,15 @@ from .browser_task_leases import BrowserTaskLeases
 
 
 class BrowserPanel(QWidget):
+    LOAD_TIMEOUT_MS = 20_000
+
     def __init__(self, session, parent=None, *, task_manager=None):
         super().__init__(parent)
         self.session = session
         self.task_leases = BrowserTaskLeases(session, task_manager)
         self.credentials_dialog = None
         self.login_captures: dict[QWebEngineView, LoginCapture] = {}
+        self.load_timers: dict[QWebEngineView, QTimer] = {}
         self.library = BrowserLibrary(session.preferences, session.owner, environment=session.environment)
         self.setMinimumWidth(360)
         layout = QVBoxLayout(self)
@@ -47,7 +51,7 @@ class BrowserPanel(QWidget):
             ('后退', QStyle.StandardPixmap.SP_ArrowBack, lambda: self.current_view().back()),
             ('前进', QStyle.StandardPixmap.SP_ArrowForward, lambda: self.current_view().forward()),
             ('刷新', QStyle.StandardPixmap.SP_BrowserReload, lambda: self.current_view().reload()),
-            ('停止加载', QStyle.StandardPixmap.SP_BrowserStop, lambda: self.current_view().stop()),
+            ('停止加载', QStyle.StandardPixmap.SP_BrowserStop, self.stop_loading),
             ('主页', QStyle.StandardPixmap.SP_DirHomeIcon, self.open_home),
         ):
             button = QPushButton(self.style().standardIcon(icon), '', self)
@@ -90,6 +94,16 @@ class BrowserPanel(QWidget):
         self.status.setWordWrap(True)
         footer = QHBoxLayout()
         footer.addWidget(self.status, 1)
+        self.retry_button = QPushButton('重试', self)
+        self.retry_button.setAccessibleName('重新加载当前网页')
+        self.retry_button.clicked.connect(self.retry_loading)
+        self.retry_button.hide()
+        footer.addWidget(self.retry_button)
+        self.external_button = QPushButton('用系统浏览器打开', self)
+        self.external_button.setAccessibleName('用系统浏览器打开当前网页')
+        self.external_button.clicked.connect(self.open_in_system_browser)
+        self.external_button.hide()
+        footer.addWidget(self.external_button)
         self.downloads = DownloadsDialog(session, self)
         downloads_button = QPushButton('下载', self)
         downloads_button.setAccessibleName('查看浏览器下载')
@@ -190,10 +204,15 @@ class BrowserPanel(QWidget):
         page = self.session.new_page()
         self.task_leases.register(page)
         view = QWebEngineView(page, self)
+        timer = QTimer(view)
+        timer.setSingleShot(True)
+        timer.setInterval(self.LOAD_TIMEOUT_MS)
+        timer.timeout.connect(lambda: self.loading_timed_out(view))
+        self.load_timers[view] = timer
         vault = CredentialVault(self.session.preferences, self.session.owner, environment=self.session.environment)
         self.login_captures[view] = LoginCapture(self.session, page, vault)
         index = self.tabs.addTab(view, '新标签页')
-        page.blocked.connect(lambda message: self.notice(view, message))
+        page.blocked.connect(lambda message: self.security_blocked(view, message))
         page.newWindowRequested.connect(lambda request: self.open_popup(view, request))
         view.urlChanged.connect(lambda _url: self.url_changed(view))
         view.titleChanged.connect(lambda title: self.update_title(view, title))
@@ -233,18 +252,95 @@ class BrowserPanel(QWidget):
             self.tabs.setTabText(index, (title or '新标签页')[:24])
 
     def loading(self, view, ok):
-        view.setProperty('loadStatus', '正在加载网页…' if ok is None else
-                         ('加载完成' if ok else '网页加载失败或已被安全策略阻止。'))
+        timer = self.load_timers.get(view)
+        if ok is None:
+            view.setProperty('isLoading', True)
+            view.setProperty('stoppedByUser', False)
+            if view.property('noticeKind') in {'load', 'security', 'stopped', 'timeout'}:
+                view.setProperty('notice', None)
+                view.setProperty('noticeKind', None)
+            view.setProperty('loadStatus', '正在加载网页…')
+            view.setProperty('showRecovery', False)
+            if timer is not None:
+                timer.start()
+        else:
+            view.setProperty('isLoading', False)
+            if timer is not None:
+                timer.stop()
+            if view.property('noticeKind') == 'timeout':
+                view.setProperty('notice', None)
+                view.setProperty('noticeKind', None)
+            if view.property('stoppedByUser'):
+                view.setProperty('loadStatus', '已停止加载。')
+            elif ok:
+                view.setProperty('loadStatus', '加载完成')
+                view.setProperty('showRecovery', False)
+            else:
+                view.setProperty('loadStatus', '网页加载失败，请检查网络后重试。')
+                view.setProperty('showRecovery', True)
         if view is self.current_view():
             self.show_status(view)
 
-    def notice(self, view, message):
+    def notice(self, view, message, *, kind=None):
         view.setProperty('notice', message)
+        view.setProperty('noticeKind', kind)
         if view is self.current_view():
             self.show_status(view)
+
+    def security_blocked(self, view, message):
+        view.setProperty('showRecovery', False)
+        self.notice(view, message, kind='security')
+
+    def stop_loading(self):
+        view = self.current_view()
+        if view is None:
+            return
+        timer = self.load_timers.get(view)
+        if timer is not None:
+            timer.stop()
+        view.setProperty('isLoading', False)
+        view.setProperty('stoppedByUser', True)
+        view.setProperty('showRecovery', True)
+        self.notice(view, '已停止加载。', kind='stopped')
+        view.stop()
+
+    def loading_timed_out(self, view):
+        if not view.property('isLoading'):
+            return
+        view.setProperty('showRecovery', True)
+        self.notice(
+            view,
+            '网站长时间未完成加载，可能与内置浏览器不兼容。可重试或用系统浏览器打开。',
+            kind='timeout',
+        )
+
+    def retry_loading(self):
+        view = self.current_view()
+        if view is None:
+            return
+        view.setProperty('notice', None)
+        view.setProperty('noticeKind', None)
+        view.setProperty('showRecovery', False)
+        self.show_status(view)
+        view.reload()
+
+    def open_in_system_browser(self):
+        view = self.current_view()
+        if view is None:
+            return
+        try:
+            url = navigation_url(view.url().toString())
+        except ValueError:
+            self.notice(view, '当前网址无法交给系统浏览器。', kind='load')
+            return
+        if not QDesktopServices.openUrl(url):
+            self.notice(view, '系统浏览器打开失败。', kind='load')
 
     def show_status(self, view):
         self.status.setText(view.property('notice') or view.property('loadStatus') or '新标签页')
+        show_recovery = bool(view.property('showRecovery'))
+        self.retry_button.setVisible(show_recovery)
+        self.external_button.setVisible(show_recovery)
 
     def remember_address(self, text):
         view = self.current_view()
@@ -270,6 +366,7 @@ class BrowserPanel(QWidget):
             return
         self.current_view().setProperty('addressDraft', None)
         self.current_view().setProperty('notice', None)
+        self.current_view().setProperty('noticeKind', None)
         self.current_view().setUrl(url)
 
     def close_tab(self, index):
@@ -281,6 +378,9 @@ class BrowserPanel(QWidget):
         page = view.page()
         self.task_leases.unregister(page)
         capture = self.login_captures.pop(view, None)
+        timer = self.load_timers.pop(view, None)
+        if timer is not None:
+            timer.stop()
         if capture is not None:
             capture.close()
         self.tabs.removeTab(index)
@@ -300,6 +400,9 @@ class BrowserPanel(QWidget):
         for capture in self.login_captures.values():
             capture.close()
         self.login_captures.clear()
+        for timer in self.load_timers.values():
+            timer.stop()
+        self.load_timers.clear()
         if self.credentials_dialog is not None:
             self.credentials_dialog.shutdown()
         self.downloads.shutdown()
