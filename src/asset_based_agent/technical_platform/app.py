@@ -6,6 +6,7 @@ import argparse
 import html
 import json
 import os
+import shutil
 import sqlite3
 import sys
 import threading
@@ -58,6 +59,28 @@ from .task_spec import build_task_spec
 SERVER_URL = "https://zq-report-review.zeabur.app/api/v1"
 
 
+def installation_root() -> Path:
+    if os.environ.get('ZQ_INSTALLATION_ROOT'):
+        return Path(os.environ['ZQ_INSTALLATION_ROOT']).resolve()
+    if getattr(sys, 'frozen', False):
+        return Path(sys.executable).parent.resolve()
+    # Developer/test runs are not an installed product and must not dirty the repo.
+    return (Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation))
+            / 'ZQPlatform-development').resolve()
+
+
+def platform_settings_root() -> Path:
+    root = installation_root() / 'data' / 'settings'
+    root.mkdir(parents=True, exist_ok=True)
+    legacy = (Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation))
+              / 'ZQPlatform')
+    for name in ('client-instance.json', 'storage-locations.sqlite', 'project-locations.sqlite'):
+        source, target = legacy / name, root / name
+        if not target.exists() and source.is_file():
+            shutil.copy2(source, target)
+    return root
+
+
 def authenticate(parent=None):
     """Login before workspace construction; users never configure an API endpoint."""
     from ..report_review_app.services.remote_auth_service import (
@@ -68,7 +91,7 @@ def authenticate(parent=None):
     from .login import PlatformLogin
     from .session import PlatformSession
 
-    state_dir = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)) / "ZQPlatform"
+    state_dir = platform_settings_root()
     client = RemoteSessionClient(
         SERVER_URL,
         client_instance_id=load_or_create_client_instance_id(state_dir / "client-instance.json"),
@@ -133,6 +156,7 @@ class PlatformWindow(QMainWindow):
         configure_fonts()
         self.store = store
         self.storage_preferences = storage_preferences
+        self._permission_mode_memory = 'risk'
         self.browser_panel = None
         self.client, self.models = client, models or []
         self.registry = SkillRegistry()
@@ -173,6 +197,62 @@ class PlatformWindow(QMainWindow):
         button.clicked.connect(callback)
         layout.addWidget(button)
         return button
+
+    def agent_permission_mode(self) -> str:
+        if self.storage_preferences is None:
+            return self._permission_mode_memory
+        try:
+            return self.storage_preferences.permission_mode(self.store.owner)
+        except (ValueError, OSError, sqlite3.Error):
+            return 'risk'
+
+    def refresh_permission_menu(self) -> None:
+        from .agent_permission_modes import permission_mode_options
+
+        mode = self.agent_permission_mode()
+        selected = next(item for item in permission_mode_options() if item.id == mode)
+        self.permission_button.setText(selected.title)
+        self.permission_button.setToolTip(selected.description)
+        menu = self.permission_button.menu()
+        menu.clear()
+        for item in permission_mode_options():
+            action = menu.addAction(f'{item.title}  —  {item.description}')
+            action.setCheckable(True)
+            action.setChecked(item.id == mode)
+            action.triggered.connect(
+                lambda _checked=False, value=item.id: self.set_agent_permission_mode(value)
+            )
+
+    def set_agent_permission_mode(self, mode: str) -> None:
+        from .agent_permission_modes import validate_permission_mode
+
+        mode = validate_permission_mode(mode)
+        if self.storage_preferences is None:
+            self._permission_mode_memory = mode
+        else:
+            try:
+                self.storage_preferences.set_permission_mode(self.store.owner, mode)
+            except (ValueError, OSError, sqlite3.Error):
+                self.status.setText('权限模式保存失败，已保留原设置。')
+                return
+        stopped = self.task_manager.cancel_all()
+        revoked = (self.browser_panel.task_leases.revoke_all()
+                   if self.browser_panel is not None else 0)
+        self.refresh_permission_menu()
+        suffix = (f'；已停止 {stopped} 个任务并撤销 {revoked} 个浏览器接管'
+                  if stopped or revoked else '')
+        self.status.setText(f'已切换为“{self.permission_button.text()}”{suffix}。')
+
+    def agent_operation_allowed(self, operation: str, title: str, text: str) -> bool:
+        from .agent_permission_modes import requires_confirmation
+
+        if not requires_confirmation(self.agent_permission_mode(), operation):
+            return True
+        return QMessageBox.question(
+            self, title, text,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) == QMessageBox.StandardButton.Yes
 
     def _build(self):
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -215,17 +295,15 @@ class PlatformWindow(QMainWindow):
         from .project_tree import ProjectTree
         self.project_tree = ProjectTree(self)
         self.project_tree.currentItemChanged.connect(self.choose_tree_item)
+        self.project_tree.itemClicked.connect(self.project_tree_action)
         self.project_tree.customContextMenuRequested.connect(self.tree_menu)
         left.addWidget(self.project_tree, 3)
         self.button("恢复已归档会话", self.restore_session, left).setObjectName("mutedButton")
-        self.button("归档项目", self.archive, left).setObjectName("mutedButton")
         self.button("恢复已归档项目", self.restore_project, left).setObjectName(
             "mutedButton"
         )
         self.button("认领旧共享项目", self.claim_legacy_project, left).setObjectName("mutedButton")
-        self.button("外部 Skill 管理", self.manage_skills, left).setObjectName("mutedButton")
-        if self.storage_preferences is not None:
-            self.button('平台数据目录', self.configure_storage, left).setObjectName('mutedButton')
+        self.button("能力与 Skill", self.manage_skills, left).setObjectName("mutedButton")
         left.addSpacing(12)
         account = QLabel(
             "●  本地预览 <span style='color:#a5a7ae'> / 只读模式</span>"
@@ -288,6 +366,11 @@ class PlatformWindow(QMainWindow):
             self.model_combo.addItem(model["display_name"], model["model_id"])
         self.model_combo.setVisible(self.client is not None)
         actions.addWidget(self.model_combo)
+        self.permission_button = QPushButton(self)
+        self.permission_button.setAccessibleName('选择 Agent 权限模式')
+        self.permission_button.setMenu(QMenu(self.permission_button))
+        actions.addWidget(self.permission_button)
+        self.refresh_permission_menu()
         self.stop = self.button("停止", self.cancel_run, actions)
         self.stop.setEnabled(False)
         self.send = self.button("执行 ↑", self.submit, actions)
@@ -422,14 +505,82 @@ class PlatformWindow(QMainWindow):
             return
         project, session = item.data(0, Qt.ItemDataRole.UserRole)
         self.project_tree.setCurrentItem(item)
-        if self.project_id != project:
-            return
         menu = QMenu(self)
-        menu.addAction('新建会话', self.new_session)
-        if session is not None and self.session_id == session:
+        if session is None:
+            menu.addAction('重命名项目', lambda: self.rename_project(project))
+            if isinstance(self.store, ProjectCatalog):
+                record = next((row for row in self.store.projects() if row['id'] == project), None)
+                pinned = bool(record and record.get('pinned'))
+                menu.addAction('取消置顶' if pinned else '置顶',
+                               lambda: self.pin_project(project, not pinned))
+            menu.addAction('归档项目', lambda: self.archive_project(project))
+            if isinstance(self.store, ProjectCatalog):
+                menu.addAction('从侧栏移除', lambda: self.remove_project(project))
+        elif self.project_id == project:
+            menu.addAction('新建会话', self.new_session)
+        if session is not None and self.project_id == project and self.session_id == session:
             menu.addAction('重命名会话', self.rename_session)
             menu.addAction('归档会话', self.archive_session)
         menu.exec(self.project_tree.viewport().mapToGlobal(position))
+
+    def project_tree_action(self, item, column):
+        project, session = item.data(0, Qt.ItemDataRole.UserRole)
+        if session is not None:
+            return
+        if column == 1:
+            self.rename_project(project)
+        elif column == 2:
+            self.tree_menu(self.project_tree.visualItemRect(item).center())
+
+    def rename_project(self, project):
+        current = next((row for row in self.store.projects() if row['id'] == project), None)
+        if current is None:
+            return
+        name, accepted = QInputDialog.getText(self, '重命名项目', '项目名称', text=current['name'])
+        if not accepted:
+            return
+        try:
+            self.store.rename_project(project, name)
+            self.reload_projects(project if self.project_id == project else self.project_id)
+        except (ValueError, PermissionError, OSError, sqlite3.Error) as exc:
+            self.status.setText(str(exc))
+
+    def pin_project(self, project, pinned):
+        try:
+            self.store.set_pinned(project, pinned)
+            self.reload_projects(self.project_id)
+        except (ValueError, PermissionError, OSError, sqlite3.Error) as exc:
+            self.status.setText(str(exc))
+
+    def archive_project(self, project):
+        if self.task_manager.active():
+            self.status.setText('仍有任务运行，暂不能归档项目。')
+            return
+        try:
+            target = self.store.project_store(project) if isinstance(self.store, ProjectCatalog) else self.store
+            target.archive(project)
+            self.reload_projects()
+        except (ValueError, PermissionError, OSError, sqlite3.Error) as exc:
+            self.status.setText(str(exc))
+
+    def remove_project(self, project):
+        if self.task_manager.active():
+            self.status.setText('仍有任务运行，暂不能移除项目。')
+            return
+        if QMessageBox.question(
+            self, '从侧栏移除项目', '仅移除本机侧栏登记，不删除项目目录、资料、会话或成果。确认继续？',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.store.remove_from_sidebar(project)
+            if self.project_id == project:
+                self.project_id = self.session_id = self.run_id = None
+            self.reload_projects()
+            self.status.setText('已从侧栏移除；可通过“打开已有项目”重新登记，项目文件未删除。')
+        except (ValueError, PermissionError, OSError, sqlite3.Error) as exc:
+            self.status.setText(str(exc))
 
     def new_project(self):
         name, ok = QInputDialog.getText(self, "新建项目", "项目名称")
@@ -729,9 +880,6 @@ class PlatformWindow(QMainWindow):
                     ' <span style="font-size:10px;color:#a0a6b1"> / ASSISTANT</span></p>'
                     f'<p style="font-size:14px;line-height:170%;margin-bottom:28px">{text}</p>'
                 )
-            if message['role'] in {'user', 'assistant'}:
-                content.append(f'<p><a href="zq-branch:{self.session_id}/{message["id"]}">'
-                               '从此消息创建分支…</a></p>')
         if self.session_id:
             for run in self.store.runs(self.session_id):
                 result = json.loads(run['result'] or '{}')
@@ -1013,7 +1161,7 @@ class PlatformWindow(QMainWindow):
         if not self.project_id or not self.attach.isEnabled():
             return
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "添加项目资料", "", "资料 (*.docx *.xlsx *.xlsm *.pdf)"
+            self, "添加项目资料", "", "资料 (*.docx *.xlsx *.xlsm *.pdf *.json *.zip)"
         )
         self.import_files(paths)
 
@@ -1050,7 +1198,7 @@ class PlatformWindow(QMainWindow):
                 if path.is_dir():
                     errors.append(f"{path.name}：不支持文件夹")
                     continue
-                if path.suffix.lower() not in {".docx", ".xlsx", ".xlsm", ".pdf"}:
+                if path.suffix.lower() not in {".docx", ".xlsx", ".xlsm", ".pdf", ".json", ".zip"}:
                     errors.append(f"{path.name}：不支持的文件类型")
                     continue
                 hashed = digest(path)
@@ -1081,6 +1229,10 @@ class PlatformWindow(QMainWindow):
         prompt = self.composer.toPlainText().strip()
         if not prompt:
             return
+        if self.try_local_skill_install(prompt):
+            return
+        if self.try_local_builtin(prompt):
+            return
         if (self.client is None or self.network_state != 'connected') and not self.connect_service():
             return
         if not self.session_id:
@@ -1089,6 +1241,12 @@ class PlatformWindow(QMainWindow):
         model_id = self.model_combo.currentData()
         if not model_id:
             self.status.setText('请先连接模型服务；自动判断任务需要联网验证。')
+            return
+        if not self.agent_operation_allowed(
+            'network', '确认 Agent 联网',
+            '允许 Agent 将本轮要求及选中文件的受控摘要发送给已连接的模型服务，用于理解任务并选择 Skill？',
+        ):
+            self.status.setText('已取消联网理解，未发送本轮内容。')
             return
         from .agent_controller import AgentController
         from .routing import UnderstandingWorker
@@ -1120,6 +1278,63 @@ class PlatformWindow(QMainWindow):
         self.set_busy(True)
         self.status.setText('Agent 正在理解本轮要求并选择执行能力…')
         worker.start()
+
+    def try_local_builtin(self, prompt: str) -> bool:
+        """Route new local-only built-ins without requiring a cloud schema change."""
+        from .skills import FINANCIAL_BRIEF, WORKFLOW_TO_SKILL
+
+        normalized = ''.join(prompt.casefold().split())
+        financial = any(token in normalized for token in
+                        ('财务简报', '财务状况简表', 'financialbrief'))
+        workflow = (('skill' in normalized or '技能' in normalized)
+                    and '工作流' in normalized
+                    and any(token in normalized for token in ('创建', '制作', '生成', '更新', '校验')))
+        if not financial and not workflow:
+            return False
+        spec = FINANCIAL_BRIEF if financial else WORKFLOW_TO_SKILL
+        self.execute_plan(prompt, self.registry.get(spec.id))
+        return True
+
+    def try_local_skill_install(self, prompt: str) -> bool:
+        """Handle an explicit current-turn data-only Skill install without a model call."""
+        normalized = ''.join(prompt.casefold().split())
+        if not (('skill' in normalized or '技能' in normalized)
+                and any(word in normalized for word in ('安装', 'install', '加入平台', '注册'))):
+            return False
+        selected = self.selected_file_ids()
+        files = [item for item in self.store.files(self.project_id) if item['id'] in selected]
+        packages = [item for item in files if Path(item['name']).suffix.lower() == '.zip']
+        if len(packages) != 1 or len(files) != 1:
+            self.status.setText('安装 Skill 需要本轮只选择一个 ZIP 包；历史附件不会自动采用。')
+            return True
+        from .skill_installation import SkillInstallation
+        from .skill_manager import SkillManagerDialog
+        from .skill_package import inspect_package
+        try:
+            package = inspect_package(Path(packages[0]['path']))
+            summary = SkillManagerDialog.describe(package)
+            if not self.agent_operation_allowed(
+                'install_skill', '确认安装并启用 Skill',
+                summary + '\n\n确认安装、注册并启用此版本？',
+            ):
+                self.status.setText('已取消安装；没有写入 Skill 注册表。')
+                return True
+            manager = SkillInstallation(self.store)
+            manager.install(Path(packages[0]['path']), confirmed=True,
+                            expected_sha256=package.sha256)
+            manager.activate(package.manifest['id'], package.manifest['version'], confirmed=True)
+            self.store.append(self.session_id, 'user', prompt)
+            self.store.append(self.session_id, 'assistant',
+                              f"已安装并启用 {package.manifest['name']} {package.manifest['version']}。"
+                              '后续由 Agent 根据自然语言自动选择；未执行包内脚本，也未授予修改原件权限。')
+            self._scope_submitted = True
+            self.composer.clear()
+            self.refresh_details(selected_ids=set())
+            self.render_messages()
+            self.status.setText('Skill 已完成完整性检查、安装、注册和启用。')
+        except (ValueError, PermissionError, OSError) as exc:
+            self.status.setText(str(exc))
+        return True
 
     def routing_finished(self, worker, destination):
         if not self.release_worker(worker, destination):
@@ -1181,6 +1396,20 @@ class PlatformWindow(QMainWindow):
         self.execute_plan(prompt, spec, package=package, selected_files=files, record_user=False)
 
     def confirm_compound_plan(self, snapshot):
+        from .agent_permission_modes import (
+            requires_browser_confirmation,
+            requires_confirmation,
+        )
+
+        mode = self.agent_permission_mode()
+        if snapshot.get('mode') == 'browser_task':
+            actions = snapshot.get('browser_scope', {}).get('actions', [])
+            if not any(requires_browser_confirmation(mode, action) for action in actions):
+                return True
+        elif not requires_confirmation(
+            mode, 'network' if snapshot.get('permissions', {}).get('call_model') else 'generate_file'
+        ):
+            return True
         from .plan_confirmation import PlanConfirmationDialog
         return PlanConfirmationDialog(snapshot, self.store.path.parent, self).exec() == QDialog.DialogCode.Accepted
 
@@ -1204,6 +1433,7 @@ class PlatformWindow(QMainWindow):
             snapshot = build_compound_task_spec(task_store, pending.session_id,
                 {'request': pending.request.model_dump(), 'understanding': understanding.model_dump()},
                 proposal, list(pending.files), revision=pending.revision).to_snapshot()
+            snapshot['permission_mode'] = self.agent_permission_mode()
             if not self.confirm_compound_plan(snapshot):
                 self.status.setText('已取消计划，未启动业务步骤。')
                 return
@@ -1263,7 +1493,8 @@ class PlatformWindow(QMainWindow):
         if spec in GENERATORS:
             from .generation import locked_template
             try:
-                locked_template(spec.id)
+                if spec.id != 'office-workflow-to-skill':
+                    locked_template(spec.id)
             except (ValueError, OSError, PermissionError) as exc:
                 self.composer.setPlainText(prompt)
                 self.status.setText(str(exc))
@@ -1312,6 +1543,7 @@ class PlatformWindow(QMainWindow):
                 instructions=provider.skill_instructions if provider else "",
                 input_roles=generation_roles, generation_confirmed=generation_confirmed,
             ).to_snapshot()
+            snapshot['permission_mode'] = self.agent_permission_mode()
             if package:
                 snapshot['external_skill'] = {'id': package.manifest['id'], 'version': package.manifest['version'], 'sha256': package.sha256}
         except (ValueError, PermissionError) as exc:
@@ -1320,6 +1552,15 @@ class PlatformWindow(QMainWindow):
             self.render_messages()
             return
         from .permissions import PermissionService
+
+        operation = 'network' if provider else ('generate_file' if spec in GENERATORS else None)
+        if operation is not None and not self.agent_operation_allowed(
+            operation, '确认 Agent 执行',
+            f'确认允许 Agent 按本轮选中的 {len(files)} 个文件和用户要求执行？',
+        ):
+            self.composer.setPlainText(prompt)
+            self.status.setText('已取消执行，未启动任务。')
+            return
 
         # Reached only after explicit review scope / generation consent above;
         # read-only preflight is authorized by the user's execution request.
@@ -1669,16 +1910,9 @@ class PlatformWindow(QMainWindow):
             self.status.setText('当前启动模式未配置平台数据目录管理。')
             return None
         try:
-            layout = self.storage_preferences.load(self.store.owner)
-            if layout is None:
-                directory = QFileDialog.getExistingDirectory(
-                    self, '选择非系统盘平台数据目录（缓存、浏览器及更新包；项目资料仍在项目目录）')
-                if not directory:
-                    return None
-                layout = self.storage_preferences.select(self.store.owner, Path(directory))
-            return layout
+            return self.storage_preferences.ensure_default(self.store.owner)
         except (ValueError, OSError, sqlite3.Error):
-            self.status.setText('平台数据目录不可用或位置不合规，请恢复原目录；不会回落系统盘或创建替代目录。')
+            self.status.setText('安装目录下的平台数据目录不可用或不可写；不会改用其他目录。')
             return None
 
     def toggle_browser(self):
@@ -1759,6 +1993,7 @@ class PlatformWindow(QMainWindow):
         if previous_client is not None and previous_client is not client:
             previous_client.http_client.close()
         self.models = payload["models"]
+        self.refresh_permission_menu()
         self.model_combo.clear()
         for model in self.models:
             self.model_combo.addItem(model["display_name"], model["model_id"])
@@ -1832,14 +2067,11 @@ class PlatformWindow(QMainWindow):
         except (OSError, ValueError, sqlite3.Error) as exc:
             self.status.setText(str(exc))
             return
-        if QMessageBox.question(
-            self,
-            '安装客户端更新',
+        if not self.agent_operation_allowed(
+            'software_update', '安装客户端更新',
             f"确认下载并安装客户端 {self.available_update['version']}？\n"
             '程序将在完成验签、备份和候选健康检查后关闭；业务原件不会修改。',
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        ) != QMessageBox.StandardButton.Yes:
+        ):
             return
         from ..report_review_app.workers.function_worker import FunctionWorker
         from .client_update import stage_update_request
@@ -2041,8 +2273,8 @@ def main():
         return 0
     client, payload = result
     from .storage_preferences import StoragePreferences
-    settings = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)) / "ZQPlatform"
-    program_root = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).resolve().parents[3]
+    settings = platform_settings_root()
+    program_root = installation_root()
     storage_preferences = StoragePreferences(settings / 'storage-locations.sqlite', program_root)
     if args.data_dir is None:
         store = ProjectCatalog(settings / "project-locations.sqlite", payload["owner"])

@@ -1,4 +1,3 @@
-import json
 import os
 
 import pytest
@@ -9,12 +8,10 @@ from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import QApplication
 
 from asset_based_agent.technical_platform.app import PlatformWindow
-from asset_based_agent.technical_platform.session_service import SessionService
 from asset_based_agent.technical_platform.store import PlatformStore
 
 
-def test_message_branch_link_creates_isolated_child(tmp_path, monkeypatch):
-    from asset_based_agent.technical_platform import app as ui
+def test_message_branch_link_is_not_rendered(tmp_path, monkeypatch):
     qt = QApplication.instance() or QApplication([])
     store = PlatformStore(tmp_path / 'state.sqlite', 'alice')
     project = store.create_project('p')
@@ -26,21 +23,9 @@ def test_message_branch_link_creates_isolated_child(tmp_path, monkeypatch):
         window.reload_projects(project)
         window.composer.setPlainText('private draft')
         link = f"zq-branch:{parent}/{message['id']}"
-        assert link in window.transcript.toHtml()
-        monkeypatch.setattr(ui.QInputDialog, 'getText', lambda *args, **kwargs: ('child', True))
-        window.handle_report_link(QUrl(link))
-        child = window.session_id
-        assert child != parent
-        assert window.composer.toPlainText() == ''
-        assert window.selected_file_ids() == set()
-        row = next(r for r in SessionService(store).list(project) if r['id'] == child)
-        assert row['parent_session'] == parent and row['fork_message'] == message['id']
-        assert json.loads(row['context_snapshot'])['source_message']['id'] == message['id']
-        assert store.runs(child) == []
-        assert '分支来源' in window.transcript.toPlainText()
-        window.handle_report_link(QUrl(f'zq-parent:{child}'))
+        assert link not in window.transcript.toHtml()
+        assert '从此消息创建分支' not in window.transcript.toPlainText()
         assert window.session_id == parent
-        assert window.composer.toPlainText() == 'private draft'
     finally:
         qt.processEvents()
         window.close()
