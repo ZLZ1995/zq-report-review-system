@@ -7,10 +7,15 @@ name stable also lets legacy launchers continue to identify one main EXE.
 """
 
 import os
+from collections.abc import MutableMapping
 from pathlib import Path
 
 
-def configure_webengine_helper(application_root: Path) -> Path:
+def configure_webengine_helper(
+    application_root: Path,
+    *,
+    environment: MutableMapping[str, str] | None = None,
+) -> Path:
     root = application_root.resolve()
     if root != application_root or not root.is_dir():
         raise ValueError('Invalid application root')
@@ -26,5 +31,6 @@ def configure_webengine_helper(application_root: Path) -> Path:
         if helper.exists() or pending.exists():
             raise ValueError('WebEngine helper state is ambiguous')
         raise FileNotFoundError('WebEngine helper is missing')
-    os.environ['QTWEBENGINEPROCESS_PATH'] = str(selected)
+    selected_environment = os.environ if environment is None else environment
+    selected_environment['QTWEBENGINEPROCESS_PATH'] = str(selected)
     return selected
