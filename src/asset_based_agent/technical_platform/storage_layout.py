@@ -5,8 +5,6 @@ from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 
-from .project_catalog import validate_business_directory
-
 
 @dataclass(frozen=True)
 class StorageLayout:
@@ -18,17 +16,19 @@ class StorageLayout:
         if not self.owner.strip():
             raise ValueError('Storage owner is required')
         program = self.program_root.resolve()
-        data = validate_business_directory(self.data_root)
+        data = self.data_root.resolve()
         if not program.is_dir():
             raise OSError('Program directory is unavailable')
-        if data.is_relative_to(program) or program.is_relative_to(data):
-            raise ValueError('Program and business data directories must be disjoint')
+        if not data.is_dir():
+            raise OSError('Platform data directory is unavailable')
         object.__setattr__(self, 'program_root', program)
         object.__setattr__(self, 'data_root', data)
 
     def _path(self, name: str) -> Path:
         # Recheck each access: a missing removable disk must not be recreated.
-        root = validate_business_directory(self.data_root)
+        root = self.data_root.resolve()
+        if not root.is_dir():
+            raise OSError('Platform data directory is unavailable')
         if root != self.data_root:
             raise ValueError('Data root changed through a link')
         account = sha256(self.owner.encode('utf-8')).hexdigest()

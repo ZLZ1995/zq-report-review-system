@@ -36,30 +36,27 @@ def test_layout_separates_accounts_and_is_stable_across_program_versions(tmp_pat
     assert first.cache.is_dir() and first.downloads.is_dir()
 
 
-def test_layout_rejects_business_data_inside_program_directory(tmp_path):
+def test_layout_allows_platform_data_inside_program_directory(tmp_path):
     from asset_based_agent.technical_platform.storage_layout import StorageLayout
     program, _ = roots(tmp_path)
     nested = program / 'data'
     nested.mkdir()
-    with pytest.raises(ValueError):
-        StorageLayout(program, nested, 'alice')
+    assert StorageLayout(program, nested, 'alice').data_root == nested.resolve()
 
 
-def test_layout_rejects_program_directory_inside_business_root(tmp_path):
+def test_layout_allows_program_directory_inside_platform_root(tmp_path):
     from asset_based_agent.technical_platform.storage_layout import StorageLayout
     _, data = roots(tmp_path)
     nested = data / 'program'
     nested.mkdir()
-    with pytest.raises(ValueError):
-        StorageLayout(nested, data, 'alice')
+    assert StorageLayout(nested, data, 'alice').program_root == nested.resolve()
 
 
-def test_layout_rejects_system_drive(tmp_path, monkeypatch):
+def test_layout_allows_system_drive_for_platform_state(tmp_path, monkeypatch):
     from asset_based_agent.technical_platform.storage_layout import StorageLayout
     program, data = roots(tmp_path)
     monkeypatch.setenv('SystemDrive', data.drive)
-    with pytest.raises(ValueError):
-        StorageLayout(program, data, 'alice')
+    assert StorageLayout(program, data, 'alice').data_root == data.resolve()
 
 
 def test_layout_rejects_empty_account(tmp_path):

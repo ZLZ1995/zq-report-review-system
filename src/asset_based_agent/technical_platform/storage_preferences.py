@@ -13,11 +13,49 @@ class StoragePreferences:
         index_path.parent.mkdir(parents=True, exist_ok=True)
         with closing(sqlite3.connect(index_path)) as db, db:
             db.execute('CREATE TABLE IF NOT EXISTS storage_roots(owner TEXT PRIMARY KEY, root TEXT NOT NULL)')
+            db.execute('CREATE TABLE IF NOT EXISTS account_settings('
+                       'owner TEXT NOT NULL, name TEXT NOT NULL, value TEXT NOT NULL, '
+                       'PRIMARY KEY(owner,name))')
+
+    def permission_mode(self, owner: str) -> str:
+        from .agent_permission_modes import validate_permission_mode
+
+        with closing(sqlite3.connect(self.index_path.resolve().as_uri() + '?mode=rw', uri=True)) as db:
+            row = db.execute("SELECT value FROM account_settings WHERE owner=? AND name='permission_mode'",
+                             (owner,)).fetchone()
+        return validate_permission_mode(row[0]) if row else 'risk'
+
+    def set_permission_mode(self, owner: str, mode: str) -> None:
+        from .agent_permission_modes import validate_permission_mode
+
+        mode = validate_permission_mode(mode)
+        with closing(sqlite3.connect(self.index_path.resolve().as_uri() + '?mode=rw', uri=True)) as db, db:
+            db.execute("INSERT INTO account_settings(owner,name,value) VALUES(?,'permission_mode',?) "
+                       'ON CONFLICT(owner,name) DO UPDATE SET value=excluded.value', (owner, mode))
 
     def load(self, owner: str) -> StorageLayout | None:
         with closing(sqlite3.connect(self.index_path.resolve().as_uri() + '?mode=rw', uri=True)) as db:
             row = db.execute('SELECT root FROM storage_roots WHERE owner=?', (owner,)).fetchone()
         return StorageLayout(self.program_root, Path(row[0]), owner) if row else None
+
+    def ensure_default(self, owner: str) -> StorageLayout:
+        """Create the fixed installation-local platform data root once.
+
+        This directory contains browser/cache/update state only. Business
+        projects remain in the explicit non-system-drive project locations.
+        """
+        current = self.load(owner)
+        if current is not None:
+            return current
+        root = (self.program_root / 'data').resolve()
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            probe = root / '.write-test'
+            probe.write_bytes(b'zq')
+            probe.unlink()
+        except OSError as exc:
+            raise OSError('软件安装目录不可写，无法建立平台数据目录。') from exc
+        return self.select(owner, root)
 
     @contextmanager
     def use(self, owner: str):
