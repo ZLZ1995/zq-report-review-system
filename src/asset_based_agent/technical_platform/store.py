@@ -187,6 +187,15 @@ class PlatformStore:
         with self.connect() as db:
             db.execute("UPDATE projects SET archived=1 WHERE id=?", (project_id,))
 
+    def rename_project(self, project_id: str, name: str) -> None:
+        self.project(project_id)
+        value = name.strip()
+        if not value or len(value) > 120:
+            raise ValueError('项目名称必须为1至120个字符')
+        with self.connect() as db:
+            db.execute('UPDATE projects SET name=? WHERE id=? AND owner=?',
+                       (value, project_id, self.owner))
+
     def create_session(self, project_id: str, title: str = "新会话") -> str:
         self.project(project_id)
         identity = uuid4().hex

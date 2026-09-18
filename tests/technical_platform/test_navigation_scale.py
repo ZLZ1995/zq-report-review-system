@@ -21,7 +21,7 @@ def test_large_navigation_bounds_query_work_and_keeps_all_unread_counts(tmp_path
         from asset_based_agent.technical_platform.project_catalog import ProjectCatalog
         catalog = ProjectCatalog(tmp_path / 'index.sqlite', 'alice')
         with catalog.index() as db:
-            db.executemany('INSERT INTO locations VALUES(?,?,?,?,NULL)',
+            db.executemany('INSERT INTO locations(owner,project,name,path,session) VALUES(?,?,?,?,NULL)',
                            [('alice', f'p{i}', f'Project {i}', str(store.path)) for i in range(100)])
         store = catalog
     connect = sqlite3.connect

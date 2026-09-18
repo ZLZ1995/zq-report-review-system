@@ -12,11 +12,14 @@ ROLE = Qt.ItemDataRole.UserRole
 class ProjectTree(QTreeWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setColumnCount(3)
         self.setHeaderHidden(True)
         self.setRootIsDecorated(True)
         self.setIndentation(16)
         self.setObjectName('projectTree')
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.setColumnWidth(1, 28)
+        self.setColumnWidth(2, 28)
 
     def refresh(self, store, manager, project_id, session_id, *, snapshot=None):
         roots = {self.topLevelItem(i).data(0, ROLE)[0]: self.topLevelItem(i)
@@ -28,7 +31,7 @@ class ProjectTree(QTreeWidget):
             seen.add(identity)
             node = roots.get(identity)
             if node is None:
-                node = QTreeWidgetItem(self, [project['name']])
+                node = QTreeWidgetItem(self, [project['name'], '✎', '⋯'])
                 node.setData(0, ROLE, (identity, None))
                 node.setExpanded(identity == project_id)
             try:
@@ -36,6 +39,8 @@ class ProjectTree(QTreeWidget):
                     raise ValueError('Project navigation temporarily unavailable')
                 rows = project['sessions']
                 node.setText(0, project['name'])
+                node.setText(1, '✎')
+                node.setText(2, '⋯')
                 children = {node.child(i).data(0, ROLE)[1]: node.child(i) for i in range(node.childCount())}
                 remaining = {row['id'] for row in rows}
                 for row in rows:
