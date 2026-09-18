@@ -867,3 +867,9 @@ git diff --check: 干净
 - 既有测试契约更新（透明记录）：`test_clarification_overflow_does_not_silently_drop_original_constraints` 原断言"超界必须拒绝"，与新批准的压缩特性直接冲突；已更新为更强形式的不变式——原始限制逐字保留在会话存储 + 摘要带标记可回查 + 压缩后请求合法；硬拒绝路径由新测试 monkeypatch 压缩无效场景确定性覆盖。
 - 测试：新增 `test_context_compaction_wiring.py`（8 项，先行首轮 7 failed）；专项 8 passed；邻域 120 passed；批次 227+380 passed；ruff/mypy 干净。
 - 未完成：build_manifest 接入需 UnderstandingRequest 契约扩展；冻结包未含本增强（下次构建随包）。
+
+### G11 后续构建（2026-09-19）：含压缩增强的候选包 20260919-071611
+
+- 主 EXE SHA256 `7be6547c…ca53df`（16,605,641 B）；bootstrap 哈希见该目录 ACCEPTANCE-RECORD.md。
+- context_assembly 经 PYZ-00.toc 核对入包；冒烟 PASS；冻结扫描 0 命中。
+- 本包为当前候选，取代 20260919-042141；历史候选包均未覆盖。
