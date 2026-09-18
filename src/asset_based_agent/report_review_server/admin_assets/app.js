@@ -8,6 +8,7 @@ const billingUnknown = new Set();
 let billingBusy = false;
 let releaseItems = [];
 let skillReleaseItems = [];
+let routeItems = [];
 const el = id => document.getElementById(id);
 const notice = text => { el("notice").textContent = text; };
 function clearSession() {
@@ -22,7 +23,8 @@ function clearSession() {
   el("desk").hidden = true;
   el("logout").hidden = true;
   el("login-panel").hidden = false;
-  for (const id of ["users", "stats", "model-list", "route-list", "model-choice", "release-choice", "release-list", "skill-release-choice", "skill-release-list"]) el(id).replaceChildren();
+  routeItems = [];
+  for (const id of ["users", "stats", "model-list", "route-list", "model-choice", "rate-route-choice", "release-choice", "release-list", "skill-release-choice", "skill-release-list"]) el(id).replaceChildren();
   document.querySelectorAll("form").forEach(form => form.reset());
   document.querySelectorAll(".user-choice").forEach(select => select.replaceChildren());
   invalidateConnection();
@@ -145,7 +147,10 @@ function cell(row, value) { const td = document.createElement("td"); td.textCont
 function option(select, id, name) { const opt = document.createElement("option"); opt.value = id; opt.textContent = name; select.append(opt); }
 async function refresh() {
   const data = await api("/admin/overview");
+  routeItems = data.routes;
   for (const id of ["users", "stats", "model-list", "route-list"]) el(id).replaceChildren();
+  el("rate-route-choice").replaceChildren();
+  option(el("rate-route-choice"), "", data.routes.length ? "请选择渠道" : "暂无渠道");
   document.querySelectorAll(".user-choice").forEach(s => s.replaceChildren());
   for (const user of data.users) {
     const row = document.createElement("tr");
@@ -161,6 +166,7 @@ async function refresh() {
   }
   for (const route of data.routes) {
     const p = document.createElement("p"); p.textContent = route.provider_type + " / " + route.provider_model + " · 优先级 " + route.priority + " · 密钥已配置"; el("route-list").append(p);
+    option(el("rate-route-choice"), route.route_id, route.provider_type + " / " + route.provider_model + " · 优先级 " + route.priority);
   }
 }
 function bind(id, action) {
@@ -209,6 +215,17 @@ bind("route", data => {
   const {input, output, cache_hit, cache_miss, reasoning, ...rest} = data;
   return save("/admin/channels", "POST", {...rest, discovery_token: discovery.discovery_token,
     priority: Number(rest.priority), rates: {input, output, cache_hit, cache_miss, reasoning}});
+});
+bind("route-rates", ({route_id, ...rates}) => save(
+  "/admin/channels/" + encodeURIComponent(route_id) + "/rates", "PATCH", rates,
+));
+el("rate-route-choice").addEventListener("change", event => {
+  const route = routeItems.find(item => item.route_id === event.currentTarget.value);
+  if (!route) return;
+  const form = el("route-rates");
+  for (const name of ["input", "output", "cache_hit", "cache_miss", "reasoning"]) {
+    form.elements[name].value = route.rates[name];
+  }
 });
 function updateConnectionButtons() {
   el("test-connection").disabled = testingConnection || !el("channel-url").value.trim() || !el("channel-key").value.trim();

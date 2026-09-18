@@ -1,6 +1,7 @@
 import json
 
 import pytest
+from sqlalchemy import select
 
 from .conftest import bearer, login
 
@@ -27,6 +28,50 @@ def test_discover_then_select_and_save_without_precreated_model(client, monkeypa
     assert len(overview["models"]) == 1
     assert overview["routes"][0]["provider_model"] == "deepseek-reasoner"
     assert "test-secret" not in str(overview)
+
+
+def test_admin_can_update_route_rates_without_resubmitting_api_key(client, monkeypatch):
+    from asset_based_agent.report_review_server.models import ProviderRoute
+    from asset_based_agent.report_review_server.services import model_discovery
+
+    monkeypatch.setattr(model_discovery, "fetch_models", lambda url, key: ["deepseek-chat"])
+    headers = bearer(login(client, "admin", "AdminPassword123!", instance="rate-update")["access_token"])
+    credentials = {"base_url": "https://api.deepseek.com", "api_key": "keep-this-secret"}
+    discovered = client.post("/api/v1/admin/channels/discover", headers=headers, json=credentials).json()
+    created = client.post("/api/v1/admin/channels", headers=headers, json={
+        **credentials,
+        "discovery_token": discovered["discovery_token"],
+        "provider_model": "deepseek-chat",
+        "priority": 1,
+        "rates": dict.fromkeys(["input", "output", "cache_hit", "cache_miss", "reasoning"], "0"),
+    })
+    assert created.status_code == 201
+    route_id = created.json()["route_id"]
+    with client.app.state.session_factory() as db:
+        ciphertext = db.scalar(select(ProviderRoute.api_key_ciphertext).where(ProviderRoute.route_id == route_id))
+
+    updated = client.patch(f"/api/v1/admin/channels/{route_id}/rates", headers=headers, json={
+        "input": "0", "output": "8.64", "cache_hit": "0.0432",
+        "cache_miss": "2.16", "reasoning": "0",
+    })
+    assert updated.status_code == 200
+    assert updated.json()["rates"] == {
+        "input": "0E-8", "output": "8.64000000", "cache_hit": "0.04320000",
+        "cache_miss": "2.16000000", "reasoning": "0E-8",
+    }
+    overview = client.get("/api/v1/admin/overview", headers=headers).json()
+    assert overview["routes"][0]["rates"]["output"] == "8.64000000"
+    with client.app.state.session_factory() as db:
+        route = db.get(ProviderRoute, route_id)
+        assert route.api_key_ciphertext == ciphertext
+        assert str(route.output_rate) == "8.64000000"
+
+
+def test_rate_update_requires_admin(client):
+    response = client.patch("/api/v1/admin/channels/not-a-route/rates", json={
+        "input": "0", "output": "1", "cache_hit": "0", "cache_miss": "0", "reasoning": "0",
+    })
+    assert response.status_code == 401
 
 
 def test_discovery_requires_authentication(client):

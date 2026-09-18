@@ -30,7 +30,11 @@
 <label>所属模型<select name="provider_model" id="model-choice" required disabled><option value="">请先测试连接</option></select></label>
 <details><summary>高级设置</summary><label>优先级<input name="priority" type="number" min="1" max="10000" value="1" required></label></details>
 <fieldset><legend>每百万Token单价（元，请按渠道价格确认）</legend><label>输入<input name="input" type="number" min="0" step="0.00000001" required></label><label>输出<input name="output" type="number" min="0" step="0.00000001" required></label><label>缓存命中<input name="cache_hit" type="number" min="0" step="0.00000001" required></label><label>缓存未命中<input name="cache_miss" type="number" min="0" step="0.00000001" required></label><label>推理<input name="reasoning" type="number" min="0" step="0.00000001" required></label></fieldset>
-<button id="save-channel" disabled>加密保存渠道</button></form></div></section>
+<button id="save-channel" disabled>加密保存渠道</button></form>
+<form id="route-rates"><h3>调整现有渠道单价</h3><p>仅修改计费单价，不需要也不会读取或重新录入 API Key。</p>
+<label>渠道<select name="route_id" id="rate-route-choice" required><option value="">请选择渠道</option></select></label>
+<fieldset><legend>每百万Token单价（元）</legend><label>输入<input name="input" type="number" min="0" step="0.00000001" required></label><label>输出<input name="output" type="number" min="0" step="0.00000001" required></label><label>缓存命中<input name="cache_hit" type="number" min="0" step="0.00000001" required></label><label>缓存未命中<input name="cache_miss" type="number" min="0" step="0.00000001" required></label><label>推理<input name="reasoning" type="number" min="0" step="0.00000001" required></label></fieldset>
+<button>保存计费单价</button></form></div></section>
 <section id="client-releases"><h2>客户端发布</h2><p>仅接受已由受信任发布密钥签名的 JSON 清单。清单会先创建为草稿，再由管理员明确切换为灰度或稳定；此处不上传源代码或客户文件。</p>
 <form id="client-release-create"><label>签名发布清单 JSON<textarea name="manifest" rows="10" required spellcheck="false" placeholder='粘贴 release-manifest-0.2.6.json 的完整内容'></textarea></label><button>创建发布草稿</button></form>
 <div class="release-actions"><label>已创建版本<select id="release-choice"><option value="">请先刷新发布列表</option></select></label><button id="release-canary" type="button" disabled>切换灰度</button><button id="release-stable" type="button" disabled>激活稳定</button><button id="release-withdraw" type="button" disabled>撤回版本</button></div>

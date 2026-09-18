@@ -116,6 +116,29 @@ def install_admin_web(app, get_context, get_db):
         )
         return {"route_id": route.route_id, "model_id": model.model_id}
 
+    @app.patch("/api/v1/admin/channels/{route_id}/rates")
+    def update_channel_rates(
+        route_id: str,
+        payload: TokenRatesRequest,
+        _context=admin_dependency,
+        db=database_dependency,
+    ):
+        route = app.state.model_admin_service.update_route_rates(
+            db,
+            route_id=route_id,
+            rates=payload.model_dump(),
+        )
+        return {
+            "route_id": route.route_id,
+            "rates": {
+                "input": str(route.input_rate),
+                "output": str(route.output_rate),
+                "cache_hit": str(route.cache_hit_rate),
+                "cache_miss": str(route.cache_miss_rate),
+                "reasoning": str(route.reasoning_rate),
+            },
+        }
+
     @app.get("/api/v1/admin/overview")
     def overview(response: Response, _context=admin_dependency, db=database_dependency):
         response.headers["Cache-Control"] = "no-store"
@@ -130,9 +153,18 @@ def install_admin_web(app, get_context, get_db):
             "users": users,
             "models": [ModelAdminResponse.model_validate(m).model_dump(mode="json")
                        for m in db.scalars(select(ModelDefinition))],
-            "routes": [ProviderRouteResponse(
-                route_id=r.route_id, model_id=r.model_id, provider_type=r.provider_type,
-                provider_model=r.provider_model, base_url=r.base_url,
-                priority=r.priority, enabled=r.enabled,
-            ).model_dump() for r in db.scalars(select(ProviderRoute))],
+            "routes": [{
+                **ProviderRouteResponse(
+                    route_id=r.route_id, model_id=r.model_id, provider_type=r.provider_type,
+                    provider_model=r.provider_model, base_url=r.base_url,
+                    priority=r.priority, enabled=r.enabled,
+                ).model_dump(),
+                "rates": {
+                    "input": str(r.input_rate),
+                    "output": str(r.output_rate),
+                    "cache_hit": str(r.cache_hit_rate),
+                    "cache_miss": str(r.cache_miss_rate),
+                    "reasoning": str(r.reasoning_rate),
+                },
+            } for r in db.scalars(select(ProviderRoute))],
         }

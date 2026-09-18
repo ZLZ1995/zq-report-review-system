@@ -94,6 +94,28 @@ class ModelAdminService:
         return route
 
     @staticmethod
+    def update_route_rates(
+        db: Session,
+        *,
+        route_id: str,
+        rates: dict[str, Decimal],
+    ) -> ProviderRoute:
+        route = db.get(ProviderRoute, route_id)
+        if route is None:
+            raise ServiceError("route_not_found", "渠道不存在。", 404)
+        normalized = {name: money(value) for name, value in rates.items()}
+        if any(value < 0 for value in normalized.values()):
+            raise ServiceError("invalid_rate", "Token价格不能为负数。", 422)
+        route.input_rate = normalized["input"]
+        route.output_rate = normalized["output"]
+        route.cache_hit_rate = normalized["cache_hit"]
+        route.cache_miss_rate = normalized["cache_miss"]
+        route.reasoning_rate = normalized["reasoning"]
+        db.commit()
+        db.refresh(route)
+        return route
+
+    @staticmethod
     def list_public_models(db: Session) -> list[ModelDefinition]:
         return list(
             db.scalars(

@@ -32,6 +32,8 @@ def test_admin_assets_are_independent_and_restrict_scripts(client):
     assert client.get("/admin/style.css").status_code == 200
     assert "skill-releases" in page.text
     assert "Skill 版本治理" in page.text
+    assert 'id="route-rates"' in page.text
+    assert '/admin/channels/" + encodeURIComponent(route_id) + "/rates"' in script
 
 
 def test_overview_requires_admin_and_never_exposes_password(client):
