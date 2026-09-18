@@ -70,7 +70,10 @@ def installation_root() -> Path:
 
 
 def platform_settings_root() -> Path:
-    root = installation_root() / 'data' / 'settings'
+    # 冒烟/验收可用 ZQ_SETTINGS_ROOT 把设置引出冻结目录；默认行为不变（便携安装不落 C 盘）。
+    override = os.environ.get('ZQ_SETTINGS_ROOT')
+    base = Path(override).resolve() if override else installation_root()
+    root = base / 'data' / 'settings'
     root.mkdir(parents=True, exist_ok=True)
     legacy = (Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation))
               / 'ZQPlatform')

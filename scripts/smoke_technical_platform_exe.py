@@ -38,7 +38,11 @@ def main(root: Path | None = None):
     assert info['local_schema_version'] == SCHEMA_VERSION
     assert info['protocol_version'] == 1
     assert info['webengine_import'] is True
-    process = subprocess.Popen([str(folder / "ZQ技术平台.exe")], cwd=folder)
+    launch_root = root / 'build/packaged-health-smoke/launch-data'
+    launch_root.mkdir(parents=True, exist_ok=True)
+    launch_env = dict(os.environ, ZQ_SETTINGS_ROOT=str(launch_root))
+    process = subprocess.Popen([str(folder / "ZQ技术平台.exe")], cwd=folder,
+                               env=launch_env)
     try:
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:

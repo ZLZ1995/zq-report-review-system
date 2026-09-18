@@ -851,3 +851,10 @@ git diff --check: 干净
 ```
 
 未提交、未推送、未部署、未发布、未调用真实付费模型。
+
+### G11 后续修复（2026-09-19，本地提交）
+
+- 问题：冒烟以冻结目录为 cwd 启动客户端时，首启迁移把本地设置 sqlite 写入冻结目录（用户账号缓存类禁含物）。
+- 根因与方案更正：首版尝试用 `ZQ_INSTALLATION_ROOT` 重定向，触发托管安装锁校验（installation-lock.sqlite 缺失）失败；最终方案为 `app.py` 新增 `ZQ_SETTINGS_ROOT` 环境变量（仅设置数据重定向，默认行为不变，不破坏"平台数据不默认写 C 盘"红线），冒烟脚本登录窗口启动改用它指向 `build/packaged-health-smoke/launch-data`。
+- 验证：新候选包 `D:\ZQ-Acceptance\acceptance-builds\20260919-042141\` 重建后主 EXE SHA256 `d04f7613…5a3b30`，冒烟 PASS，冒烟后冻结包扫描 0 命中，设置确认落在隔离目录；邻域回归 331 passed + 技术平台第 1 批 227 passed；ruff 通过。
+- 新候选取代 20260918-223356；两个旧包均未覆盖。
