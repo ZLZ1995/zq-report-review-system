@@ -7,9 +7,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 if __name__ == "__main__":
     if getattr(sys, 'frozen', False):
         from asset_based_agent.technical_platform.updates.runtime_files import (
-            restore_webengine_helper,
+            configure_webengine_helper,
         )
-        restore_webengine_helper(Path(sys.executable).resolve().parent)
+        configure_webengine_helper(Path(sys.executable).resolve().parent)
     if len(sys.argv) == 3 and sys.argv[1] == '--update-healthcheck':
         from asset_based_agent.technical_platform.updates.healthcheck import (
             run_healthcheck,
