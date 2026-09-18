@@ -26,6 +26,10 @@ def main() -> int:
         recover_unchanged,
     )
     from asset_based_agent.technical_platform.updates.journal import UpdateJournal
+    from asset_based_agent.technical_platform.updates.launcher import (
+        CLIENT_DIRECTORY,
+        CLIENT_EXECUTABLE,
+    )
     from asset_based_agent.technical_platform.updates.manifest import (
         UpdatePolicy,
         version_tuple,
@@ -56,7 +60,7 @@ def main() -> int:
         policy = UpdatePolicy(**{**metadata, 'allowed_hosts': frozenset(hosts)})
         version_tuple(policy.current_version)
         if args.operation == 'initialize':
-            baseline = root / 'versions' / policy.current_version / 'ZQ����ƽ̨' / 'ZQ����ƽ̨.exe'
+            baseline = root / 'versions' / policy.current_version / CLIENT_DIRECTORY / CLIENT_EXECUTABLE
             if baseline.resolve() != baseline or not baseline.is_file():
                 raise ValueError('Explicit baseline installation required')
             paths = [policy_path, root / 'update-state.sqlite', root / 'installation-lock.sqlite']

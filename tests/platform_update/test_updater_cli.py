@@ -7,9 +7,9 @@ from pathlib import Path
 def test_independent_updater_bootstrap_is_explicit_and_immutable(tmp_path):
     root = Path(__file__).resolve().parents[2]
     installation = tmp_path / 'installation'
-    baseline = installation / 'versions/0.2.6/ZQ����ƽ̨'
+    baseline = installation / 'versions/0.2.6/ZQ\u6280\u672f\u5e73\u53f0'
     baseline.mkdir(parents=True)
-    (baseline / 'ZQ����ƽ̨.exe').write_bytes(b'synthetic baseline - not executable')
+    (baseline / 'ZQ\u6280\u672f\u5e73\u53f0.exe').write_bytes(b'synthetic baseline - not executable')
     policy = tmp_path / 'policy.json'
     policy.write_text(json.dumps({'current_version': '0.2.6', 'last_sequence': 9,
                                   'platform': 'windows', 'arch': 'x86_64', 'protocol': 1,
@@ -24,4 +24,3 @@ def test_independent_updater_bootstrap_is_explicit_and_immutable(tmp_path):
     again = subprocess.run(command, capture_output=True, timeout=30, check=False)
     assert again.returncode != 0
     assert (installation / 'update-state.sqlite').read_bytes() == previous
-

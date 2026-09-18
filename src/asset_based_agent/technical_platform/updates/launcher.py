@@ -10,6 +10,19 @@ from .journal import UpdateJournal
 from .manifest import UpdatePolicy
 from .process_lock import InstallationLock
 
+CLIENT_DIRECTORY = 'ZQ\u6280\u672f\u5e73\u53f0'
+CLIENT_EXECUTABLE = CLIENT_DIRECTORY + '.exe'
+INSTALLATION_LAUNCHER = CLIENT_DIRECTORY + '\u542f\u52a8\u5668.exe'
+
+
+def _active_executable(root: Path, version: str) -> Path:
+    version_root = root / 'versions' / version
+    executable = version_root / CLIENT_DIRECTORY / CLIENT_EXECUTABLE
+    if (not executable.is_file() or executable.resolve() != executable
+            or not executable.is_relative_to(version_root)):
+        raise FileNotFoundError('Active client executable missing')
+    return executable
+
 
 def load_policy(root: Path) -> UpdatePolicy:
     with (root / 'installation-policy.json').open('rb') as source:
@@ -27,14 +40,7 @@ def launch_selected(root: Path, *, runner=subprocess.run) -> int:
     with InstallationLock(root / 'installation-lock.sqlite').runtime():
         journal = UpdateJournal(root / 'update-state.sqlite', load_policy(root))
         version = journal.launch_version()
-        version_root = root / 'versions' / version
-        executables = tuple(
-            path for path in version_root.rglob('*.exe')
-            if path.is_file() and path.resolve().is_relative_to(version_root.resolve())
-        )
-        if len(executables) != 1:
-            raise FileNotFoundError('Active client executable missing')
-        executable = executables[0]
+        executable = _active_executable(root, version)
         environment = os.environ.copy()
         environment['ZQ_INSTALLATION_ROOT'] = str(root)
         result = runner([str(executable)], cwd=executable.parent, env=environment,
@@ -55,8 +61,16 @@ def run_managed(callback) -> int:
             # Fail closed on incomplete activation, including direct EXE startup.
             version = UpdateJournal(root / 'update-state.sqlite', load_policy(root)).launch_version()
             if getattr(sys, 'frozen', False):
-                expected = root / 'versions' / version / 'ZQ����ƽ̨' / 'ZQ����ƽ̨.exe'
+                expected = _active_executable(root, version)
                 if Path(sys.executable).resolve() != expected.resolve():
-                    raise ValueError('Obsolete managed executable; use the installation launcher')
+                    launcher = root / INSTALLATION_LAUNCHER
+                    if (not launcher.is_file() or launcher.resolve() != launcher
+                            or launcher.parent != root):
+                        raise FileNotFoundError('Installation launcher missing')
+                    subprocess.Popen(
+                        [str(launcher)], cwd=root, env=os.environ.copy(), close_fds=True,
+                        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+                    )
+                    return 0
             return callback()
     return callback()  # Existing unmanaged/source launch remains compatible.
