@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -13,7 +14,14 @@ from pathlib import Path
 from ..report_review_app.services.resource_locks import CLIENT_RESOURCES
 from .generation_paths import generation_work_directory
 from .project_catalog import validate_business_directory
-from .skills import DETAIL, HISTORY, SourceValidationError, digest
+from .skills import (
+    DETAIL,
+    FINANCIAL_BRIEF,
+    HISTORY,
+    WORKFLOW_TO_SKILL,
+    SourceValidationError,
+    digest,
+)
 
 # role, user-facing label, accepted extensions, required
 INPUT_ROLES = {
@@ -22,6 +30,14 @@ INPUT_ROLES = {
                 ('balance_sheet', '原始资产负债表（含单位、期间）', ('.xlsx', '.xls'), True),
                 ('journal', '序时账（可选）', ('.xlsx', '.xls'), False),
                 ('bank_statement', '银行对账单（可选，标准表头 XLSX）', ('.xlsx',), False)],
+    FINANCIAL_BRIEF.id: [
+        ('period_one', '较早完整年度财务报表', ('.xlsx',), True),
+        ('period_two', '较近完整年度财务报表', ('.xlsx',), True),
+        ('basis_date', '评估基准日财务报表', ('.xlsx',), True),
+    ],
+    WORKFLOW_TO_SKILL.id: [
+        ('workflow_contract', '已确认的工作流契约 JSON', ('.json',), True),
+    ],
 }
 
 
@@ -35,7 +51,8 @@ def bundle_directory(skill_id):
 
 def bundle_fingerprint(skill_id):
     root = bundle_directory(skill_id)
-    locked_template(skill_id)
+    if skill_id != WORKFLOW_TO_SKILL.id:
+        locked_template(skill_id)
     if not (root / 'SKILL.md').is_file():
         raise ValueError('内置 Skill 文件缺失，请修复安装')
     result = hashlib.sha256()
@@ -56,7 +73,7 @@ def locked_template(skill_id):
     if data.get('schema_version') != 1 or data.get('skill_id') != skill_id:
         raise ValueError('模板绑定信息无效')
     path = (root / data['path']).resolve()
-    suffix = '.docx' if skill_id == HISTORY.id else '.xlsx'
+    suffix = '.docx' if skill_id in {HISTORY.id, FINANCIAL_BRIEF.id} else '.xlsx'
     if not path.is_relative_to(root / 'assets') or path.suffix.lower() != suffix:
         raise PermissionError('锁定模板必须位于内置资源目录')
     if not path.is_file() or digest(path) != data.get('sha256'):
@@ -81,6 +98,36 @@ def validate_roles(skill_id, files, roles):
         raise ValueError('每个选定文件都必须分配角色；请取消勾选本轮无关资料')
 
 
+def infer_financial_roles(files):
+    """Bind three financial workbooks by their balance-sheet header dates."""
+    from datetime import date
+
+    from openpyxl import load_workbook  # type: ignore[import-untyped]
+
+    if len(files) != 3 or any(Path(item['name']).suffix.lower() != '.xlsx' for item in files):
+        raise ValueError('财务简报需要且仅需要三个期间的 XLSX 财务报表')
+    dated = []
+    for item in files:
+        book = load_workbook(item['path'], read_only=True, data_only=True)
+        try:
+            if '资产负债表' not in book.sheetnames or '利润表' not in book.sheetnames:
+                raise ValueError(f"{item['name']} 缺少资产负债表或利润表")
+            sheet = book['资产负债表']
+            text = ' '.join(str(cell.value) for row in sheet.iter_rows(max_row=4)
+                            for cell in row if cell.value not in (None, ''))
+        finally:
+            book.close()
+        match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', text)
+        if match is None:
+            raise ValueError(f"{item['name']} 的资产负债表表头缺少完整日期")
+        dated.append((date(*map(int, match.groups())), item['id']))
+    dated.sort()
+    if len({item[0] for item in dated}) != 3:
+        raise ValueError('三份财务报表的期间不能重复')
+    return dict(zip(('period_one', 'period_two', 'basis_date'),
+                    (item[1] for item in dated)))
+
+
 def artifact_path(store, session_id, run_id, index):
     run = store.run(run_id)
     if run['session'] != session_id:
@@ -92,7 +139,7 @@ def artifact_path(store, session_id, run_id, index):
     item = items[index]
     path = Path(item['path']).resolve()
     root = (store.path.parent / 'runs' / run_id / 'output').resolve()
-    if not path.is_relative_to(root) or path.suffix.lower() not in {'.docx', '.xlsx', '.md', '.json'}:
+    if not path.is_relative_to(root) or path.suffix.lower() not in {'.docx', '.xlsx', '.pdf', '.png', '.md', '.json'}:
         raise PermissionError('成果路径超出任务范围')
     if not path.is_file() or digest(path) != item['sha256']:
         raise ValueError('成果已修改、移动或删除，请在项目目录核对')
@@ -154,13 +201,14 @@ def _execute_generation(store, run_id, snapshot, cancel, progress, *, provider=N
     sources = work / 'inputs'
     sources.mkdir()
     selected = {}
-    template = locked_template(skill_id)
-    template_digest = digest(template)
-    copied_template = sources / ('template' + template.suffix)
-    shutil.copyfile(template, copied_template)
-    if digest(copied_template) != template_digest:
-        raise ValueError('锁定模板复制校验失败')
-    selected['template'] = str(copied_template)
+    template = locked_template(skill_id) if skill_id != WORKFLOW_TO_SKILL.id else None
+    template_digest = digest(template) if template is not None else None
+    if template is not None:
+        copied_template = sources / ('template' + template.suffix)
+        shutil.copyfile(template, copied_template)
+        if digest(copied_template) != template_digest:
+            raise ValueError('锁定模板复制校验失败')
+        selected['template'] = str(copied_template)
     by_id = {f['id']: f for f in files}
     for role, identity in roles.items():
         if cancel.is_set():
@@ -207,7 +255,8 @@ def _execute_generation(store, run_id, snapshot, cancel, progress, *, provider=N
                 process.wait()
     if manage_run:
         store.transition(run_id, 'validating', '重新校验选定原件与生成状态')
-    if digest(template) != template_digest or any(digest(Path(f['path'])) != f['sha256'] for f in files):
+    if ((template is not None and digest(template) != template_digest)
+            or any(digest(Path(f['path'])) != f['sha256'] for f in files)):
         raise SourceValidationError('来源文件已变化，本轮成果不得发布')
     status_path = work / 'status.json'
     status = json.loads(status_path.read_text(encoding='utf-8')) if status_path.exists() else {}
@@ -217,9 +266,16 @@ def _execute_generation(store, run_id, snapshot, cancel, progress, *, provider=N
     if automatic:
         feedback = '资料自动识别结果：\n' + identified + '\n\n' + feedback
     artifacts = []
-    names = (['history_fragment.docx', 'history_events.json', 'history_validation.json']
-             if skill_id == HISTORY.id else ['detail_workbook.xlsx', 'completion_status.json',
-                                             'delivery_check_report.json', 'execution_scope.json'])
+    if skill_id == HISTORY.id:
+        names = ['history_fragment.docx', 'history_events.json', 'history_validation.json']
+    elif skill_id == DETAIL.id:
+        names = ['detail_workbook.xlsx', 'completion_status.json',
+                 'delivery_check_report.json', 'execution_scope.json']
+    elif skill_id == FINANCIAL_BRIEF.id:
+        names = ['financial_brief.docx', 'financial_brief.pdf', 'financial_brief.png',
+                 'extraction.json', 'timing.json']
+    else:
+        names = ['office_workflow_contract_validation.json']
     for name in ([*names, 'user_feedback.md'] if succeeded else ['user_feedback.md']):
         path = work / 'output' / name
         if path.is_file() and path.resolve().is_relative_to(work):

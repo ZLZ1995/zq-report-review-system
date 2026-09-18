@@ -20,7 +20,8 @@ ShortText = Annotated[str, Field(min_length=1, max_length=1000)]
 MessageIntent = Literal['consult', 'execute', 'clarify', 'cancel', 'unsupported']
 UnderstandingDecision = Literal['answer', 'ask', 'plan', 'browser', 'cancel', 'refuse']
 Adapter = Literal['report.review', 'review.preflight', 'valuation-detail-workbook-fill',
-                  'gongshang-change-history-docx', 'browser.task']
+                  'gongshang-change-history-docx', 'financial-brief-docx',
+                  'office-workflow-to-skill', 'browser.task']
 
 
 class Record(BaseModel):

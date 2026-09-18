@@ -79,7 +79,9 @@ def compile_proposal(request, understanding, proposal, identity, *, rules_hashes
                     raise ValueError('Unknown output producer')
                 reference = outputs[item.ref]
                 producer_skill = candidates[producers[item.ref].skill_id].adapter
-                extension = {'history.generate': '.docx', 'detail.generate': '.xlsx'}.get(
+                extension = {'history.generate': '.docx', 'detail.generate': '.xlsx',
+                             'financial-brief.generate': '.docx',
+                             'workflow-skill.validate': '.json'}.get(
                     skill_tool(producer_skill).id)
             if extension is None or extension not in contracts[skill.id].source_extensions:
                 raise ValueError('Input type is not supported by the consuming skill')

@@ -1,0 +1,11 @@
+{
+  "schema_version": 1, "id": "financial-brief-docx", "version": "0.1.0",
+  "purpose": "从两个完整年度及评估基准日财务报表生成单页财务状况简表副本",
+  "source_extensions": [".xlsx"],
+  "required_roles": ["period_one", "period_two", "basis_date"], "optional_roles": [],
+  "outputs": ["docx_brief", "pdf_preview", "png_preview", "extraction_json"],
+  "acceptance_gates": ["source_evidence", "output_validation", "original_hash_unchanged"],
+  "followups": [], "environment": ["Microsoft Word", "Poppler"],
+  "limitations": ["必须提供三个期间的财务报表", "每份工作簿必须包含资产负债表和利润表", "不修改来源文件"],
+  "requires_model": false, "creates_copy": true, "locked_template": true, "modify_originals": false
+}

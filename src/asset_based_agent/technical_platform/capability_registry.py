@@ -2,7 +2,7 @@
 import json
 
 from .skill_contracts import builtin_contracts
-from .skills import BUILTINS
+from .skills import BUILTINS, FINANCIAL_BRIEF, WORKFLOW_TO_SKILL
 
 
 def planning_candidates(*, include_browser=False):
@@ -10,6 +10,10 @@ def planning_candidates(*, include_browser=False):
     contracts = builtin_contracts()
     result = []
     for spec in BUILTINS:
+        # These adapters are routed and executed entirely by this local client.
+        # Do not send types unknown to the currently deployed server this round.
+        if spec in {FINANCIAL_BRIEF, WORKFLOW_TO_SKILL}:
+            continue
         contract = contracts[spec.id]
         if contract.locked_template:
             try:

@@ -13,7 +13,15 @@ from .file_scope import freeze_scope
 from .generation import bundle_fingerprint
 from .planner import compile_proposal
 from .release_info import local_release
-from .skills import BUILTINS, DETAIL, GENERATORS, HISTORY, REVIEW
+from .skills import (
+    BUILTINS,
+    DETAIL,
+    FINANCIAL_BRIEF,
+    GENERATORS,
+    HISTORY,
+    REVIEW,
+    WORKFLOW_TO_SKILL,
+)
 from .task_spec import TaskSpec, snapshot_identity
 
 
@@ -75,6 +83,13 @@ def _fields(store, session_id, payload, proposal, files, identity, revision):
             if len(step.inputs) != 1:
                 raise ValueError('工商生成步骤需要唯一的工商变更Excel来源')
             roles = {'source_excel': step.inputs[0]}
+        if skill == FINANCIAL_BRIEF:
+            from .generation import infer_financial_roles
+            roles = infer_financial_roles([by_id[identity] for identity in step.inputs])
+        if skill == WORKFLOW_TO_SKILL:
+            if len(step.inputs) != 1:
+                raise ValueError('办公工作流契约校验需要唯一 JSON 文件')
+            roles = {'workflow_contract': step.inputs[0]}
         if skill == DETAIL and len(step.inputs) > 20:
             raise ValueError('单步资料识别最多20个文件')
         selected_skill = selected_skills[step.step_id]

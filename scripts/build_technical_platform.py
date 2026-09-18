@@ -7,25 +7,33 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+BUILTIN_SKILL_RESOURCES = (
+    'gongshang-change-history-docx',
+    'valuation-detail-workbook-fill',
+    'financial-brief-docx',
+    'office-workflow-to-skill',
+)
 
 
 def builtin_data_arguments(build):
     """Stage only reviewed skill sources and curated templates, never user runs."""
     arguments = []
-    for skill in ('gongshang-change-history-docx', 'valuation-detail-workbook-fill'):
+    for skill in BUILTIN_SKILL_RESOURCES:
         source = ROOT / '.codex/skills' / skill
         target = build / 'release_resources' / 'builtin_skills' / skill
         for path in source.rglob('*'):
-            if path.is_file() and '__pycache__' not in path.parts and path.suffix in {'.py', '.md', '.json', '.yaml'}:
+            if (path.is_file() and '__pycache__' not in path.parts
+                    and path.suffix in {'.py', '.md', '.json', '.yaml', '.docx', '.vbs'}):
                 dest = target / path.relative_to(source)
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(path, dest)
         template_source = ROOT / 'assets/builtin_templates' / skill
-        for path in template_source.iterdir():
-            if path.is_file() and path.suffix in {'.xlsx', '.docx', '.json'}:
-                dest = target / 'assets' / path.name
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(path, dest)
+        if template_source.is_dir():
+            for path in template_source.iterdir():
+                if path.is_file() and path.suffix in {'.xlsx', '.docx', '.json'}:
+                    dest = target / 'assets' / path.name
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(path, dest)
         arguments += ['--add-data', f'{target}{os.pathsep}builtin_skills/{skill}']
     return arguments
 

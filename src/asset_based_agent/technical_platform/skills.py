@@ -60,11 +60,16 @@ DETAIL = SkillSpec('valuation-detail-workbook-fill', '0.2.0', '评估明细表�
                    frozenset({'read_selected_files', 'generate_artifacts'}))
 HISTORY = SkillSpec('gongshang-change-history-docx', '0.1.0', '工商历史沿革生成（本地）',
                     frozenset({'read_selected_files', 'generate_artifacts'}))
-BUILTINS = (PREFLIGHT, REVIEW, DETAIL, HISTORY)
-GENERATORS = (DETAIL, HISTORY)
+FINANCIAL_BRIEF = SkillSpec('financial-brief-docx', '0.1.0', '财务状况简表生成（本地）',
+                            frozenset({'read_selected_files', 'generate_artifacts'}))
+WORKFLOW_TO_SKILL = SkillSpec('office-workflow-to-skill', '0.1.0', '办公工作流转 Skill（本地）',
+                              frozenset({'read_selected_files', 'generate_artifacts'}))
+BUILTINS = (PREFLIGHT, REVIEW, DETAIL, HISTORY, FINANCIAL_BRIEF, WORKFLOW_TO_SKILL)
+GENERATORS = (DETAIL, HISTORY, FINANCIAL_BRIEF, WORKFLOW_TO_SKILL)
 
 # Native capability, not a selectable document skill or an external Skill adapter.
 BROWSER = SkillSpec('browser.task', '0.1.0', '浏览器任务', frozenset({'browser'}))
+CATALOG_CAPABILITIES = (*BUILTINS, BROWSER)
 
 
 class SourceValidationError(ValueError):

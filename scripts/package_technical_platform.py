@@ -45,7 +45,8 @@ def main(root: Path | None = None):
         raise RuntimeError('Unexpected runtime data in package')
     rules = Path('asset_based_agent/technical_platform/review_rules.txt')
     assert (folder / '_internal' / rules).read_bytes() == (root / 'src' / rules).read_bytes()
-    for skill in ('valuation-detail-workbook-fill', 'gongshang-change-history-docx'):
+    for skill in ('valuation-detail-workbook-fill', 'gongshang-change-history-docx',
+                  'financial-brief-docx'):
         bundle = folder / '_internal/builtin_skills' / skill
         lock = json.loads((bundle / 'template.lock.json').read_text(encoding='utf-8'))
         assert hashlib.sha256((bundle / lock['path']).read_bytes()).hexdigest() == lock['sha256']
