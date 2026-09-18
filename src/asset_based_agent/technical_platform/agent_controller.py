@@ -81,6 +81,12 @@ class AgentController:
                                     state['task_id'], state['revision'], request, tuple(deepcopy(files)),
                                     envelope_digest)
 
+    @staticmethod
+    def _validate_next_exchange(pending, messages):
+        UnderstandingRequest.model_validate({**pending.request.model_dump(),
+            'message_id': uuid4().hex, 'prompt': '请补充本轮要求',
+            'context': messages})
+
     def _current(self, pending):
         if pending.owner != self.store.owner:
             raise PermissionError('理解结果账号不匹配')
@@ -107,14 +113,20 @@ class AgentController:
         if result.next_action == 'ask':
             context = [m.model_dump() for m in pending.request.context] + [
                 {'id': pending.request.message_id, 'role': 'user', 'text': pending.request.prompt}]
+            question_message = {'id': uuid4().hex, 'role': 'assistant', 'text': result.reply}
             # Validate the NEXT exchange before persisting the question. Never
             # truncate a restriction or leave an unresumable oversized question.
             try:
-                UnderstandingRequest.model_validate({**pending.request.model_dump(),
-                    'message_id': uuid4().hex, 'prompt': '请补充本轮要求',
-                    'context': context + [{'id': uuid4().hex, 'role': 'assistant', 'text': result.reply}]})
-            except ValueError as exc:
-                raise ClarificationContextLimit('澄清上下文已达上限，未丢弃任何限制；请新建会话并完整描述目标、资料范围和限制。') from exc
+                self._validate_next_exchange(pending, context + [question_message])
+            except ValueError:
+                # 先压缩（摘要标记非原始证据、分支参考不动），仍超界才明确拒绝。
+                from .context_assembly import compact_clarification_context
+                compacted = compact_clarification_context(context)
+                try:
+                    self._validate_next_exchange(pending, compacted + [question_message])
+                except ValueError as exc:
+                    raise ClarificationContextLimit('澄清上下文已达上限，未丢弃任何限制；请新建会话并完整描述目标、资料范围和限制。') from exc
+                context = compacted
             self.state.ask(pending.session_id, pending.revision, result.reply, context=context)
         else:
             # Close this understanding revision, not a running business task.

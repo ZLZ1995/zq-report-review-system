@@ -144,11 +144,15 @@ def test_clarification_overflow_does_not_silently_drop_original_constraints(tmp_
     session = store.create_session(store.create_project('one'))
     controller = AgentController(store)
     pending = controller.prepare(session, '禁止处理旧文件', model_id='m', selected_ids=[])
-    for _ in range(5):
+    for _ in range(8):
         controller.complete(pending, response(pending.request, ask=True))
         pending = controller.prepare(session, '继续澄清', model_id='m', selected_ids=[])
-    assert pending.request.context[0].text == '禁止处理旧文件'
-    before = controller.state.read(session)
-    with pytest.raises(ValueError, match='context|上下文'):
-        controller.complete(pending, response(pending.request, ask=True))
-    assert controller.state.read(session) == before
+    # 新契约（压缩接线后）：超界先压缩而非立即拒绝，但原始限制绝不静默丢失——
+    # 它必须逐字存在于会话存储，且在压缩摘要中以可回查形式保留。
+    assert store.messages(session)[0]['text'] == '禁止处理旧文件'
+    texts = [m.text for m in pending.request.context]
+    assert any('禁止处理旧文件' in text for text in texts)
+    summary = next((m for m in pending.request.context
+                    if m.id.startswith('sum-')), None)
+    assert summary is not None
+    assert '非原始证据' in summary.text

@@ -858,3 +858,12 @@ git diff --check: 干净
 - 根因与方案更正：首版尝试用 `ZQ_INSTALLATION_ROOT` 重定向，触发托管安装锁校验（installation-lock.sqlite 缺失）失败；最终方案为 `app.py` 新增 `ZQ_SETTINGS_ROOT` 环境变量（仅设置数据重定向，默认行为不变，不破坏"平台数据不默认写 C 盘"红线），冒烟脚本登录窗口启动改用它指向 `build/packaged-health-smoke/launch-data`。
 - 验证：新候选包 `D:\ZQ-Acceptance\acceptance-builds\20260919-042141\` 重建后主 EXE SHA256 `d04f7613…5a3b30`，冒烟 PASS，冒烟后冻结包扫描 0 命中，设置确认落在隔离目录；邻域回归 331 passed + 技术平台第 1 批 227 passed；ruff 通过。
 - 新候选取代 20260918-223356；两个旧包均未覆盖。
+
+### G11 后续增强（2026-09-19，本地提交）：澄清上下文压缩接入主路径
+
+- 目标：把 G03 已验证的 conversation_compactor 接入 agent_controller 主执行路径，带预算压缩替代全量历史。
+- 现状核验发现：UnderstandingRequest.context 已有硬边界（≤10 条、整包 ≤64KB、MessageRef extra=forbid 无 summary 字段）；主路径唯一无界增长点是多轮澄清的存储上下文；build_manifest 因 UnderstandingRequest 契约无 manifest 字段，本次不接（需契约扩展，留后续）。
+- 实现：新增 `context_assembly.py`（compact_clarification_context：PREFIX 分支参考逐字透传且永不入摘要，其余折叠为带"非原始证据"标记与内联回查 id 的摘要，近 4 轮逐字保留）；`agent_controller.complete()` ask 路径先校验、超界再压缩、仍超界才 ClarificationContextLimit；提取 `_validate_next_exchange`。
+- 既有测试契约更新（透明记录）：`test_clarification_overflow_does_not_silently_drop_original_constraints` 原断言"超界必须拒绝"，与新批准的压缩特性直接冲突；已更新为更强形式的不变式——原始限制逐字保留在会话存储 + 摘要带标记可回查 + 压缩后请求合法；硬拒绝路径由新测试 monkeypatch 压缩无效场景确定性覆盖。
+- 测试：新增 `test_context_compaction_wiring.py`（8 项，先行首轮 7 failed）；专项 8 passed；邻域 120 passed；批次 227+380 passed；ruff/mypy 干净。
+- 未完成：build_manifest 接入需 UnderstandingRequest 契约扩展；冻结包未含本增强（下次构建随包）。
