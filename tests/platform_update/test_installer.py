@@ -38,7 +38,7 @@ def fixture(tmp_path):
         db.execute("INSERT INTO messages VALUES('retain history')")
     package = tmp_path / 'package.zip'
     with zipfile.ZipFile(package, 'w') as archive:
-        archive.writestr('ZQ����ƽ̨/ZQ����ƽ̨.exe', b'synthetic executable')
+        archive.writestr('ZQ技术平台/ZQ技术平台.exe', b'synthetic executable')
     def signed(version='0.2.7', seq=10):
         payload = {'schema_version': 1, 'key_id': 'test', 'sequence': seq, 'version': version,
                    'platform': 'windows', 'arch': 'x86_64', 'url': 'https://releases.test/app.zip',
@@ -81,6 +81,29 @@ def test_additive_schema_upgrade_accepts_candidate_within_signed_range(fixture):
     assert result.is_file()
     assert journal.launch_version() == '0.2.7'
     assert database.read_bytes() == original
+
+
+def test_webengine_helper_executable_is_not_treated_as_client_entrypoint(fixture):
+    root, policy, keys, database, package, signed = fixture
+    with zipfile.ZipFile(package, 'a') as archive:
+        archive.writestr(
+            'ZQ技术平台/_internal/PySide6/QtWebEngineProcess.exe',
+            b'synthetic webengine helper',
+        )
+    journal = UpdateJournal(root / 'update-state.sqlite', policy, keys=keys)
+
+    def health(executable, _work, release):
+        assert executable.name == 'ZQ技术平台.exe'
+        assert executable.parent.name == 'ZQ技术平台'
+        return {'client_version': release.version, 'protocol_version': 1,
+                'local_schema_version': 10}
+
+    result = install_candidate(
+        root, journal, signed(), package,
+        databases=(database,), now=1500, probe=health,
+    )
+    assert result.name == 'ZQ技术平台.exe'
+    assert journal.launch_version() == '0.2.7'
 
 
 @pytest.mark.parametrize('candidate_schema', [9, 31])

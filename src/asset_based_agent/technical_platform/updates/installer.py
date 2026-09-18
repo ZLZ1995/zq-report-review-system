@@ -105,13 +105,10 @@ def install_candidate(root: Path, journal: UpdateJournal, signed_manifest: bytes
                 raise ValueError('Version directory redirected')
             versions.mkdir(exist_ok=True)
             target = extract_verified_package(package, release, versions / release.version)
-            executables = tuple(
-                path for path in target.rglob('*.exe')
-                if path.is_file() and path.resolve().is_relative_to(target.resolve())
-            )
-            if len(executables) != 1:
+            executable = target / 'ZQ技术平台' / 'ZQ技术平台.exe'
+            if (executable.resolve() != executable or not executable.is_file()
+                    or not executable.is_relative_to(target)):
                 raise ValueError('Client executable missing from package')
-            executable = executables[0]
             journal.activating(token)
             info = probe(executable, work, release)
             candidate_schema = info.get('local_schema_version')
