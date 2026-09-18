@@ -7,6 +7,28 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+# G11：允许用环境变量把构建产物放到新的 D 盘时间戳目录，不覆盖旧验收包。
+DIST_ROOT = Path(os.environ.get("TP_DIST_ROOT", ROOT / "dist/technical_platform"))
+BUILD_WORK = Path(os.environ.get("TP_BUILD_WORK", ROOT / "build/technical_platform"))
+# G02-G10 新增 Agent/Harness 模块必须随冻结包分发。
+NEW_HARNESS_MODULES = (
+    "agent_profiles", "context_budget", "context_manifest",
+    "conversation_compactor", "conversation_stream", "diagnostic_bundle",
+    "evidence_retriever", "failure_drills", "input_gateway", "intent_policy",
+    "intent_schema", "memory_candidates", "memory_consolidation",
+    "memory_selector", "skill_contract_v2", "task_panel", "turn_context",
+    "turn_normalizer", "turn_scope_policy", "workflow_compiler",
+    "workflow_events", "workflow_journal", "workflow_plan",
+    "workflow_reconciliation", "workflow_runtime", "workflow_scheduler",
+)
+
+
+def hidden_import_arguments():
+    arguments = []
+    for module in NEW_HARNESS_MODULES:
+        arguments += ["--hidden-import",
+                      f"asset_based_agent.technical_platform.{module}"]
+    return arguments
 BUILTIN_SKILL_RESOURCES = (
     'gongshang-change-history-docx',
     'valuation-detail-workbook-fill',
@@ -39,7 +61,7 @@ def builtin_data_arguments(build):
 
 
 def main():
-    build = ROOT / "build" / "technical_platform"
+    build = BUILD_WORK
     build.mkdir(parents=True, exist_ok=True)
     environment = os.environ.copy()
     # Do not resolve Qt's Windows ICU imports against unrelated tool runtimes.
@@ -86,6 +108,7 @@ def main():
             "asset_based_agent.technical_platform.review_issues",
             "--hidden-import",
             "asset_based_agent.technical_platform.skill_improvement",
+            *hidden_import_arguments(),
             "--hidden-import",
             "asset_based_agent.technical_platform.ui.memory_panel",
             "--copy-metadata",
@@ -101,7 +124,7 @@ def main():
             "--copy-metadata",
             "packaging",
             "--distpath",
-            str(ROOT / "dist/technical_platform"),
+            str(DIST_ROOT),
             "--workpath",
             str(build),
             "--specpath",
@@ -117,7 +140,7 @@ def main():
     ).returncode
     if client:
         return client
-    bootstrap = ROOT / "dist/technical_platform/bootstrap"
+    bootstrap = DIST_ROOT / "bootstrap"
     bootstrap.mkdir(parents=True, exist_ok=True)
     for name, script in (
         ("ZQ技术平台更新器", "run_client_updater.py"),
