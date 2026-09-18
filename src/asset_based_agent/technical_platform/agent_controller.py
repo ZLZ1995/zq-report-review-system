@@ -27,6 +27,7 @@ class PendingUnderstanding:
     revision: int
     request: UnderstandingRequest
     files: tuple[dict, ...]
+    envelope_hash: str | None = None
 
 
 class AgentController:
@@ -39,8 +40,17 @@ class AgentController:
         self.store = store
         self.state = ConversationState(store)
 
-    def prepare(self, session_id, prompt, *, model_id, selected_ids, candidates=(), browser_enabled=False):
+    def prepare(self, session_id, prompt, *, model_id, selected_ids, candidates=(), browser_enabled=False, envelope=None):
         from ..agent_contracts import SkillCandidate
+        envelope_digest = None
+        if envelope is not None:
+            from .turn_context import TurnEnvelope, envelope_hash
+            envelope = TurnEnvelope.model_validate(envelope.model_dump())
+            if (envelope.raw_user_text != prompt or envelope.active_model_id != model_id
+                    or set(selected_ids) != {item.id for item in envelope.selected_attachment_versions}
+                    or envelope.session_id != session_id):
+                raise ValueError('本轮信封与提交内容不一致')
+            envelope_digest = envelope_hash(envelope)
         candidates = [SkillCandidate.model_validate(item) for item in candidates]
         if any(item.adapter == 'browser.task' or item.id == 'browser.task' for item in candidates):
             raise PermissionError('外部Skill不能声明或启用原生浏览器能力')
@@ -68,7 +78,8 @@ class AgentController:
                  self.state.start(session_id, expected_revision=state['revision']))
         self.store.append(session_id, 'user', prompt)
         return PendingUnderstanding(self.store.owner, session['project'], session_id,
-                                    state['task_id'], state['revision'], request, tuple(deepcopy(files)))
+                                    state['task_id'], state['revision'], request, tuple(deepcopy(files)),
+                                    envelope_digest)
 
     def _current(self, pending):
         if pending.owner != self.store.owner:

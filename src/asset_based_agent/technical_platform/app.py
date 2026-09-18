@@ -157,6 +157,7 @@ class PlatformWindow(QMainWindow):
         self.store = store
         self.storage_preferences = storage_preferences
         self._permission_mode_memory = 'risk'
+        self.last_turn_envelope = None
         self.browser_panel = None
         self.client, self.models = client, models or []
         self.registry = SkillRegistry()
@@ -1123,6 +1124,12 @@ class PlatformWindow(QMainWindow):
             if self.files.item(i).checkState() == Qt.CheckState.Checked
         }
 
+    def scope_summary_text(self):
+        if self.last_turn_envelope is None:
+            return ''
+        from .turn_scope_policy import format_scope_summary
+        return format_scope_summary(self.last_turn_envelope)
+
     def refresh_details(self, selected_ids=None):
         blocker = QSignalBlocker(self.files)
         if selected_ids is None:
@@ -1233,6 +1240,23 @@ class PlatformWindow(QMainWindow):
             return
         if self.try_local_builtin(prompt):
             return
+        from .input_gateway import InputGateway
+        from .turn_scope_policy import ScopeClarificationNeeded, format_scope_summary
+        gateway = InputGateway(self.store, self.agent_permission_mode)
+        try:
+            envelope = gateway.create(
+                self.session_id, prompt,
+                selected_ids=list(self.selected_file_ids()),
+                model_id=self.model_combo.currentData() or 'pending',
+            )
+        except ScopeClarificationNeeded as exc:
+            self.status.setText(str(exc))
+            return
+        except (ValueError, PermissionError):
+            self.status.setText('本轮要求或文件范围无效，请检查后重试。')
+            return
+        self.last_turn_envelope = envelope
+        self.status.setText(format_scope_summary(envelope))
         if (self.client is None or self.network_state != 'connected') and not self.connect_service():
             return
         if not self.session_id:
@@ -1266,7 +1290,8 @@ class PlatformWindow(QMainWindow):
         try:
             pending = controller.prepare(self.session_id, prompt, model_id=model_id,
                                          selected_ids=list(self.selected_file_ids()), candidates=candidates,
-                                         browser_enabled=callable(getattr(self.client, 'propose_browser_step', None)))
+                                         browser_enabled=callable(getattr(self.client, 'propose_browser_step', None)),
+                                         envelope=envelope)
         except (ValueError, PermissionError):
             self.status.setText('本轮要求或文件范围无效，请检查后重试。')
             return
