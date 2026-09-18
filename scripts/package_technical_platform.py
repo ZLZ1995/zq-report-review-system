@@ -21,6 +21,12 @@ DOWNLOAD_HOSTS = [
     'release-assets.githubusercontent.com',
 ]
 
+WEBENGINE_HELPER = Path('ZQ技术平台/_internal/PySide6/QtWebEngineProcess.exe')
+
+
+def archive_name(relative: Path) -> Path:
+    return relative.with_suffix('.pending') if relative == WEBENGINE_HELPER else relative
+
 
 def main(root: Path | None = None):
     explicit_root = root is not None
@@ -45,7 +51,8 @@ def main(root: Path | None = None):
         assert hashlib.sha256((bundle / lock['path']).read_bytes()).hexdigest() == lock['sha256']
     with ZipFile(output, 'w', ZIP_DEFLATED, compresslevel=6) as archive:
         for path in sorted(files):
-            archive.write(path, path.relative_to(parent))
+            relative = path.relative_to(parent)
+            archive.write(path, archive_name(relative))
     with ZipFile(output) as archive:
         assert archive.testzip() is None
         assert len(archive.namelist()) == len(files)
@@ -86,7 +93,10 @@ def main(root: Path | None = None):
                 archive.write(staging / name, name)
             for path in sorted(files):
                 relative = path.relative_to(parent)
-                archive.write(path, (Path('versions') / CLIENT_VERSION / relative).as_posix())
+                archive.write(
+                    path,
+                    (Path('versions') / CLIENT_VERSION / archive_name(relative)).as_posix(),
+                )
     with ZipFile(managed) as archive:
         assert archive.testzip() is None
     managed_metadata = {

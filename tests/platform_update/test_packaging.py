@@ -41,6 +41,9 @@ def test_packaging_emits_managed_transition_bundle_without_user_data(tmp_path):
     source_rules.write_bytes(b'rules')
     rules.write_bytes(b'rules')
     (client / 'ZQ技术平台.exe').write_bytes(b'client')
+    helper = client / '_internal/PySide6/QtWebEngineProcess.exe'
+    helper.parent.mkdir(parents=True)
+    helper.write_bytes(b'webengine-helper')
     for skill in ('valuation-detail-workbook-fill', 'gongshang-change-history-docx'):
         source = tmp_path / 'assets/builtin_templates' / skill
         source.mkdir(parents=True)
@@ -69,4 +72,13 @@ def test_packaging_emits_managed_transition_bundle_without_user_data(tmp_path):
         assert 'update-state.sqlite' in names
         assert 'installation-lock.sqlite' in names
         assert f'versions/{module.CLIENT_VERSION}/ZQ技术平台/ZQ技术平台.exe' in names
+        assert (f'versions/{module.CLIENT_VERSION}/ZQ技术平台/_internal/PySide6/'
+                'QtWebEngineProcess.pending') in names
+        assert not any(name.endswith('/PySide6/QtWebEngineProcess.exe') for name in names)
         assert not any('/runs/' in name or '/credentials/' in name for name in names)
+
+    ordinary = tmp_path / f'ZQ-Workspace-{module.CLIENT_VERSION}-Windows.zip'
+    with zipfile.ZipFile(ordinary) as archive:
+        names = set(archive.namelist())
+        assert 'ZQ技术平台/_internal/PySide6/QtWebEngineProcess.pending' in names
+        assert 'ZQ技术平台/_internal/PySide6/QtWebEngineProcess.exe' not in names
