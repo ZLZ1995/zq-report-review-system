@@ -1,6 +1,7 @@
 """Native message-to-browser handoff; no model-created execution authority."""
 import sqlite3
 
+from .agent_permission_modes import requires_browser_confirmation
 from .browser_action_prompt import BrowserActionPrompt
 from .browser_completion import confirm_readonly_result, verify_readonly_completion
 from .browser_download_completion_ui import (
@@ -42,6 +43,7 @@ def start_browser_task(window, pending, understanding):
             raise ValueError('Stale browser proposal')
         snapshot = build_understood_browser_task(store, pending.session_id, pending.request,
                                                 understanding, environment='production').to_snapshot()
+        snapshot['permission_mode'] = window.agent_permission_mode()
         snapshot['conversation_handoff'] = {
             'task_id': pending.task_id, 'revision': pending.revision + 1,
             'request': pending.request.model_dump(),
@@ -93,14 +95,18 @@ def start_browser_task(window, pending, understanding):
                 return True
             except (ValueError, OSError, RuntimeError, sqlite3.Error):
                 return False
-        prompt = BrowserActionPrompt(window, is_active=active)
+        prompt = BrowserActionPrompt(window, is_active=active,
+                                     permission_mode=window.agent_permission_mode)
         host.finished.connect(prompt.close)
         host.finished.connect(prompt.deleteLater)
         return create_browser_runtime(host, client, panel.task_leases, page, confirmed=True,
             confirm_action=prompt, confirm_navigation=prompt.navigate, downloads=panel.downloads.controller,
             upload_artifacts=upload_artifacts,
-            confirm_upload=(lambda observation, proposal, artifact, allowed: confirm_upload(
-                window, observation, proposal, artifact, lambda: current() and allowed())) if upload_artifacts else None,
+            confirm_upload=(lambda observation, proposal, artifact, allowed:
+                (confirm_upload(window, observation, proposal, artifact,
+                                lambda: current() and allowed())
+                 if requires_browser_confirmation(window.agent_permission_mode(), 'upload')
+                 else current() and allowed())) if upload_artifacts else None,
             select_account=lambda origin, accounts, allowed: select_login_account(
                 window, origin, accounts, lambda: current() and allowed()))
 
@@ -112,7 +118,10 @@ def start_browser_task(window, pending, understanding):
     def verify(detail):
         if 'download' in snapshot['browser_scope']['actions']:
             return verify_download_completion(host, detail, is_current=current,
-                confirm=lambda task, result, active: confirm_download_result(window, task, result, active))
+                confirm=lambda task, result, active:
+                (confirm_download_result(window, task, result, active)
+                 if requires_browser_confirmation(window.agent_permission_mode(), 'download')
+                 else active()))
         return verify_readonly_completion(host, detail, is_current=current,
             confirm=lambda snapshot, result, active: confirm_readonly_result(window, snapshot, result, active))
     host = window.register_task_worker(BrowserTaskHost(store, run_id, window, runtime_factory=factory,

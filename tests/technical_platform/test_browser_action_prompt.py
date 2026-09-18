@@ -17,9 +17,10 @@ font_id = QFontDatabase.addApplicationFont('C:/Windows/Fonts/msyh.ttc')
 assert font_id >= 0
 app.setFont(QFont(QFontDatabase.applicationFontFamilies(font_id)[0], 10))
 root = Path(sys.argv[1])
-for scenario in ('accept', 'decline', 'close', 'invalid'):
+for scenario in ('accept', 'decline', 'close', 'invalid', 'full'):
     active = [True]
-    prompt = BrowserActionPrompt(is_active=lambda _: active[0])
+    prompt = BrowserActionPrompt(is_active=lambda _: active[0],
+                                 permission_mode=lambda: 'full' if scenario == 'full' else 'request')
     case = root / scenario; case.mkdir()
     store, observer, leases, lease, page, observation, _ = connected(case, prompt)
     def act():
@@ -37,16 +38,17 @@ for scenario in ('accept', 'decline', 'close', 'invalid'):
         elif scenario == 'decline': dialog.cancel_button.click()
         elif scenario == 'close': prompt.close()
         else: active[0] = False
-    QTimer.singleShot(40, act)
+    if scenario != 'full': QTimer.singleShot(40, act)
     QTimer.singleShot(2000, prompt.close)
     before = len(page.calls); results = []
     observer.edit(lease, observation, '1', 'fill', '<b>literal</b>', callback=results.append)
     with store.connect() as db:
         rows = db.execute('SELECT consumed FROM browser_action_authorizations').fetchall()
-    if scenario == 'accept':
+    if scenario in ('accept', 'full'):
         assert [row[0] for row in rows] == [1]
         page.calls[-1][2]('{"status":"dispatched"}')
         assert results == ['dispatched']
+        if scenario == 'full': assert prompt.dialog is None
     else:
         assert not rows and results == ['rejected'] and len(page.calls) == before
     prompt.close()

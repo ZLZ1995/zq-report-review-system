@@ -61,3 +61,9 @@ class BrowserLibrary:
         with self._connect() as db:
             db.execute("INSERT INTO settings(name,value) VALUES('home',?) "
                        'ON CONFLICT(name) DO UPDATE SET value=excluded.value', (url,))
+
+    def permission_mode(self) -> str:
+        return self.preferences.permission_mode(self.owner)
+
+    def set_permission_mode(self, mode: str) -> None:
+        self.preferences.set_permission_mode(self.owner, mode)
