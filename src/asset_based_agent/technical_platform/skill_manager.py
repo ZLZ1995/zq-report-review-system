@@ -24,12 +24,13 @@ class SkillManagerDialog(QDialog):
     def __init__(self, store, parent=None):
         super().__init__(parent)
         self.manager = SkillInstallation(store)
-        self.setWindowTitle("外部 Skill 管理")
+        self.setWindowTitle("能力与 Skill")
         self.resize(760, 560)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(16)
-        notice = QLabel("安装本地 Skill ZIP 包 · 默认停用 · 不执行包内脚本\n启用后由 Agent 根据对话选择；仅使用受支持的只读适配器，不授予原件修改权限。")
+        notice = QLabel("Agent 根据自然语言自动选择内置 Skill、外部 Skill 或原生能力，无需手动切换。\n"
+                        "外部 ZIP 安装后默认停用，不执行包内脚本；所有文件能力默认只读原件。")
         notice.setWordWrap(True)
         layout.addWidget(notice)
         self.versions = QListWidget()
@@ -44,6 +45,7 @@ class SkillManagerDialog(QDialog):
         self.status.setTextFormat(Qt.TextFormat.PlainText)
         layout.addWidget(self.status)
         actions = QHBoxLayout()
+        self.action_buttons = {}
         for title, callback in (("安装外部 Skill…", self.install_package),
                                 ("启用所选版本", self.activate_selected),
                                 ("停用所选 Skill", self.disable_selected), ("关闭", self.accept)):
@@ -51,6 +53,7 @@ class SkillManagerDialog(QDialog):
             button.setAutoDefault(False)
             button.clicked.connect(callback)
             actions.addWidget(button)
+            self.action_buttons[title] = button
         layout.addLayout(actions)
         self.versions.currentRowChanged.connect(self.selection_changed)
         self.reload()
@@ -64,15 +67,29 @@ class SkillManagerDialog(QDialog):
         box.setDefaultButton(QMessageBox.StandardButton.No)
         return box.exec() == QMessageBox.StandardButton.Yes
 
-    def reload(self):
+    def reload(self, selected=None):
         self.versions.clear()
+        from .skills import BROWSER, BUILTINS
+        for spec in BUILTINS:
+            item = QListWidgetItem(f"{spec.name}  {spec.version} — 内置·自动路由")
+            item.setData(Qt.ItemDataRole.UserRole, {'kind': 'builtin', 'spec': spec})
+            self.versions.addItem(item)
+        browser = QListWidgetItem(f"{BROWSER.name}  {BROWSER.version} — 原生能力·按需调用")
+        browser.setData(Qt.ItemDataRole.UserRole, {'kind': 'native', 'spec': BROWSER})
+        self.versions.addItem(browser)
         for row in self.manager.list_versions():
             state = "已启用·可由Agent选择" if row["enabled"] else "已安装·停用"
             item = QListWidgetItem(f"{row['name']}  {row['version']} — {state}")
-            item.setData(Qt.ItemDataRole.UserRole, row)
+            item.setData(Qt.ItemDataRole.UserRole, {'kind': 'external', **row})
             self.versions.addItem(item)
         if self.versions.count():
             self.versions.setCurrentRow(0)
+        if selected is not None:
+            for index in range(self.versions.count()):
+                row = self.versions.item(index).data(Qt.ItemDataRole.UserRole)
+                if (row.get('kind'), row.get('skill_id'), row.get('version')) == selected:
+                    self.versions.setCurrentRow(index)
+                    break
 
     def selected(self):
         item = self.versions.currentItem()
@@ -83,6 +100,19 @@ class SkillManagerDialog(QDialog):
         if row is None:
             self.details.clear()
             return
+        if row['kind'] != 'external':
+            spec = row['spec']
+            source = '平台原生能力' if row['kind'] == 'native' else '随客户端安装的内置 Skill'
+            self.details.setPlainText(
+                f"{spec.name}\nID：{spec.id}\n版本：{spec.version}\n来源：{source}\n"
+                f"能力边界：{', '.join(sorted(spec.capabilities))}\n"
+                "由 Agent 根据自然语言和本轮资料自动选择；不授予修改原件权限。"
+            )
+            self.action_buttons['启用所选版本'].setEnabled(False)
+            self.action_buttons['停用所选 Skill'].setEnabled(False)
+            return
+        self.action_buttons['启用所选版本'].setEnabled(True)
+        self.action_buttons['停用所选 Skill'].setEnabled(True)
         try:
             package = self.manager.load(row["skill_id"], row["version"])
             self.details.setPlainText(self.describe(package))
@@ -108,7 +138,7 @@ class SkillManagerDialog(QDialog):
             if not self.confirm(self.describe(package) + "\n\n确认安装？安装后默认停用。"):
                 return
             self.manager.install(Path(path), confirmed=True, expected_sha256=package.sha256)
-            self.reload()
+            self.reload(('external', package.manifest['id'], package.manifest['version']))
             self.status.setText("已安装。请检查依赖后选择需要启用的版本。")
         except (ValueError, PermissionError, OSError) as exc:
             self.status.setText(str(exc))
@@ -124,6 +154,9 @@ class SkillManagerDialog(QDialog):
         if row is None:
             self.status.setText("请先选择一个已安装的版本。")
             return
+        if row['kind'] != 'external':
+            self.status.setText('内置 Skill 与原生能力由平台版本管理，不能在此停用。')
+            return
         action = "启用此版本（取代当前启用版本）" if activate else "停用此 Skill"
         if not self.confirm(f"{row['skill_id']} {row['version']}\n{action}？"):
             return
@@ -132,7 +165,7 @@ class SkillManagerDialog(QDialog):
                 self.manager.activate(row["skill_id"], row["version"], confirmed=True)
             else:
                 self.manager.disable(row["skill_id"], confirmed=True)
-            self.reload()
+            self.reload(('external', row['skill_id'], row['version']))
             self.status.setText("操作已保存；规则可用于后续任务，当前不会自动调用模型。")
         except (ValueError, PermissionError, OSError) as exc:
             self.status.setText(str(exc))

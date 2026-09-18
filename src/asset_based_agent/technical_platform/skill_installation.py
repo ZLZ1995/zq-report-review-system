@@ -36,7 +36,8 @@ class SkillInstallation:
             raise ValueError("确认后 Skill 包已变化，请重新选择并确认")
         manifest = package.manifest
         identity, version = manifest["id"], manifest["version"]
-        if identity in {"report.review", "review.preflight"}:
+        from .skills import BUILTINS
+        if identity in {item.id for item in BUILTINS}:
             raise ValueError("不能覆盖内置 Skill ID")
         with self.store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
