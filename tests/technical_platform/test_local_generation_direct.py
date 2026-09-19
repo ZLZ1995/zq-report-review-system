@@ -70,6 +70,15 @@ def snapshot_of(store, run_id):
     return json.loads(store.run(run_id)['snapshot'])
 
 
+def test_run_feedback_success_without_worker_note_does_not_misreport(tmp_path):
+    from asset_based_agent.technical_platform.generation import run_feedback
+    (tmp_path / 'output').mkdir()
+    assert '生成完成' in run_feedback(tmp_path, True)
+    assert '生成未完成' in run_feedback(tmp_path, False)
+    (tmp_path / 'output' / 'user_feedback.md').write_text('工作簿已生成。', encoding='utf-8')
+    assert run_feedback(tmp_path, True) == '工作簿已生成。'
+
+
 def test_full_permission_generates_brief_without_dialog_and_infers_roles(tmp_path, monkeypatch):
     forbid_dialog(monkeypatch)
     no_worker_start(monkeypatch)

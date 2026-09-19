@@ -189,6 +189,15 @@ def auto_generation_roles(skill_id, files):
     return {INPUT_ROLES[skill_id][0][0]: matches[0]['id']}, matches
 
 
+def run_feedback(work, succeeded):
+    """User-facing summary; a missing worker note must not misreport success."""
+    path = work / 'output/user_feedback.md'
+    if path.is_file():
+        return path.read_text(encoding='utf-8')
+    return ('生成完成，成果已通过来源与交付校验。' if succeeded
+            else '生成未完成，请查看本轮日志；没有发布正式成果。')
+
+
 def artifact_path(store, session_id, run_id, index):
     run = store.run(run_id)
     if run['session'] != session_id:
@@ -322,8 +331,7 @@ def _execute_generation(store, run_id, snapshot, cancel, progress, *, provider=N
     status_path = work / 'status.json'
     status = json.loads(status_path.read_text(encoding='utf-8')) if status_path.exists() else {}
     succeeded = not cancel.is_set() and process.returncode == 0 and status.get('ok') is True
-    feedback_path = work / 'output/user_feedback.md'
-    feedback = feedback_path.read_text(encoding='utf-8') if feedback_path.exists() else '生成未完成，请查看本轮日志；没有发布正式成果。'
+    feedback = run_feedback(work, succeeded)
     if automatic:
         feedback = '资料自动识别结果：\n' + identified + '\n\n' + feedback
     artifacts = []
