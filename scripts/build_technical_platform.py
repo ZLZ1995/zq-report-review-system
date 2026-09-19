@@ -10,9 +10,11 @@ ROOT = Path(__file__).resolve().parents[1]
 # G11：允许用环境变量把构建产物放到新的 D 盘时间戳目录，不覆盖旧验收包。
 DIST_ROOT = Path(os.environ.get("TP_DIST_ROOT", ROOT / "dist/technical_platform"))
 BUILD_WORK = Path(os.environ.get("TP_BUILD_WORK", ROOT / "build/technical_platform"))
-# G02-G10 新增 Agent/Harness 模块必须随冻结包分发。
+# G02-G10 新增 Agent/Harness 模块必须随冻结包分发；多期间资料消歧/恢复模块同样
+# 仅在运行路径中按需导入，静态分析不可见，必须显式列入。
 NEW_HARNESS_MODULES = (
     "agent_profiles", "context_budget", "context_manifest",
+    "material_analysis", "material_resume",
     "conversation_compactor", "conversation_stream", "diagnostic_bundle",
     "evidence_retriever", "failure_drills", "input_gateway", "intent_policy",
     "intent_schema", "memory_candidates", "memory_consolidation",
