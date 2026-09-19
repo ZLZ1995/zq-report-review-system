@@ -13,6 +13,7 @@ from pathlib import Path
 
 from ..report_review_app.services.resource_locks import CLIENT_RESOURCES
 from .generation_paths import generation_work_directory
+from .material_analysis import resolution_snapshot
 from .project_catalog import validate_business_directory
 from .skills import (
     DETAIL,
@@ -238,20 +239,55 @@ def _execute_generation(store, run_id, snapshot, cancel, progress, *, provider=N
             or snapshot.get('capabilities') != ['generate_artifacts', 'read_selected_files']):
         raise PermissionError('生成规则或任务能力已变化，请重新确认任务')
     root = validate_business_directory(store.path.parent)
-    work = generation_work_directory(root, run_id, step_id, create=True)
+    resuming = automatic and snapshot.get('material_resolution_override') is not None
+    # A clarification resume reuses its own work directory (it holds the
+    # persisted analysis); a fresh run must still fail on directory collision.
+    work = generation_work_directory(root, run_id, step_id, create=not resuming)
+    if resuming and not work.is_dir():
+        raise ValueError('澄清恢复所需的已落盘分析目录缺失，请重新提交任务')
     if automatic:
         if provider is None or not snapshot['permissions'].get('call_model'):
             raise PermissionError('资料识别缺少模型授权')
-        request_id = run_id if step_id is None else run_id + '-' + hashlib.sha256(step_id.encode()).hexdigest()
-        roles, plan = provider.analyze(files, request_id, cancel, progress)
-        if cancel.is_set():
-            raise TaskCancelled('资料识别已取消，未开始生成')
-        if any(digest(Path(f['path'])) != f['sha256'] for f in files):
-            raise ValueError('识别过程中资料已变化，请重新添加')
-        (work / 'material_analysis.json').write_text(json.dumps(plan, ensure_ascii=False), encoding='utf-8')
+        override = snapshot.get('material_resolution_override')
+        if override is not None:
+            # Resume after user clarification: reuse the persisted analysis,
+            # never re-bill the model for a step that already succeeded.
+            from .material_analysis import apply_resolution_override
+            plan = json.loads((work / 'material_analysis.json').read_text(encoding='utf-8'))
+            stored = json.loads((work / 'material_resolution.json').read_text(encoding='utf-8'))
+            resolution = apply_resolution_override(override, files, stored)
+            progress('已按用户澄清恢复资料范围；沿用已完成的模型识别结果，不重复调用模型。')
+        else:
+            request_id = run_id if step_id is None else run_id + '-' + hashlib.sha256(step_id.encode()).hexdigest()
+            resolution, plan = provider.analyze(files, request_id, cancel, progress)
+            if cancel.is_set():
+                raise TaskCancelled('资料识别已取消，未开始生成')
+            if any(digest(Path(f['path'])) != f['sha256'] for f in files):
+                raise ValueError('识别过程中资料已变化，请重新添加')
+            # Persist the raw model plan before disambiguation so failed or
+            # pending resolutions keep their evidence on disk.
+            (work / 'material_analysis.json').write_text(json.dumps(plan, ensure_ascii=False), encoding='utf-8')
+            (work / 'material_resolution.json').write_text(
+                json.dumps(resolution_snapshot(resolution), ensure_ascii=False), encoding='utf-8')
         identified = '\n'.join(f"{next(f['name'] for f in files if f['id'] == a['file_id'])}：{a['reason']}"
                                for a in plan['assignments'])
         progress('资料识别完成：' + identified)
+        for reason in resolution.reasons:
+            progress(reason)
+        if resolution.status == 'waiting_user':
+            feedback = ('资料自动识别结果：\n' + identified + '\n\n'
+                        + '\n'.join(resolution.questions)
+                        + '\n请直接回复说明；已完成的识别结果已保存，不会重复调用模型。')
+            result = {'kind': 'generation', 'model_called': True, 'ok': False,
+                      'status': 'waiting_user', 'questions': list(resolution.questions),
+                      'pending': resolution_snapshot(resolution),
+                      'artifacts': [], 'feedback': feedback}
+            if manage_run:
+                store.transition(run_id, 'validating', '资料识别及消歧完成，等待用户澄清')
+                store.save_result(run_id, result)
+                store.transition(run_id, 'waiting_user', '等待用户补充主体或期间')
+            return result
+        roles = dict(resolution.selected)
         if not roles.get('balance_sheet'):
             feedback = ('资料自动识别结果：\n' + identified + '\n\n'
                         '尚未识别到可确定主体、期间和范围的资产负债表。'
@@ -263,7 +299,8 @@ def _execute_generation(store, run_id, snapshot, cancel, progress, *, provider=N
                 store.save_result(run_id, result)
                 store.transition(run_id, 'failed', '资料已识别，尚需确认范围依据')
             return result
-        bound_files = [f for f in files if f['id'] in roles.values()]
+        bound_files = [f for f in files if f['id'] in roles.values()
+                       or f['id'] in resolution.comparison_artifact_ids]
         if 'trial_balance' in roles:
             validate_roles(skill_id, bound_files, roles)
         elif any(Path(f['name']).suffix.lower() not in {'.xlsx', '.xls'} for f in bound_files):
@@ -292,6 +329,23 @@ def _execute_generation(store, run_id, snapshot, cancel, progress, *, provider=N
         if digest(target) != item['sha256']:
             raise ValueError('资料复制校验失败')
         selected[role] = str(target)
+    # Multi-period statements: earlier periods are copied as comparison input
+    # and listed for the pipeline's --financial-statement (latest first wins
+    # the cover/valuation date via select_latest_statement).
+    if automatic:
+        statements = [selected['balance_sheet']] if 'balance_sheet' in selected else []
+        for index, identity in enumerate(resolution.comparison_artifact_ids):
+            item = by_id[identity]
+            source = Path(item['path'])
+            if digest(source) != item['sha256']:
+                raise ValueError('资料已变化，请重新添加')
+            target = sources / f'financial_statement_{index}{source.suffix.lower()}'
+            shutil.copyfile(source, target)
+            if digest(target) != item['sha256']:
+                raise ValueError('资料复制校验失败')
+            statements.append(str(target))
+        if len(statements) > 1:
+            selected['financial_statements'] = statements
     job = work / 'job.json'
     job.write_text(json.dumps({'skill_id': skill_id, 'inputs': selected}, ensure_ascii=False), encoding='utf-8')
     command = ([sys.executable, '--builtin-skill-worker', str(job)] if getattr(sys, 'frozen', False)

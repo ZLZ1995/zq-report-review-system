@@ -168,6 +168,8 @@ def execute_compound_claimed(store, run_id, snapshot, cancel, progress, *, clien
                                    ToolDispatcher({s.tool: dispatch for s in plan.steps}), cancel, raise_errors=True)
     if status == 'cancelled':
         return {'kind': 'cancelled'}
+    if status == 'waiting_user':
+        return {'kind': 'waiting_user'}
     if status != 'succeeded':
         raise RuntimeError('组合任务未完成，请核对步骤状态；不要重复提交')
     return json.loads(store.run(run_id)['result'])

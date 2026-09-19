@@ -13,7 +13,7 @@ class InvalidToolOutcome(ValueError):
 
 class ToolOutcome(Contract):
     step_id: IdentityText
-    status: Literal['succeeded', 'failed', 'cancelled', 'unknown']
+    status: Literal['succeeded', 'failed', 'cancelled', 'unknown', 'waiting_user']
     passed_gates: list[IdentityText] = Field(default_factory=list, max_length=50)
     result_ref: IdentityText | None = None
 

@@ -82,6 +82,12 @@ class GenerationAdapter:
                     or path.suffix.lower() not in {'.docx', '.xlsx', '.pdf', '.png', '.md', '.json'}
                     or not path.is_file() or digest(path) != item['sha256']):
                 raise ValueError('Generated artifact location or hash is invalid')
+        if result.get('status') == 'waiting_user':
+            if artifacts:
+                raise ValueError('Waiting generation cannot publish business artifacts')
+            reference = StepResults(self.store).save(self.run_id, step.step_id, result)
+            return ToolOutcome(step_id=step.step_id, status='waiting_user',
+                               passed_gates=[], result_ref=reference)
         reference = StepResults(self.store).save(self.run_id, step.step_id, result)
         return ToolOutcome(step_id=step.step_id, status='succeeded' if result['ok'] else 'failed',
                            passed_gates=step.acceptance_gates if result['ok'] else [], result_ref=reference)

@@ -53,6 +53,11 @@ def _execute_claimed_plan(store, run_id, plan, dispatcher, cancel, *, raise_erro
             if outcome.status == 'unknown':
                 store.interrupt_active_runs([run_id])
                 return 'reconciliation_required'
+            if outcome.status == 'waiting_user':
+                if outcome.result_ref is not None:
+                    store.save_result(run_id, StepResults(store).read(run_id, step.step_id, outcome.result_ref))
+                store.transition(run_id, 'waiting_user', 'harness: step waits for user clarification')
+                return 'waiting_user'
             if outcome.status != 'succeeded':
                 if len(plan.steps) == 1 and outcome.result_ref is not None:
                     store.save_result(run_id, StepResults(store).read(run_id, step.step_id, outcome.result_ref))

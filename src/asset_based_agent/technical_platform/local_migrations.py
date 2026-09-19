@@ -7,7 +7,7 @@ from contextlib import closing
 from pathlib import Path
 from uuid import uuid4
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 
 def _version(db):
@@ -154,6 +154,33 @@ def apply_v11(db):
               FROM memories m JOIN projects p ON p.id=m.project''')
 
 
+def apply_v12(db):
+    # Rebuild execution_steps so a step may rest in 'waiting_user' while a run
+    # waits for clarification.  The migration connection runs with foreign
+    # keys disabled, so drop/rename is safe; child tables resolve the FK by
+    # name once the replacement table takes the original name.
+    # Very old/synthetic databases may legitimately lack the table; additive
+    # migration must still succeed for them.
+    if db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_steps'"
+    ).fetchone() is None:
+        return
+    db.execute('''CREATE TABLE execution_steps_v12 (
+        run TEXT NOT NULL REFERENCES execution_plans(run),
+        step_id TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending'
+          CHECK(state IN ('pending','running','succeeded','failed','cancelled',
+                          'waiting_user','unknown')),
+        attempt INTEGER NOT NULL DEFAULT 0 CHECK(attempt >= 0),
+        claim_token TEXT, checkpoint_json TEXT, updated TEXT NOT NULL,
+        PRIMARY KEY(run, step_id))''')
+    db.execute('''INSERT INTO execution_steps_v12
+        (run,step_id,state,attempt,claim_token,checkpoint_json,updated)
+        SELECT run,step_id,state,attempt,claim_token,checkpoint_json,updated
+        FROM execution_steps''')
+    db.execute('DROP TABLE execution_steps')
+    db.execute('ALTER TABLE execution_steps_v12 RENAME TO execution_steps')
+
+
 def migrate_database(path: Path) -> Path | None:
     path = path.resolve()
     if not path.is_file():
@@ -213,6 +240,8 @@ def migrate_database(path: Path) -> Path | None:
                 apply_v10(db)
             if previous_version < 11:
                 apply_v11(db)
+            if previous_version < 12:
+                apply_v12(db)
             db.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
             db.commit()
             return backup

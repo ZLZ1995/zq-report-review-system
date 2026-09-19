@@ -19,7 +19,11 @@ class PermissionService:
 
     def _binding(self, snapshot):
         # Execution-time memory is refreshed separately, never execution authority.
-        bound = {key: value for key, value in snapshot.items() if key != 'execution_context'}
+        # The material-resolution override is likewise excluded: it is written
+        # only while the run waits for clarification and is validated against
+        # the persisted candidate set before use, so it cannot widen scope.
+        excluded = {'execution_context', 'material_resolution_override'}
+        bound = {key: value for key, value in snapshot.items() if key not in excluded}
         payload = {'snapshot': bound, 'output_root': str(self.store.path.parent.resolve())}
         return sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False,
                                  allow_nan=False).encode('utf-8')).hexdigest()

@@ -23,12 +23,20 @@ class StepResults:
                               (run_id, step_id)).fetchone()
             if run['state'] != 'running' or step is None or step['state'] != 'running':
                 raise PermissionError('Result does not belong to an active step')
-            previous = db.execute('SELECT id,sha256 FROM execution_results WHERE run=? AND step_id=?',
+            previous = db.execute('SELECT id,sha256,payload FROM execution_results WHERE run=? AND step_id=?',
                                   (run_id, step_id)).fetchone()
             if previous:
-                if previous['sha256'] != digest:
+                if previous['sha256'] == digest:
+                    return previous['id']
+                try:
+                    superseded = json.loads(previous['payload']).get('status') == 'waiting_user'
+                except (ValueError, AttributeError):
+                    superseded = False
+                if not superseded:
                     raise ValueError('Step result is immutable')
-                return previous['id']
+                # A waiting_user placeholder is superseded by the resumed
+                # step's final result; the audit trail stays in the events.
+                db.execute('DELETE FROM execution_results WHERE id=?', (previous['id'],))
             identity = uuid4().hex
             db.execute('INSERT INTO execution_results VALUES(?,?,?,?,?,?)',
                        (identity, run_id, step_id, payload, digest, now()))

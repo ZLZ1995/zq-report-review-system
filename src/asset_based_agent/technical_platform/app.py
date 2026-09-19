@@ -1239,6 +1239,71 @@ class PlatformWindow(QMainWindow):
             message += "\n" + "；".join(errors)
         self.status.setText(message)
 
+    def try_resume_waiting_run(self, prompt):
+        """Resume a generation run paused for material clarification.
+
+        The reply is matched deterministically against the persisted
+        candidates; a successful match resumes from the disambiguation node
+        without any new model call, while a mismatch re-asks the question.
+        """
+        store = self.store.active if isinstance(self.store, ProjectCatalog) else self.store
+        if store is None or self.session_id is None:
+            return False
+        waiting = next((r for r in reversed(store.runs(self.session_id))
+                        if r['state'] == 'waiting_user'), None)
+        if waiting is None:
+            return False
+        run_id = waiting['id']
+        try:
+            result = json.loads(waiting['result'] or '{}')
+        except ValueError:
+            result = {}
+        pending = result.get('pending')
+        if not isinstance(pending, dict):
+            return False
+        if any(word in prompt for word in ('取消', '放弃')):
+            store.transition(run_id, 'cancelled', '用户在澄清阶段取消任务')
+            store.append(self.session_id, 'assistant', '已取消等待澄清的任务；没有生成文件。')
+            self.status.setText('任务已取消。')
+            self.render_messages()
+            return True
+        from .material_resume import match_clarification
+        override = match_clarification(pending, store.files(store.session(self.session_id)['project']),
+                                       prompt)
+        if override is None:
+            questions = '；'.join(result.get('questions') or [])
+            store.append(self.session_id, 'assistant',
+                         '仍无法唯一确定本轮主体或期间，请回复明确的主体名称、期间或文件名。' + questions)
+            self.status.setText('等待补充信息：请明确主体、期间或文件名。')
+            self.render_messages()
+            return True
+        try:
+            store.set_material_resolution_override(run_id, override)
+        except (ValueError, PermissionError) as exc:
+            store.append(self.session_id, 'assistant', f'澄清未能应用：{exc}')
+            self.status.setText('澄清未能应用，请重新提交任务。')
+            self.render_messages()
+            return True
+        provider = None
+        snapshot = json.loads(store.run(run_id)['snapshot'])
+        if snapshot.get('automatic_materials') is True:
+            if self.client is None:
+                self.status.setText('请先连接服务端，才能继续已澄清的任务')
+                return True
+            from .generation import bundle_fingerprint
+            from .material_analysis import MaterialAnalysisProvider
+            provider = MaterialAnalysisProvider(
+                self.client, snapshot.get('model') or self.model_combo.currentData(),
+                bundle_fingerprint(snapshot['skill_id']))
+        store.append(self.session_id, 'event',
+                     '已按澄清恢复任务；沿用已完成的识别结果，不重复调用模型。')
+        self.composer.clear()
+        self.render_messages()
+        worker = self.register_task_worker(TaskWorker(store, run_id, self, provider=provider))
+        self.set_busy(True)
+        worker.start()
+        return True
+
     def submit(self):
         if not self.session_id or self.worker:
             return
@@ -1745,7 +1810,9 @@ class PlatformWindow(QMainWindow):
             summary = ('任务已取消，未发布正式成果。' if state == 'cancelled' else result['feedback'])
             store.append(session_id, 'assistant', summary)
             if target.visible(self):
-                self.status.setText('生成校验通过' if result.get('ok') else '生成未完成，详见对话反馈')
+                self.status.setText('等待补充信息，请在对话中回复主体、期间或文件名'
+                                    if state == 'waiting_user'
+                                    else '生成校验通过' if result.get('ok') else '生成未完成，详见对话反馈')
                 self.render_messages()
             return
         summary = (
@@ -1955,8 +2022,12 @@ class PlatformWindow(QMainWindow):
         chain = self._local_chain
         if chain is None or destination.binding.task_id != chain['run']:
             return
-        self._local_chain = None
         state = destination.store.run(destination.binding.task_id)['state']
+        if state == 'waiting_user':
+            # Keep the chain parked; the clarified resume finishes this run
+            # first and only then advances to the next skill.
+            return
+        self._local_chain = None
         if state == 'cancelled' or not destination.visible(self) or self.worker is not None:
             return
         if state != 'succeeded':

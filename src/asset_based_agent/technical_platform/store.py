@@ -32,6 +32,7 @@ class PlatformStore:
             apply_v9,
             apply_v10,
             apply_v11,
+            apply_v12,
             migrate_database,
         )
 
@@ -91,6 +92,7 @@ class PlatformStore:
                 apply_v9(db)
                 apply_v10(db)
                 apply_v11(db)
+                apply_v12(db)
                 db.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
         # Creation is allowed only during explicit initialization. Later requests
         # must fail closed if a disk disappears or the database is moved.
@@ -341,8 +343,10 @@ class PlatformStore:
     def transition(self, run_id: str, state: str, detail: str) -> None:
         allowed = {
             "queued": {"running", "cancelled", "failed"},
-            "running": {"validating", "cancelled", "failed"},
-            "validating": {"succeeded", "failed", "cancelled"},
+            "running": {"validating", "cancelled", "failed", "waiting_user"},
+            "validating": {"succeeded", "failed", "cancelled", "waiting_user"},
+            # Clarification resume re-enters running; it never re-bills the model.
+            "waiting_user": {"running", "cancelled", "failed"},
         }
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -361,6 +365,33 @@ class PlatformStore:
                 "INSERT INTO events(run,state,detail,created) VALUES(?,?,?,?)",
                 (run_id, state, detail, now()),
             )
+
+    def set_material_resolution_override(self, run_id: str, override: dict) -> None:
+        """Attach the user clarification to a waiting run snapshot.
+
+        The override is validated against the persisted candidate set at
+        resume time; here we only guarantee the run is actually waiting
+        so a clarification can never redirect a running or finished task.
+        """
+        if not isinstance(override, dict) or not override:
+            raise ValueError('澄清结果无效，请重新提交')
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT r.state, r.snapshot FROM runs r JOIN sessions s ON s.id=r.session "
+                "JOIN projects p ON p.id=s.project WHERE r.id=? AND p.owner=?",
+                (run_id, self.owner),
+            ).fetchone()
+            if row is None:
+                raise PermissionError("任务不存在或无权访问")
+            if row['state'] != 'waiting_user':
+                raise ValueError('只有等待补充信息的任务可以接受澄清答复')
+            snapshot = json.loads(row['snapshot'])
+            snapshot['material_resolution_override'] = override
+            db.execute("UPDATE runs SET snapshot=? WHERE id=?",
+                       (json.dumps(snapshot, ensure_ascii=False), run_id))
+            db.execute("INSERT INTO events(run,state,detail,created) VALUES(?,?,?,?)",
+                       (run_id, 'waiting_user', '已记录用户澄清，准备从资料消歧节点恢复', now()))
 
     def save_result(self, run_id: str, result: dict) -> None:
         self.run(run_id)

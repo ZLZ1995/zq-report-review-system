@@ -57,10 +57,10 @@ def test_provider_uploads_visible_excerpt_not_paths_or_hidden_sheets(tmp_path):
             assert str(tmp_path) not in str(payload)
             assert '资产负债表' in payload['files'][0]['text']
             return {'assignments': [{'file_id': 'one', 'role': 'balance_sheet', 'reason': '表头'}]}
-    roles, _ = MaterialAnalysisProvider(Client(), 'model', 'rules').analyze(
+    resolution, _ = MaterialAnalysisProvider(Client(), 'model', 'rules').analyze(
         [{'id': 'one', 'name': path.name, 'path': str(path), 'sha256': digest(path)}],
         'run', Event(), lambda _: None)
-    assert roles == {'balance_sheet': 'one'}
+    assert resolution.selected == {'balance_sheet': 'one'}
 
 
 def test_auto_generation_task_authorizes_only_model_analysis_and_copy_writes(tmp_path, monkeypatch):
@@ -126,10 +126,10 @@ def test_provider_bounds_per_file_excerpt_for_server_output_budget(tmp_path):
             captured.update(payload)
             return {'assignments': [{'file_id': 'one', 'role': 'balance_sheet', 'reason': '表头'}]}
 
-    roles, _ = MaterialAnalysisProvider(Client(), 'model', 'rules').analyze(
+    resolution, _ = MaterialAnalysisProvider(Client(), 'model', 'rules').analyze(
         [{'id': 'one', 'name': path.name, 'path': str(path), 'sha256': digest(path)}],
         'run', Event(), lambda _: None)
-    assert roles == {'balance_sheet': 'one'}
+    assert resolution.selected == {'balance_sheet': 'one'}
     assert 0 < len(captured['files'][0]['text']) <= MAX_FILE_EXCERPT_CHARS
     assert MAX_FILE_EXCERPT_CHARS <= 1500
 
@@ -162,9 +162,9 @@ def test_provider_retries_once_on_incomplete_server_result(tmp_path):
                 raise RemoteAuthenticationError('资料识别结果不完整，请重试；没有生成文件。')
             return {'assignments': [{'file_id': 'one', 'role': 'balance_sheet', 'reason': '表头'}]}
 
-    roles, _ = MaterialAnalysisProvider(FlakyClient(), 'model', 'rules').analyze(
+    resolution, _ = MaterialAnalysisProvider(FlakyClient(), 'model', 'rules').analyze(
         files, 'run', Event(), lambda _: None)
-    assert roles == {'balance_sheet': 'one'}
+    assert resolution.selected == {'balance_sheet': 'one'}
     assert FlakyClient.calls == 3
 
     class AlwaysBadClient:

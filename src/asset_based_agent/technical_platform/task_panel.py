@@ -99,7 +99,8 @@ def progress_text(state: TaskPanelState) -> str:
         parts.append(f'等待：{state.wait_reason}')
     if state.terminal:
         label = {'succeeded': '已完成', 'failed': '已失败',
-                 'cancelled': '已取消'}[state.terminal]
+                 'cancelled': '已取消',
+                 'waiting_user': '等待补充信息'}.get(state.terminal, state.terminal)
         parts.append(label)
     if state.total_nodes:
         percent = state.completed_nodes * 100 // state.total_nodes

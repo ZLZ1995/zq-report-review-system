@@ -23,6 +23,13 @@ def call(script, args):
 
 def detail(scripts, inputs, output):
     bs, template = inputs['balance_sheet'], inputs['template']
+    # Multi-period inputs: the resolved latest statement stays the main
+    # balance sheet; earlier periods ride along as repeated
+    # --financial-statement arguments for cover/valuation metadata.
+    statements = inputs.get('financial_statements') or [bs]
+    financial = []
+    for statement in statements:
+        financial.extend(['--financial-statement', statement])
     tb = ['--trial-balance', inputs['trial_balance']] if inputs.get('trial_balance') else []
     mapping, chain = output / 'project_mapping.json', output / 'formula_chain_map.json'
     layout, protection = output / 'sheet_structure_map.json', output / 'formula_protection_report.json'
@@ -39,7 +46,7 @@ def detail(scripts, inputs, output):
         ('build_input_cell_registry.py', ['--layout-map', layout, '--output', registry]),
         ('build_summary_chain_input_registry.py', ['--layout-map', layout, '--input-cell-registry', registry, '--output', summary]),
         ('run_detail_workbook_pipeline.py', [*tb, '--balance-sheet', bs,
-            '--financial-statement', bs, *journal, *bank, '--execution-mode', 'auto',
+            *financial, *journal, *bank, '--execution-mode', 'auto',
             '--template', template, '--output-dir', output,
             '--published-workbook', output / 'detail_workbook.xlsx', '--project-mapping', mapping,
             '--formula-chain', chain, '--sheet-layout', layout, '--formula-protection', protection,

@@ -8,11 +8,14 @@ from asset_based_agent.technical_platform.release_info import (
 )
 
 
-def test_release_identity_matches_schema_11_delivery():
+def test_release_identity_tracks_schema_12_waiting_user_migration():
     from asset_based_agent.technical_platform.local_migrations import SCHEMA_VERSION
 
+    # Client version stays at the last signed release; schema advanced
+    # locally for the waiting_user step-state migration (v12) and must
+    # move together with the next release cut.
     assert CLIENT_VERSION == '0.2.10'
-    assert SCHEMA_VERSION == 11
+    assert SCHEMA_VERSION == 12
 
 
 def test_local_release_contains_actual_rule_hash():

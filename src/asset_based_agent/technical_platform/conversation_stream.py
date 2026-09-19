@@ -23,7 +23,7 @@ CHANNEL_KIND: dict[str, StreamKind] = {
     'deliver': 'delivery'}
 
 TERMINAL_TEXT = {'succeeded': '任务完成', 'failed': '任务失败',
-                 'cancelled': '任务已取消'}
+                 'cancelled': '任务已取消', 'waiting_user': '等待补充信息'}
 
 StreamKind = Literal['phase', 'node_status', 'model_delta', 'parse_status',
                      'office_progress', 'browser_action', 'verification',
