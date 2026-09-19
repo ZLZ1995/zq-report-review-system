@@ -905,6 +905,7 @@ class PlatformWindow(QMainWindow):
                     except (ValueError, OSError, sqlite3.Error):
                         content.append('<p>下载成果记录暂不可用，请核对本地项目数据。</p>')
                 if result.get('kind') == 'plan' and run['state'] == 'succeeded':
+                    from .artifact_contract import display_name_of, user_artifacts
                     from .plan_results import completed_step_results
                     try:
                         records = completed_step_results(self.store, self.session_id, run['id'])
@@ -924,15 +925,33 @@ class PlatformWindow(QMainWindow):
                                 if review.get('exported_report'):
                                     content.append(f'<p>📄 {html.escape(Path(review["exported_report"]).name)} '
                                         f'<a href="zq-step-report:{link}">打开审核报告</a></p>')
-                            for index, artifact in enumerate(record['result'].get('artifacts', [])):
-                                content.append(f'<p>📄 {html.escape(artifact["name"])}　'
+                            for index, artifact in user_artifacts(record['result']):
+                                content.append(f'<p>📄 {html.escape(display_name_of(artifact))}　'
                                     f'<a href="zq-step-artifact:{run["id"]}/{ordinal}/{index}">打开步骤成果</a></p>')
-                    except (ValueError, PermissionError, KeyError, OSError):
+                    except (ValueError, PermissionError, KeyError, OSError, TypeError):
                         content.append('<p>组合成果记录校验失败，请核对任务状态。</p>')
                 if result.get('kind') == 'generation':
-                    for index, artifact in enumerate(result.get('artifacts', [])):
-                        name = html.escape(artifact['name'])
-                        content.append(f'<p>📄 {name}　<a href="zq-artifact:{run["id"]}/{index}">打开文件</a></p>')
+                    try:
+                        from .artifact_contract import (
+                            deliverable_label, display_name_of, user_artifacts)
+                        visible_artifacts = user_artifacts(result)
+                    except (ValueError, KeyError, TypeError):
+                        content.append('<p>生成成果记录校验失败，请核对任务状态。</p>')
+                        visible_artifacts = []
+                    if (len(visible_artifacts) == 1 and run['state'] == 'succeeded'
+                            and result.get('ok') is True):
+                        index, artifact = visible_artifacts[0]
+                        label = deliverable_label(artifact)
+                        shown = html.escape(display_name_of(artifact))
+                        if label:
+                            content.append(f'<p>{html.escape(label)}已生成并通过校验。</p>')
+                        content.append(f'<p>最终文件：{shown}　'
+                            f'<a href="zq-artifact:{run["id"]}/{index}">打开文件</a>　'
+                            f'<a href="zq-artifact-folder:{run["id"]}/{index}">打开所在文件夹</a></p>')
+                    else:
+                        for index, artifact in visible_artifacts:
+                            shown = html.escape(display_name_of(artifact))
+                            content.append(f'<p>📄 {shown}　<a href="zq-artifact:{run["id"]}/{index}">打开文件</a></p>')
                 if run['state'] == 'succeeded' and result.get('kind') == 'review':
                     identity = run['id']
                     content.append(f'<p>审核任务 {html.escape(identity)}：<a href="zq-export:{identity}">生成标准Word审核报告…</a></p>')
@@ -1085,12 +1104,13 @@ class PlatformWindow(QMainWindow):
         if action == 'zq-annotate':
             self.offer_annotations(url.path(), explicit=True)
             return
-        if action == 'zq-artifact':
+        if action in {'zq-artifact', 'zq-artifact-folder'}:
             try:
                 from .generation import artifact_path
                 run_id, index = url.path().split('/')
                 path = artifact_path(self.store, self.session_id, run_id, int(index))
-                if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+                target = path.parent if action == 'zq-artifact-folder' else path
+                if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(target))):
                     raise ValueError('无法打开文件，请检查默认应用')
             except (ValueError, OSError, KeyError, PermissionError) as exc:
                 QMessageBox.warning(self, '生成成果', str(exc))
