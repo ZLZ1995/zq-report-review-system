@@ -152,3 +152,10 @@ def test_bank_evidence_activates_bank_page_without_trial_balance():
     result = module.select_execution_scope({'货币资金': 1000, '实收资本': 1000},
                                            [('银行存款', [], 'cash')], bank_evidence_available=True)
     assert result['active_detail_sheets'] == ['银行存款']
+
+
+def test_parse_date_text_accepts_datetime_with_time() -> None:
+    module = load_pipeline_module()
+    from datetime import datetime
+    assert module.parse_date_text('2026-06-21 02:09:18') == datetime(2026, 6, 21)
+    assert module.parse_date_text('2026/6/5 07:33:15') == datetime(2026, 6, 5)

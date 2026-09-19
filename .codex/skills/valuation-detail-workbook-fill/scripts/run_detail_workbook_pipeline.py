@@ -499,6 +499,9 @@ def parse_date_text(value: Any) -> datetime | None:
     match = re.search(r"(\d{4})年(\d{1,2})月(\d{1,2})日", text)
     if match:
         return datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    match = re.search(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?!\d)", text)
+    if match:
+        return datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)))
     try:
         serial = float(text)
         if 1 <= serial <= 100000:
