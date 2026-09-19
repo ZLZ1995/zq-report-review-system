@@ -6,6 +6,12 @@ from .skills import digest
 
 ROLES = {'balance_sheet', 'trial_balance', 'journal', 'bank_statement', 'other'}
 
+# Server-side material analysis caps the model reply at 2048 tokens; long excerpts
+# make the model exceed that budget and the server rejects the truncated JSON.
+# Classification evidence (titles and headers) lives in the opening rows, so a
+# short per-file excerpt keeps single-call identification reliable.
+MAX_FILE_EXCERPT_CHARS = 1500
+
 
 def resolve_roles(plan, files):
     assignments = plan.get('assignments')
@@ -63,7 +69,7 @@ class MaterialAnalysisProvider:
                 texts[chunk.source_file_id].append(chunk.text)
         # Bounded visible excerpts only; no paths, binary originals or hidden sheets.
         payload_files = [{'file_id': item['id'], 'name': item['name'],
-                          'text': '\n'.join(texts[item['id']])[:6000]} for item in files]
+                          'text': '\n'.join(texts[item['id']])[:MAX_FILE_EXCERPT_CHARS]} for item in files]
         if cancel.is_set():
             raise TaskCancelled('资料分析已取消')
         progress('正在联网验证并调用模型识别资料；识别不会编造缺失数据。')
