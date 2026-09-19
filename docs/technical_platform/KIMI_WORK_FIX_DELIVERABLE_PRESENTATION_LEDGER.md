@@ -85,3 +85,43 @@ AGENTS.md 内容已从 `D:/1/1/ai-excel-agent` 的 HEAD（git show）读取：�
 - `artifact_contract.detail_display_name(work)`：从 `output/cover_fill_report.json`（status=='pass' 的确定性封面填报记录）取 F7 主体 + F9/H9/J9 年月日，生成 `{主体}评估明细表（YYYY-MM-DD）.xlsx`
 - 清理 Windows 非法字符与控制字符、去空白、主体 ≤60 字符、全长 ≤120 字符；缺主体/缺日期/非法日期/类型错误/门禁未过/文件缺失 → 退化 `最终评估明细表.xlsx`
 - 不修改内部标准文件名，display_name 不参与任何路径解析（测试 `test_display_name_never_drives_resolution` 证明）
+
+## F07：完整回归与真实运行复测
+
+1. 新增契约单元测试：`test_delivery_presentation.py` 25 passed
+2. generation / artifact registry / adapter / step results 目标测试：77 passed（含 test_artifact_registry、test_generation_*、test_step_delivery、test_local_generation_direct、test_new_builtin_generation、test_browser_upload_*、test_branch_context、test_agent_branch_context、test_export）
+3. app/UI 目标测试：同上批次内通过；修复前 2 个 UI 测试真实失败（5 个"打开文件"、内部 JSON 可见），修复后全过
+4. 技术平台完整测试集：`pytest tests/technical_platform tests/report_review_app tests/report_review_server -q --basetemp=D:/ZQ-Acceptance/tmp-pytest-basetemp -p no:cacheprovider`
+   - 第一轮（提交前）：1686 passed / 1 skipped / 0 failed，422s，日志 `pytest-full-f09.log`
+   - 第二轮（4 个提交完成后最终状态）：**1687 passed / 1 skipped / 0 failed**，420s，日志 `pytest-full-f09final.log`，EXIT=0
+   - 基线对比：上一轮 1662 passed；本轮 +25 个新测试 = 1687，无回归
+5. 现有产品回归脚本：`scripts/check_technical_platform.py` 即同一 tests/technical_platform 套件（已覆盖）；`scripts/verify_detail_template_preservation.py` 对复测产出执行：10123 个模板公式 0 变化、超链接 0 变化、表序保持（ok=true）
+6. 真实运行复测（`f07_real_run.py`，输入为真实五文件副本 `D:\ZQ-Acceptance\real-machine-test\20260919-dialogfix\real\`，复用问题运行持久化的资料识别结果回放，未调用模型，管线真实执行）：
+   - 最终 Excel 存在且 openpyxl 可打开，528,958 字节（与问题运行一致）
+   - 5 份原始资料哈希不变；锁定模板哈希不变
+   - result 中用户可见工件恰 1 个（detail_workbook.xlsx），display_name = `北京绵脉科技有限公司评估明细表（2026-06-30）.xlsx`
+   - completion_status/delivery_check_report/execution_scope/user_feedback 仍生成在运行目录并登记为 internal/validation_evidence；delivery gate = pass
+   - `select_primary` 按主工件身份解析到最终 Excel 且哈希稳定
+   - staging 未被登记为成果
+   - 失败/取消不发布成果：既有适配器测试 `test_generator_cannot_publish_missing_or_invalid_primary[failed-with-artifact]` 覆盖（通过）
+7. 旧结果兼容（`f07_legacy_check.py`，问题运行 `.zq` 副本，仅改副本内路径前缀）：
+   - 旧结果（无新字段）推断唯一主交付物；对话渲染为"评估明细表已生成并通过校验。最终文件：北京绵脉科技有限公司评估明细表（2026-06-30）.xlsx [打开文件][打开所在文件夹]"
+   - "打开文件"链接恰 1 个；内部 JSON/MD 不展示
+   - `artifact_path` 经 session 授权 + 路径边界 + 哈希校验解析到真实工作簿（528,958 字节）
+   - 附带证据：存储路径被改到边界外时 `artifact_path` 正确拒绝（PermissionError）
+
+## F08：复查和本地交付
+
+1. `git diff` 仅含本轮必要改动：4 个提交 a6fa7dd / a65915c / 99d33da / b8c2d0c；改动文件 = artifact_contract.py（新）、generation.py、artifact_registry.py、branch_understanding.py、app.py、test_delivery_presentation.py（新）、本账本
+2. 未删除任何校验/诊断工件：SKILL.md 要求的内部工件全部继续生成并落盘（真实复测核实）
+3. 未按扩展名隐藏 JSON：角色模型按 Skill 声明的交付物名单判定，`office_workflow_contract_validation.json`（工作流契约 Skill 的正式业务结果）仍为 user/primary
+4. 未绕过 run/session 授权、路径边界、哈希校验：artifact_path/step_artifact_path/resolve_step_inputs 校验逻辑原样保留
+5. 历史任务结果兼容读取：见 F07.7
+6. 未泄露绝对业务路径：display_name 只含主体+日期，经非法字符清理与限长；对话不展示路径
+7. 未执行 GitHub 推送、Release、Zeabur、正式 EXE 重建（4 个提交仅本地）
+
+剩余风险：
+- `browser_upload_candidates.py` 仍会把内部 JSON 列为网站上传候选（本轮文档范围外；上传流程有独立逐对象确认）；如需收紧可复用 `user_artifacts` 过滤
+- 旧结果显示名派生依赖运行目录内 `cover_fill_report.json` 仍存在；缺失时退化为 `最终评估明细表.xlsx`，不影响打开
+
+回滚方法：`git revert b8c2d0c 99d33da a65915c a6fa7dd`（或 `git reset --keep d44358a` 后重新检出——仅限确需回滚时，注意保留用户未提交改动）；旧结果无新字段，回滚后行为与修复前完全一致。
