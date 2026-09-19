@@ -75,6 +75,21 @@ class MaterialAnalysisProvider:
         progress('正在联网验证并调用模型识别资料；识别不会编造缺失数据。')
         payload = {'model_id': self.model_id, 'request_id': 'MATERIAL-' + run_id, 'files': payload_files}
         cancellable = getattr(self.client, 'analyze_materials_cancellable', None)
-        plan = cancellable_call(lambda: cancellable(payload, cancel) if callable(cancellable)
-                                else self.client.analyze_materials(payload), cancel)
+
+        def call_model():
+            return (cancellable(payload, cancel) if callable(cancellable)
+                    else self.client.analyze_materials(payload))
+
+        from ..report_review_app.services.remote_auth_service import (
+            RemoteAuthenticationError,
+        )
+        try:
+            plan = cancellable_call(call_model, cancel)
+        except RemoteAuthenticationError as exc:
+            # The server explicitly asks for a retry when the model reply was
+            # truncated or malformed; auth/session failures must not retry.
+            if '资料识别结果不完整' not in str(exc) or cancel.is_set():
+                raise
+            progress('识别结果不完整，正在重试一次。')
+            plan = cancellable_call(call_model, cancel)
         return resolve_roles(plan, files), plan
