@@ -64,3 +64,30 @@ def test_confirmed_office_workflow_contract_runs_real_validator(tmp_path):
     report = json.loads((output / 'office_workflow_contract_validation.json').read_text('utf-8'))
     assert report['ok'] is True
     assert report['office_skills'] == ['documents']
+
+
+def test_financial_metadata_prefers_prepared_by_over_column_headers(tmp_path):
+    from asset_based_agent.technical_platform.generation_worker import (
+        _financial_metadata,
+    )
+
+    path = tmp_path / 'std.xlsx'
+    book = Workbook()
+    balance = book.active
+    balance.title = '资产负债表'
+    profit = book.create_sheet('利润表')
+    balance['A1'] = '资产负债表'
+    balance['A2'] = '2024年12月31日'
+    balance['F2'] = '会企01表'
+    balance['A3'] = '编制单位：北京绵脉科技有限公司'
+    balance['F3'] = '单位：元'
+    balance['A4'] = '资产'
+    balance['D4'] = '负债和所有者权益（或股东权益）'
+    balance['B4'] = '期末余额'
+    profit['A1'] = '利润表'
+    profit['A2'] = '2024年12月'
+    profit['A3'] = '编制单位：北京绵脉科技有限公司'
+    book.save(path)
+    company, report_date = _financial_metadata(path)
+    assert company == '北京绵脉科技有限公司'
+    assert report_date.isoformat() == '2024-12-31'

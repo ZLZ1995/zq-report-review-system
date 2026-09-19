@@ -66,14 +66,15 @@ def _financial_metadata(path):
     match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', text)
     if match is None:
         raise ValueError('资产负债表表头缺少完整报表日期')
+    unit = next((item for item in values if '编制单位' in item or '单位名称' in item), '')
+    company = re.sub(r'.*(?:编制单位|单位名称)[:：]?\s*', '', unit).strip() if unit else ''
+    if company and not re.search(r'\d{4}年\d{1,2}月', company) and company != '元':
+        return company, date(*map(int, match.groups()))
     excluded = ('资产负债表', '编制单位', '单位', '日期')
     candidates = [re.sub(r'^编制单位[:：]?\s*', '', item).strip()
                   for item in values if not any(token in item for token in excluded)
                   and not re.search(r'\d{4}年\d{1,2}月', item)]
     company = max(candidates, key=len, default='')
-    if not company:
-        unit = next((item for item in values if '编制单位' in item), '')
-        company = re.sub(r'.*编制单位[:：]?\s*', '', unit).strip()
     if not company:
         raise ValueError('资产负债表表头缺少企业名称')
     return company, date(*map(int, match.groups()))
