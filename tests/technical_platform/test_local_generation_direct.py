@@ -196,6 +196,31 @@ def test_compound_request_chains_detail_then_brief(tmp_path, monkeypatch):
         window.close()
 
 
+def test_chain_continues_when_first_step_failed(tmp_path, monkeypatch):
+    """链式步骤互相独立：首步失败不连坐后续交付，仅取消才停止。"""
+    forbid_dialog(monkeypatch)
+    no_worker_start(monkeypatch)
+    window, store = build_window(tmp_path, monkeypatch, mode='full', reports=3, extras=2,
+                                 client=object(), models=[{'model_id': 'm', 'display_name': '模型'}])
+    try:
+        window.composer.setPlainText('生成评估明细表和财务简报')
+        window.submit()
+        first_run = window.run_id
+        assert first_run is not None
+        store.transition(first_run, 'running', 'test')
+        store.transition(first_run, 'failed', '资料识别不完整')
+        worker = window.worker
+        destination = TaskDestination.resolve(store, first_run)
+        window.finished(worker, destination)
+        assert window.run_id != first_run, '首步失败后应继续执行简报步骤'
+        snapshot = snapshot_of(store, window.run_id)
+        assert snapshot['skill_id'] == FINANCIAL_BRIEF.id
+        notes = [m['text'] for m in store.messages(window.session_id) if m['role'] == 'assistant']
+        assert any('继续执行后续技能' in text for text in notes)
+    finally:
+        window.close()
+
+
 def test_chain_stops_when_first_step_cancelled(tmp_path, monkeypatch):
     forbid_dialog(monkeypatch)
     no_worker_start(monkeypatch)

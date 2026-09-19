@@ -1957,11 +1957,11 @@ class PlatformWindow(QMainWindow):
             return
         self._local_chain = None
         state = destination.store.run(destination.binding.task_id)['state']
-        if state != 'succeeded' or not destination.visible(self) or self.worker is not None:
-            if state == 'failed' and destination.visible(self):
-                destination.store.append(destination.binding.session_id, 'assistant',
-                                         '上一技能未成功，后续技能已停止；请根据反馈调整后重新提交。')
+        if state == 'cancelled' or not destination.visible(self) or self.worker is not None:
             return
+        if state != 'succeeded':
+            destination.store.append(destination.binding.session_id, 'assistant',
+                                     '上一技能未成功（原因见上方反馈）；后续技能相互独立，继续执行后续技能。')
         previous_run = self.run_id
         self.execute_plan(chain['prompt'], chain['specs'][0],
                           selected_files=chain['files'], record_user=False)
