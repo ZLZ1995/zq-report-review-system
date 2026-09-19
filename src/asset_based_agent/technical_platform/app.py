@@ -1932,7 +1932,7 @@ class PlatformWindow(QMainWindow):
         target.store.append(
             target.binding.session_id,
             "assistant",
-            failure_message(target.store, target.binding.task_id),
+            failure_message(target.store, target.binding.task_id, worker_message=message),
         )
         if target.visible(self):
             self.status.setText("任务状态及处理建议已记录在对话中。")
