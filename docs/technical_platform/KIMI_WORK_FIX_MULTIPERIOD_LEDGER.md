@@ -147,3 +147,58 @@
 - 重试扣费检查：恢复路径零模型调用（测试钉住 calls==1）。
 - 兼容性：旧单值 `balance_sheet` 消费方不变；`resolve_roles` 旧语义保留；schema v12 迁移自动备份。
 - 远端动作：本轮未推送 GitHub、未建 Release、未部署 Zeabur、未激活在线更新。
+
+## 候选包实机验收追加轮（2026-09-19 晚）
+
+### 新发现并修复的缺陷（提交 33d55d2）
+
+- 现象：真实五文件场景在计划确认后状态栏报"计划或授权校验未通过，未启动业务步骤"，runs 表为空。
+- 根因（traceback 证据）：`execute_compound` → `build_compound_task_spec` → `_fields` 抛
+  `ValueError: Generator reference roles are not supported by its input contract`——
+  理解层把"银行-绵脉(1).xlsx"标为参考角色后，app.py 路由条件（references 非空即走组合计划）
+  与编译层契约（生成器步骤禁止 reference_inputs）互相矛盾，凡"单生成器+参考文件"任务必失败。
+- 修复：DETAIL（自动资料识别生成器）放行 reference_inputs；适配器把参考文件标注
+  `user_role='reference'` 传入资料识别；发往模型的摘录前加"仅作参考资料，不作为填报依据"提示
+  （纯客户端改动）。HISTORY 等定位角色生成器保持严格契约。
+- 测试：新增 `tests/technical_platform/test_compound_detail_references.py` 4 个用例
+  （编译放行/HISTORY 仍拒绝/适配器标注/提示前缀），全量回归 1662 passed / 1 skipped / 0 failed
+  （tests/technical_platform + report_review_app + report_review_server，QT_QPA_PLATFORM=offscreen）。
+
+### 源码实机验证（修复后、真实模型、data13）
+
+- run d07a6e951d3f4614b684f71b189c66b3：state=succeeded，验收门
+  source_evidence / output_validation / original_hash_unchanged 全过。
+- 资料识别覆盖全部 5 个文件；参考文件（银行-绵脉(1).xlsx）参与识别但未作填报依据。
+- 多期间路由：balance_sheet 取 2026-06-30 期（19376B），2024/2025 两期作 comparison，
+  流水作 bank_statement。
+- 产物 detail_workbook.xlsx（528,957 B）封面：被评估单位=北京绵脉科技有限公司，
+  评估基准日=2026年6月30日（F9/H9/J9 单元格）。
+- 五个原件 SHA256 前后一致（只读未改）。
+
+### 过程中确认的非代码问题
+
+- 服务端 model_unavailable（409）系误报：重放脚本把 display_name（deepseek-flash）当 model_id；
+  用 UUID model_id 重放 200（1.8s）。管理台核对模型与渠道均 enabled、api_key_configured=true。
+- "任务理解未完成"多次出现为到 Zeabur 的间歇性 TCP 连接超时（httpx ConnectTimeout，
+  能力预检阶段），同一时刻 urllib/httpx 直连验证通过——网络抖动，非服务端或客户端缺陷。
+
+### 候选包
+
+- 第一候选（20260919-1945，提交 2572b3b）：冒烟 PASS（client=0.2.10; schema=12）、
+  冻结扫描 0 命中，但实机验收暴露上述参考角色缺陷，作废。
+- 第二候选（20260919-2235，提交 33d55d2）：构建中，待冒烟+实机验收。
+- 远端动作：仍未推送 GitHub、未建 Release、未部署 Zeabur、未激活在线更新。
+
+### 第二候选包（20260919-2235，提交 33d55d2）验收结果：PASS
+
+- EXE：`D:\ZQ-Acceptance\acceptance-builds\20260919-2235\ZQ技术平台\ZQ技术平台.exe`
+  （16,618,552 B，SHA256 `4c887f71a91371844e793dad324fc6bfe3b51ae4965e6b0302604d1e89af2bcc`）。
+- 冒烟 PASS：client=0.2.10; schema=12；冻结包敏感文件扫描 0 命中；
+  PYZ 字节码常量确认修复入包（material_analysis 含提示前缀、adapters/generation 含 user_role/DETAIL）。
+- 实机验收（round11，全新 data14/settings14，真实模型，北京绵脉 5 文件）：
+  - run c63a206cfa3b479c93e4b07b3cf7ce0d succeeded；自包含提示词一次直达计划，
+    无需范围澄清、无需资料澄清（scope_answered=False, material_answered=False）。
+  - 事件链：planning 已领取 → validating 全门过 → succeeded。
+  - 产物 detail_workbook.xlsx 封面：被评估单位=北京绵脉科技有限公司，评估基准日=2026年6月30日。
+  - 资料识别文案确认参考文件语义正确：银行-绵脉(1).xlsx"注明仅作参考资料，不作为填报依据"。
+  - 五个原件 SHA256 前后一致。
