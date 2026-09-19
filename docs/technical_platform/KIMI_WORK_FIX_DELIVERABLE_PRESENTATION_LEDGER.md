@@ -125,3 +125,13 @@ AGENTS.md 内容已从 `D:/1/1/ai-excel-agent` 的 HEAD（git show）读取：�
 - 旧结果显示名派生依赖运行目录内 `cover_fill_report.json` 仍存在；缺失时退化为 `最终评估明细表.xlsx`，不影响打开
 
 回滚方法：`git revert b8c2d0c 99d33da a65915c a6fa7dd`（或 `git reset --keep d44358a` 后重新检出——仅限确需回滚时，注意保留用户未提交改动）；旧结果无新字段，回滚后行为与修复前完全一致。
+
+## 候选 EXE 构建（2026-09-20 06:15，用户明确授权）
+
+- 构建起点：HEAD `16a5239`（含本轮交付物呈现修复 5 提交 + 之前多期间/参考角色修复链），工作树干净
+- 命令：`run-build-20260920-0615.bat`（TP_DIST_ROOT=`D:\ZQ-Acceptance\acceptance-builds\20260920-0615`），EXIT=0
+- 产物：`D:\ZQ-Acceptance\acceptance-builds\20260920-0615\ZQ技术平台\ZQ技术平台.exe`，16,622,933 字节，SHA256 `29be3aefa4ea6699589c52f2a03ab1514be1a8b3cf3739d22131dfb4a670d77b`
+- 打包完整性：PYZ 内含 `asset_based_agent.technical_platform.artifact_contract`（新模块已入冻结包，实测）
+- 冒烟（`scripts/smoke_technical_platform_exe.py`，需 `PYTHONPATH=src`）：PASS —— 健康探针 client=0.2.10 / schema=12 / protocol=1 / webengine_import=True，规则文件与源码逐字节一致，登录窗口正常
+- 排障记录：不带 PYTHONPATH 时冒烟导入 venv editable 安装指向的旧检出（D:/1/1，0.2.6/schema10）导致版本断言失败；属环境路径问题，非构建缺陷；新 EXE 健康探针实测 0.2.10/12
+- 未推送 GitHub、未发布 Release、未部署 Zeabur、未激活在线更新
