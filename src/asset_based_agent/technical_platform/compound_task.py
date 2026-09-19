@@ -76,7 +76,7 @@ def _fields(store, session_id, payload, proposal, files, identity, revision):
     selected_skills = {s.step_id: s.skill_id for s in proposal.steps}
     for step in plan.steps:
         skill = builtin[step.skill_id]
-        if skill in GENERATORS and step.reference_inputs:
+        if skill in GENERATORS and step.reference_inputs and skill != DETAIL:
             raise ValueError('Generator reference roles are not supported by its input contract')
         roles = None
         if skill == HISTORY:

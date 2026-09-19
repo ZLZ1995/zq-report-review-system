@@ -284,7 +284,10 @@ class MaterialAnalysisProvider:
                 texts[chunk.source_file_id].append(chunk.text)
         # Bounded visible excerpts only; no paths, binary originals or hidden sheets.
         payload_files = [{'file_id': item['id'], 'name': item['name'],
-                          'text': '\n'.join(texts[item['id']])[:MAX_FILE_EXCERPT_CHARS]} for item in files]
+                          'text': ('（用户指定：本文件仅作参考资料，不作为填报依据。）\n'
+                                   if item.get('user_role') == 'reference' else '')
+                          + '\n'.join(texts[item['id']])[:MAX_FILE_EXCERPT_CHARS]}
+                         for item in files]
         if cancel.is_set():
             raise TaskCancelled('资料分析已取消')
         progress('正在联网验证并调用模型识别资料；识别不会编造缺失数据。')

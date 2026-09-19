@@ -6,7 +6,7 @@ from pathlib import Path
 from ..artifact_registry import resolve_step_inputs
 from ..generation_paths import generation_work_directory
 from ..permissions import PermissionService
-from ..skills import FINANCIAL_BRIEF, HISTORY, WORKFLOW_TO_SKILL, digest
+from ..skills import DETAIL, FINANCIAL_BRIEF, HISTORY, WORKFLOW_TO_SKILL, digest
 from ..step_results import StepResults
 from ..tool_dispatcher import ToolOutcome
 
@@ -29,8 +29,12 @@ class GenerationAdapter:
                     'skill_instructions', 'input_roles', 'automatic_materials'}
                     or type(config['automatic_materials']) is not bool
                     or not isinstance(config['skill_instructions'], str)
-                    or step.reference_inputs):
+                    or (step.reference_inputs and step.skill_id != DETAIL.id)):
                 raise PermissionError('Generation step configuration is invalid')
+            reference_ids = set(step.reference_inputs)
+            if reference_ids:
+                files = [dict(f, user_role='reference') if f['id'] in reference_ids else f
+                         for f in files]
             references = dict(zip(step.inputs, (f['id'] for f in files)))
             roles = config['input_roles']
             if roles is not None:
