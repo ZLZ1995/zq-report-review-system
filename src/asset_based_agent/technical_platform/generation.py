@@ -217,6 +217,24 @@ def artifact_path(store, session_id, run_id, index):
     return path
 
 
+def register_artifacts(skill_id, work, names, succeeded):
+    """Stamp each registered artifact with its delivery role; evidence stays internal.
+
+    Staging files are never registered; on failure or cancellation only the
+    internal feedback note is listed, and no business file is published.
+    """
+    from .artifact_contract import detail_display_name, stamp_artifact
+    artifacts = []
+    for name in ([*names, 'user_feedback.md'] if succeeded else ['user_feedback.md']):
+        path = work / 'output' / name
+        if not (path.is_file() and path.resolve().is_relative_to(work)):
+            continue
+        display = (detail_display_name(work) if succeeded and skill_id == DETAIL.id
+                   and name == 'detail_workbook.xlsx' else None)
+        artifacts.append(stamp_artifact(skill_id, name, path, digest(path), display_name=display))
+    return artifacts
+
+
 def execute_generation(store, run_id, snapshot, cancel, progress, *, provider=None, manage_run=True,
                        step_id=None):
     root = validate_business_directory(store.path.parent)
@@ -388,7 +406,6 @@ def _execute_generation(store, run_id, snapshot, cancel, progress, *, provider=N
     feedback = run_feedback(work, succeeded)
     if automatic:
         feedback = '资料自动识别结果：\n' + identified + '\n\n' + feedback
-    artifacts = []
     if skill_id == HISTORY.id:
         names = ['history_fragment.docx', 'history_events.json', 'history_validation.json']
     elif skill_id == DETAIL.id:
@@ -399,10 +416,7 @@ def _execute_generation(store, run_id, snapshot, cancel, progress, *, provider=N
                  'extraction.json', 'timing.json']
     else:
         names = ['office_workflow_contract_validation.json']
-    for name in ([*names, 'user_feedback.md'] if succeeded else ['user_feedback.md']):
-        path = work / 'output' / name
-        if path.is_file() and path.resolve().is_relative_to(work):
-            artifacts.append({'name': name, 'path': str(path), 'sha256': digest(path)})
+    artifacts = register_artifacts(skill_id, work, names, succeeded)
     result = {'kind': 'generation', 'model_called': automatic, 'artifacts': artifacts,
               'feedback': feedback, 'ok': succeeded}
     if manage_run:

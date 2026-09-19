@@ -30,7 +30,8 @@ def _summary(result):
             'category', 'risk_level', 'confidence', 'requires_verification'))
             for issue in result.get('issues', [])]
     if kind == 'generation':
-        summary['artifacts'] = [_fields(item, ('name', 'sha256')) for item in result['artifacts']]
+        summary['artifacts'] = [_fields(item, ('name', 'sha256', 'role', 'visibility', 'display_name'))
+                                for item in result['artifacts']]
     summary['deliveries'] = [{'name': Path(path).name, 'sha256': version['sha256']}
                             for path, version in result.get('delivery_versions', {}).items()]
     return summary
