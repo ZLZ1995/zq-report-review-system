@@ -158,14 +158,26 @@ def test_provider_retries_once_on_incomplete_server_result(tmp_path):
 
         def analyze_materials(self, payload):
             FlakyClient.calls += 1
-            if FlakyClient.calls == 1:
+            if FlakyClient.calls <= 2:
                 raise RemoteAuthenticationError('资料识别结果不完整，请重试；没有生成文件。')
             return {'assignments': [{'file_id': 'one', 'role': 'balance_sheet', 'reason': '表头'}]}
 
     roles, _ = MaterialAnalysisProvider(FlakyClient(), 'model', 'rules').analyze(
         files, 'run', Event(), lambda _: None)
     assert roles == {'balance_sheet': 'one'}
-    assert FlakyClient.calls == 2
+    assert FlakyClient.calls == 3
+
+    class AlwaysBadClient:
+        calls = 0
+
+        def analyze_materials(self, payload):
+            AlwaysBadClient.calls += 1
+            raise RemoteAuthenticationError('资料识别结果不完整，请重试；没有生成文件。')
+
+    with pytest.raises(RemoteAuthenticationError):
+        MaterialAnalysisProvider(AlwaysBadClient(), 'model', 'rules').analyze(
+            files, 'run', Event(), lambda _: None)
+    assert AlwaysBadClient.calls == 3
 
     class RevokedClient:
         calls = 0

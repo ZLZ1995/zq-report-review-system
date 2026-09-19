@@ -83,13 +83,16 @@ class MaterialAnalysisProvider:
         from ..report_review_app.services.remote_auth_service import (
             RemoteAuthenticationError,
         )
-        try:
-            plan = cancellable_call(call_model, cancel)
-        except RemoteAuthenticationError as exc:
-            # The server explicitly asks for a retry when the model reply was
-            # truncated or malformed; auth/session failures must not retry.
-            if '资料识别结果不完整' not in str(exc) or cancel.is_set():
-                raise
-            progress('识别结果不完整，正在重试一次。')
-            plan = cancellable_call(call_model, cancel)
+        attempts = 0
+        while True:
+            try:
+                plan = cancellable_call(call_model, cancel)
+                break
+            except RemoteAuthenticationError as exc:
+                # The server explicitly asks for a retry when the model reply was
+                # truncated or malformed; auth/session failures must not retry.
+                attempts += 1
+                if attempts >= 3 or '资料识别结果不完整' not in str(exc) or cancel.is_set():
+                    raise
+                progress(f'识别结果不完整，正在重试（第 {attempts} 次）。')
         return resolve_roles(plan, files), plan
