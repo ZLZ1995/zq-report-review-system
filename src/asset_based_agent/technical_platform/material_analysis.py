@@ -6,10 +6,10 @@ from .skills import digest
 
 ROLES = {'balance_sheet', 'trial_balance', 'journal', 'bank_statement', 'other'}
 
-# Server-side material analysis caps the model reply at 2048 tokens; long excerpts
-# make the model exceed that budget and the server rejects the truncated JSON.
 # Classification evidence (titles and headers) lives in the opening rows, so a
-# short per-file excerpt keeps single-call identification reliable.
+# short per-file excerpt keeps single-call identification fast and reliable.
+# (The server reply budget was raised to 8192 tokens; the excerpt bound stays
+# to keep prompts small and latency low.)
 MAX_FILE_EXCERPT_CHARS = 1500
 
 

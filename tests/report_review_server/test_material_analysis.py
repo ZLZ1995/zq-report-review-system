@@ -12,7 +12,8 @@ def test_material_analysis_uses_metering_and_returns_no_costs():
         def execute(self, db, **kwargs):
             assert kwargs['user_id'] == 'user'
             assert kwargs['client_request_id'] == 'material:run'
-            assert kwargs['estimated_usage'].output_tokens == 2048
+            assert kwargs['estimated_usage'].output_tokens == 8192
+            assert kwargs['payload']['max_tokens'] == 8192
             return SimpleNamespace(payload={'choices': [{'message': {'content': json.dumps({
                 'assignments': [{'file_id': 'file', 'role': 'bank_statement', 'reason': '账户余额表头'}]})}}]})
     request = MaterialRequest(model_id='model', request_id='run', files=[{

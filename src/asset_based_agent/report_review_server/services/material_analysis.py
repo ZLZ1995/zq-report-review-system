@@ -46,9 +46,9 @@ def analyze_materials(metered, db, user_id, request):
     text = json.dumps([f.model_dump() for f in request.files], ensure_ascii=False)
     result = metered.execute(db, user_id=user_id, model_id=request.model_id,
         client_request_id='material:' + request.request_id,
-        estimated_usage=NormalizedUsage(input_tokens=len(text) + len(instructions), output_tokens=2048),
+        estimated_usage=NormalizedUsage(input_tokens=len(text) + len(instructions), output_tokens=8192),
         payload={'messages': [{'role': 'system', 'content': instructions}, {'role': 'user', 'content': text}],
-                 'temperature': 0, 'max_tokens': 2048, 'response_format': {'type': 'json_object'}})
+                 'temperature': 0, 'max_tokens': 8192, 'response_format': {'type': 'json_object'}})
     try:
         content = result.payload['choices'][0]['message']['content']
         plan = MaterialPlan.model_validate_json(content)
