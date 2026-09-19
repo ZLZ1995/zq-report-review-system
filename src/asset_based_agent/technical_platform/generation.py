@@ -128,6 +128,67 @@ def infer_financial_roles(files):
                     (item[1] for item in dated)))
 
 
+def financial_report_date(item):
+    """Balance-sheet header date of a financial workbook, or None when not a report."""
+    from datetime import date
+
+    from openpyxl import load_workbook  # type: ignore[import-untyped]
+
+    if Path(item['name']).suffix.lower() != '.xlsx':
+        return None
+    try:
+        book = load_workbook(item['path'], read_only=True, data_only=True)
+    except Exception:  # noqa: BLE001 - unreadable workbooks simply do not qualify
+        return None
+    try:
+        if '资产负债表' not in book.sheetnames or '利润表' not in book.sheetnames:
+            return None
+        sheet = book['资产负债表']
+        text = ' '.join(str(cell.value) for row in sheet.iter_rows(max_row=4)
+                        for cell in row if cell.value not in (None, ''))
+    finally:
+        book.close()
+    match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', text)
+    return date(*map(int, match.groups())) if match else None
+
+
+def select_financial_reports(files):
+    """Dialog-free binding: pick the three period reports out of the current selection."""
+    dated = [(stamp, item) for item in files
+             if (stamp := financial_report_date(item)) is not None]
+    if len(dated) < 3:
+        raise ValueError('财务简报需要三个期间的 XLSX 财务报表（含资产负债表、利润表及表头日期）；'
+                         f'本轮选定资料中只识别到 {len(dated)} 份，请补充或调整勾选后重试。')
+    if len(dated) > 3:
+        raise ValueError(f'本轮识别到 {len(dated)} 份可用财务报表，无法确定两年一期；'
+                         '请只勾选三份报表后重试。')
+    if len({stamp for stamp, _item in dated}) != 3:
+        raise ValueError('三份财务报表的期间不能重复')
+    dated.sort(key=lambda pair: pair[0])
+    reports = [item for _stamp, item in dated]
+    roles = dict(zip(('period_one', 'period_two', 'basis_date'),
+                     (item['id'] for item in reports)))
+    return roles, reports
+
+
+def auto_generation_roles(skill_id, files):
+    """Bind generator inputs without a dialog under a standing permission grant."""
+    if skill_id == DETAIL.id:
+        return None, files
+    if skill_id == FINANCIAL_BRIEF.id:
+        return select_financial_reports(files)
+    labels = {HISTORY.id: ('工商变更信息 Excel', '.xlsx'),
+              WORKFLOW_TO_SKILL.id: ('工作流契约 JSON', '.json')}
+    if skill_id not in labels:
+        raise PermissionError('不支持的本地生成 Skill')
+    label, suffix = labels[skill_id]
+    matches = [item for item in files if Path(item['name']).suffix.lower() == suffix]
+    if len(matches) != 1:
+        raise ValueError(f'该生成需要且仅需要一份{label}；本轮匹配到 {len(matches)} 份，'
+                         '请调整勾选后重试。')
+    return {INPUT_ROLES[skill_id][0][0]: matches[0]['id']}, matches
+
+
 def artifact_path(store, session_id, run_id, index):
     run = store.run(run_id)
     if run['session'] != session_id:

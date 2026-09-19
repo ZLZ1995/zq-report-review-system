@@ -175,6 +175,7 @@ class PlatformWindow(QMainWindow):
         self.update_worker = None
         self.available_update = None
         self._close_after_update = False
+        self._local_chain = None
         self.network_state = "connected"
         self.setWindowTitle(
             "ZQ 技术平台" + (" · 本地交互预览" if client is None else "")
@@ -257,6 +258,11 @@ class PlatformWindow(QMainWindow):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         ) == QMessageBox.StandardButton.Yes
+
+    def generation_consent_required(self) -> bool:
+        from .agent_permission_modes import requires_confirmation
+
+        return requires_confirmation(self.agent_permission_mode(), 'generate_file')
 
     def _build(self):
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -1309,7 +1315,7 @@ class PlatformWindow(QMainWindow):
 
     def try_local_builtin(self, prompt: str) -> bool:
         """Route new local-only built-ins without requiring a cloud schema change."""
-        from .skills import FINANCIAL_BRIEF, WORKFLOW_TO_SKILL
+        from .skills import DETAIL, FINANCIAL_BRIEF, HISTORY, WORKFLOW_TO_SKILL
 
         normalized = ''.join(prompt.casefold().split())
         financial = any(token in normalized for token in
@@ -1319,8 +1325,25 @@ class PlatformWindow(QMainWindow):
                     and any(token in normalized for token in ('创建', '制作', '生成', '更新', '校验')))
         if not financial and not workflow:
             return False
-        spec = FINANCIAL_BRIEF if financial else WORKFLOW_TO_SKILL
-        self.execute_plan(prompt, self.registry.get(spec.id))
+        chain = []
+        if financial:
+            if '明细表' in normalized:
+                chain.append(self.registry.get(DETAIL.id))
+            if '历史沿革' in normalized or '工商沿革' in normalized:
+                chain.append(self.registry.get(HISTORY.id))
+        chain.append(self.registry.get(FINANCIAL_BRIEF.id if financial else WORKFLOW_TO_SKILL.id))
+        files = [item for item in self.store.files(self.project_id)
+                 if item['id'] in self.selected_file_ids()]
+        if len(chain) > 1:
+            self.store.append(self.session_id, 'event',
+                              '本轮将依次执行：' + ' → '.join(spec.name for spec in chain))
+        previous_run = self.run_id
+        self.execute_plan(prompt, chain[0], selected_files=files or None)
+        if len(chain) > 1 and self.run_id != previous_run:
+            self._local_chain = {'prompt': prompt, 'files': files,
+                                 'specs': chain[1:], 'run': self.run_id}
+        else:
+            self._local_chain = None
         return True
 
     def try_local_skill_install(self, prompt: str) -> bool:
@@ -1501,7 +1524,10 @@ class PlatformWindow(QMainWindow):
             self.render_messages()
             return
         selected_name = package.manifest['name'] if package else spec.name
-        self.store.append(self.session_id, 'event', f'Agent 选择：{selected_name}。文件范围及写入权限仍需独立校验。')
+        note = ('文件范围及写入权限仍需独立校验。'
+                if spec not in GENERATORS or self.generation_consent_required()
+                else '已按当前权限模式直接执行；只生成副本，不修改原件。')
+        self.store.append(self.session_id, 'event', f'Agent 选择：{selected_name}。{note}')
         if spec.id == REVIEW.id:
             names = '\n'.join(f"• {item['name']}" for item in files)
             answer = QMessageBox.question(
@@ -1529,13 +1555,23 @@ class PlatformWindow(QMainWindow):
                 self.store.append(self.session_id, 'assistant', str(exc))
                 self.render_messages()
                 return
-            from .generation_dialog import GenerationDialog
-            dialog = GenerationDialog(spec, files, self.store.path.parent, self)
-            if dialog.exec() != QDialog.DialogCode.Accepted:
-                self.composer.setPlainText(prompt)
-                self.render_messages()
-                return
-            generation_roles = dialog.roles
+            if self.generation_consent_required():
+                from .generation_dialog import GenerationDialog
+                dialog = GenerationDialog(spec, files, self.store.path.parent, self)
+                if dialog.exec() != QDialog.DialogCode.Accepted:
+                    self.composer.setPlainText(prompt)
+                    self.render_messages()
+                    return
+                generation_roles = dialog.roles
+            else:
+                from .generation import auto_generation_roles
+                try:
+                    generation_roles, files = auto_generation_roles(spec.id, files)
+                except ValueError as exc:
+                    self.composer.setPlainText(prompt)
+                    self.store.append(self.session_id, 'assistant', str(exc))
+                    self.render_messages()
+                    return
             generation_confirmed = True
         provider = None
         if spec.id == 'valuation-detail-workbook-fill':
@@ -1907,11 +1943,30 @@ class PlatformWindow(QMainWindow):
             return
         worker.deleteLater()
         self.refresh_balance()
+        self.continue_local_chain(destination)
         if destination.visible(self) and self.worker is None:
             self.offer_annotations(destination.binding.task_id)
         else:
             from .annotation_followup import ensure_questions
             ensure_questions(destination.store, destination.binding.task_id)
+
+    def continue_local_chain(self, destination):
+        """Follow a locally routed multi-skill request with its next step."""
+        chain = self._local_chain
+        if chain is None or destination.binding.task_id != chain['run']:
+            return
+        self._local_chain = None
+        state = destination.store.run(destination.binding.task_id)['state']
+        if state != 'succeeded' or not destination.visible(self) or self.worker is not None:
+            if state == 'failed' and destination.visible(self):
+                destination.store.append(destination.binding.session_id, 'assistant',
+                                         '上一技能未成功，后续技能已停止；请根据反馈调整后重新提交。')
+            return
+        previous_run = self.run_id
+        self.execute_plan(chain['prompt'], chain['specs'][0],
+                          selected_files=chain['files'], record_user=False)
+        if len(chain['specs']) > 1 and self.run_id != previous_run:
+            self._local_chain = {**chain, 'specs': chain['specs'][1:], 'run': self.run_id}
 
     def balance_updated(self, amount):
         self.account_label.setText(f"余额：{amount} 元")
