@@ -78,7 +78,7 @@
 
 ## K05：复现补充文件后的任务理解异常
 
-- 复现测试 `test_clarification_resume.py`：完整两轮会话（9 资料 → ask → 同会话补 BS/PL → "本轮已补充资产负债表和利润表" → resume → plan），同步驱动 UnderstandingWorker，捕获 task_id/revision/新旧文件集合/问题上下文/请求Schema校验/异常类与阶段，诊断工件写入 `D:\KimiData\kimi\Workspaces\Agent开发\k05_repro\diagnostics.json`（无 Token/路径/业务内容）
+- 复现测试 `test_clarification_resume.py`：完整两轮会话（9 资料 → ask → 同会话补 BS/PL → "本轮已补充资产负债表和利润表" → resume → plan），同步驱动 UnderstandingWorker，捕获 task_id/revision/新旧文件集合/问题上下文/请求Schema校验/异常类与阶段，诊断工件写入会话工作区 `k05_repro/diagnostics.json`（无 Token/路径/业务内容）
 - **关键结论**：本地续接链路（controller.prepare resume + 新增文件进范围 + 第二轮理解 + complete）修复前即可走通——生产第二次故障不在本地状态/revision/文件作用域层，而在服务端响应或传输层被 `routing.py` 宽泛 `except Exception` 吞掉后误报为"连接及服务端状态"
 - 固定误分类缺陷：`RemoteAuthenticationError`（服务端响应Schema校验失败）修复前显示"请检查连接及服务端状态"（测试修复前失败）
 
