@@ -46,3 +46,35 @@ def failure_message(store, run_id: str, worker_message: str | None = None) -> st
     reason = safe_worker_reason(worker_message)
     reason_line = f"失败原因：{reason}\n" if reason else ""
     return f"任务未完成。失败阶段：{label}。\n{reason_line}{advice}\n任务编号：{run_id}"
+
+
+# --- K07: worker failure diagnostics (stage/class/safe code/ids only) ---
+import logging as _logging
+import re as _re
+
+logger = _logging.getLogger('asset_based_agent.diagnostics')
+
+_SECRET_PATTERNS = (
+    _re.compile(r'Bearer\s+\S+', _re.IGNORECASE),
+    _re.compile(r'token=\S+', _re.IGNORECASE),
+    _re.compile(r'api[-_]?key=\S+', _re.IGNORECASE),
+    _re.compile(r'password[=：]\S+', _re.IGNORECASE),
+    _re.compile(r'Cookie:\s*[^\n]+', _re.IGNORECASE),
+)
+
+
+def scrub(text, limit=300):
+    """Remove credential-shaped fragments and bound the detail length."""
+    cleaned = str(text)
+    for pattern in _SECRET_PATTERNS:
+        cleaned = pattern.sub('***', cleaned)
+    return cleaned[:limit]
+
+
+def log_worker_failure(stage, exc, *, request_id=None, task_id=None, revision=None):
+    """Structured failure line: no credentials, no paths, no business content."""
+    code = getattr(exc, 'error_code', None) or '-'
+    status = getattr(exc, 'http_status', None) or '-'
+    logger.error(
+        'stage=%s exception=%s error_code=%s http_status=%s request_id=%s task_id=%s revision=%s detail=%s',
+        stage, type(exc).__name__, code, status, request_id, task_id, revision, scrub(exc))

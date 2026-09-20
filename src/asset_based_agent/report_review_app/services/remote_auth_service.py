@@ -15,7 +15,26 @@ import httpx
 
 
 class RemoteAuthenticationError(ValueError):
-    pass
+    """Safe remote failure; error_code is a non-secret tracking label."""
+
+    def __init__(self, message='', *, error_code=None, http_status=None):
+        super().__init__(message)
+        self.error_code = error_code
+        self.http_status = http_status
+
+
+class RequestSchemaError(RemoteAuthenticationError):
+    """The outgoing request failed local schema validation; nothing was sent."""
+
+    def __init__(self, message=''):
+        super().__init__(message, error_code='request_schema_invalid')
+
+
+class ResponseSchemaError(RemoteAuthenticationError):
+    """The server reply failed response schema validation."""
+
+    def __init__(self, message=''):
+        super().__init__(message, error_code='response_schema_invalid')
 
 
 class CredentialStorageError(RemoteAuthenticationError):
@@ -23,19 +42,23 @@ class CredentialStorageError(RemoteAuthenticationError):
 
 
 class NetworkUnavailable(RemoteAuthenticationError):
-    pass
+    def __init__(self, message=''):
+        super().__init__(message, error_code='network_unavailable')
 
 
 class ServerCapabilityUnavailable(RemoteAuthenticationError):
-    pass
+    def __init__(self, message=''):
+        super().__init__(message, error_code='server_capability_unavailable')
 
 
 class SessionRevoked(RemoteAuthenticationError):
-    pass
+    def __init__(self, message=''):
+        super().__init__(message, error_code='session_revoked')
 
 
 class InsufficientBalance(RemoteAuthenticationError):
-    pass
+    def __init__(self, message=''):
+        super().__init__(message, error_code='insufficient_balance')
 
 
 BILLING_RECONCILIATION_MESSAGE = (
@@ -44,7 +67,8 @@ BILLING_RECONCILIATION_MESSAGE = (
 
 
 class BillingReconciliationRequired(RemoteAuthenticationError):
-    pass
+    def __init__(self, message=''):
+        super().__init__(message, error_code='billing_reconciliation_required')
 
 
 class CredentialStore(Protocol):
@@ -225,7 +249,10 @@ class RemoteSessionClient:
             validate_understanding,
         )
         from .task_cancellation import TaskCancelled
-        request = UnderstandingRequest.model_validate(payload)
+        try:
+            request = UnderstandingRequest.model_validate(payload)
+        except (TypeError, ValueError) as exc:
+            raise RequestSchemaError('本轮理解请求未通过本地Schema校验，未发送。') from exc
         if cancel is not None and cancel.is_set():
             raise TaskCancelled()
         self.require_capability('task_understanding', '/agent/understand')
@@ -256,7 +283,7 @@ class RemoteSessionClient:
         try:
             return validate_understanding(request, TaskUnderstanding.model_validate(result)).model_dump()
         except (TypeError, ValueError) as exc:
-            raise RemoteAuthenticationError('任务理解结果无效，未开始业务执行。') from exc
+            raise ResponseSchemaError('服务端任务理解响应未通过Schema校验，未开始业务执行。') from exc
 
     def propose_browser_step(self, payload: dict[str, object], *, cancel=None) -> dict[str, object]:
         from ...browser_contracts import (
@@ -493,7 +520,12 @@ class RemoteSessionClient:
             raise InsufficientBalance(message or "余额不足，无法开始本轮审核。")
         if response.status_code == 401:
             raise RemoteAuthenticationError("用户名或密码错误，或登录已失效。")
-        raise RemoteAuthenticationError(message or "远程服务请求失败。")
+        if response.status_code in (409, 422) or response.status_code >= 500:
+            raise RemoteAuthenticationError(message or "远程服务请求失败。",
+                                            error_code=f'http_{response.status_code}',
+                                            http_status=response.status_code)
+        raise RemoteAuthenticationError(message or "远程服务请求失败。",
+                                        http_status=response.status_code)
 
 
 class RemoteAuthService:
