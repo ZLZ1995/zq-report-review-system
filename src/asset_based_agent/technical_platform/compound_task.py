@@ -38,7 +38,8 @@ def _fields(store, session_id, payload, proposal, files, identity, revision):
             or any(available.get(key) != value for key, value in by_id.items())):
         raise PermissionError('Planning files changed or are outside the project')
     for file in request.request.files:
-        if file.model_dump() != {key: by_id[file.id][key] for key in ('id', 'name', 'sha256')}:
+        if (file.model_dump(include={'id', 'name', 'sha256'}) !=
+                {key: by_id[file.id][key] for key in ('id', 'name', 'sha256')}):
             raise PermissionError('Planning file version changed')
     understanding = request.understanding
     builtin = {s.id: s for s in BUILTINS}

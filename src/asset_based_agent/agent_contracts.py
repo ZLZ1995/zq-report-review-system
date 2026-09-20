@@ -39,10 +39,40 @@ class Versioned(Record):
         return value
 
 
+class MaterialEvidence(Record):
+    """Bounded local pre-identification summary; never paths or hidden sheets."""
+    format: str = Field(min_length=1, max_length=10)
+    readable: bool
+    document_type: Literal['balance_sheet', 'income_statement', 'cash_flow_statement',
+                           'trial_balance', 'journal', 'other']
+    entity_name: str | None = Field(default=None, max_length=200)
+    period_start: str | None = Field(default=None, pattern=r'^20\d{2}-\d{2}-\d{2}$')
+    period_end: str | None = Field(default=None, pattern=r'^20\d{2}-\d{2}-\d{2}$')
+    sheet_names: list[str] = Field(default_factory=list, max_length=10)
+    header_evidence: list[str] = Field(default_factory=list, max_length=20)
+    confidence: float = Field(ge=0, le=1)
+    warnings: list[str] = Field(default_factory=list, max_length=10)
+
+    @model_validator(mode='after')
+    def bounded_text(self):
+        if (any(len(item) > 100 for item in self.sheet_names + self.header_evidence)
+                or any(len(item) > 200 for item in self.warnings)):
+            raise ValueError('Material evidence text exceeds bounds')
+        return self
+
+
 class EvidenceRef(Record):
     id: Identifier
     name: str = Field(min_length=1, max_length=255, pattern=r'^[^/\\\x00]+$')
     sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
+    evidence: MaterialEvidence | None = None
+
+    @model_serializer(mode='wrap')
+    def drop_empty_evidence(self, handler):
+        result = handler(self)
+        if self.evidence is None:
+            result.pop('evidence', None)
+        return result
 
 
 class MessageRef(Record):

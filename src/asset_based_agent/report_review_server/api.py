@@ -175,6 +175,7 @@ def create_app(
         supported = {
             'skill_routing': ('/api/v1/skill-route', 'POST'),
             'task_understanding': ('/api/v1/agent/understand', 'POST'),
+            'material_evidence': ('/api/v1/agent/understand', 'POST'),
             'task_planning': ('/api/v1/agent/plan', 'POST'),
             'browser_step': ('/api/v1/agent/browser-step', 'POST'),
             'browser_view_actions': ('/api/v1/agent/browser-step', 'POST'),

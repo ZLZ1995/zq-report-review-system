@@ -8,10 +8,23 @@ from ..agent_contracts import (
     TaskUnderstanding,
     UnderstandingRequest,
 )
+from . import material_summary
 from .branch_understanding import PREFIX, branch_messages
 from .capability_registry import planning_candidates
 from .conversation_state import ConversationState
 from .understanding_policy import assess_understanding
+
+
+def _evidence_ref(record):
+    """Attach a bounded local summary for workbooks; metadata only otherwise."""
+    fields = {key: record[key] for key in ('id', 'name', 'sha256')}
+    from pathlib import Path
+    if Path(record['name']).suffix.lower() in material_summary.SUPPORTED_EXTENSIONS:
+        summary = material_summary.summarize_file(
+            record['path'], record['id'], record['name'])
+        fields['evidence'] = {key: value for key, value in summary.items()
+                              if key not in ('artifact_id', 'name')}
+    return EvidenceRef.model_validate(fields)
 
 
 class ClarificationContextLimit(ValueError):
@@ -71,7 +84,7 @@ class AgentController:
                 raise ValueError('分支参考已变化，请重新确认本轮要求')
         request = UnderstandingRequest(
             request_id=uuid4().hex, model_id=model_id, message_id=uuid4().hex, prompt=prompt,
-            files=[EvidenceRef.model_validate({k: f[k] for k in ('id', 'name', 'sha256')}) for f in files],
+            files=[_evidence_ref(f) for f in files],
             skills=planning_candidates(include_browser=browser_enabled) + list(candidates), context=context,
         )
         state = (self.state.resume(session_id, state['revision']) if resuming else

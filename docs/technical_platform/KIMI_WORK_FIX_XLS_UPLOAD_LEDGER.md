@@ -55,3 +55,14 @@
 - `material_analysis.statement_metadata`：支持 `.xls`（经 xls_header_values），逻辑与 .xlsx 一致
 - 转换失败给真实原因（xlrd 错误透传）；不要求用户手工转换
 - 验证：`test_xls_upload.py` 11 passed；目标回归子集 96 passed（material/automatic routing/generation/understanding policy/export/delivery presentation）
+
+## K03：Agent 理解前本地资料预识别
+
+- 新模块 `material_summary.py`：`summarize_file` 产出受限结构摘要（format/readable/document_type/entity_name/period/可见表名/header_evidence/confidence/warnings）；`.xls` 经 xlrd、`.xlsx/.xlsm` 经 openpyxl，语义一致；隐藏/veryHidden 工作表一律不读不进摘要（只记数量）；仅年月期间按月末规则标准化并在 warnings 保留推导标识；摘要不含绝对路径/公式/二进制
+- 类型识别：BS/PL/CF/TB/TBD 按表内标题与表头证据；主体识别支持 `公司=CODE (名称)`、`公司: CODE - 名称`、`编制单位：` 等真实格式；CF 空表头进入 warnings（主体/期间缺失）并降置信度
+- 契约扩展：`agent_contracts.py` 与服务端 `compat_agent_contracts.py` 同步新增 `MaterialEvidence` + `EvidenceRef.evidence`（可选，旧请求兼容；evidence 为空时序列化自动剔除，旧字节流不变）；双份 Record 均 extra=forbid + 边界校验
+- `agent_controller.prepare`：对选中工作簿文件附本地摘要（剥离与 EvidenceRef 重复的 artifact_id/name）
+- `remote_auth_service.understand_task`：`material_evidence` 能力门控——服务端未声明时剔除摘要降级为旧式请求（不修改调用方 payload）；服务端 `api.py` /capabilities 声明 `material_evidence`
+- 服务端 prompt `task_understanding.txt`：新增 evidence 使用规则（首要证据、readable=false/缺失警告按资料不足处理）
+- `compound_task.py`：计划文件版本比较限定 id/name/sha256 三键，避免 evidence 字段破坏既有校验
+- 测试：`test_material_summary.py`（11）+ `test_understanding_evidence.py`（6）+ `test_understanding_evidence_client.py`（2）+ `test_material_evidence.py`（3）；修复前 9 failed，修复后 22 passed；相关回归 92 passed（agent_controller/compound/routing/remote/server understanding/capabilities）

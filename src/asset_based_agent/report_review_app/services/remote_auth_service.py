@@ -242,6 +242,14 @@ class RemoteSessionClient:
                     'skills': [skill for skill in request.skills if skill.id != 'browser.task']})
             if cancel is not None and cancel.is_set():
                 raise TaskCancelled()
+        if any(item.evidence is not None for item in request.files):
+            try:
+                self.require_capability('material_evidence', '/agent/understand')
+            except ServerCapabilityUnavailable:
+                # Older servers reject the unknown field; fall back to file names.
+                request = request.model_copy(update={
+                    'files': [item.model_copy(update={'evidence': None})
+                              for item in request.files]})
         result = self._model_json('/agent/understand', request.model_dump(), cancel=cancel)
         if cancel is not None and cancel.is_set():
             raise TaskCancelled()
