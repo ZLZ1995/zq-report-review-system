@@ -364,6 +364,26 @@ def _execute_generation(store, run_id, snapshot, cancel, progress, *, provider=N
             statements.append(str(target))
         if len(statements) > 1:
             selected['financial_statements'] = statements
+    # Legacy .xls sources are converted inside this run's work directory; the
+    # original file ids and hashes remain authoritative, and every conversion
+    # is recorded with its tool. Hidden sheets never enter the converted copy.
+    conversions = []
+    for key, value in list(selected.items()):
+        paths = value if isinstance(value, list) else [value]
+        converted_paths = []
+        for item_path in paths:
+            path = Path(item_path)
+            if path.suffix.lower() != '.xls':
+                converted_paths.append(item_path)
+                continue
+            from .xls_support import convert_xls_to_xlsx
+            converted, entry = convert_xls_to_xlsx(path, work / 'converted' / (path.stem + '.xlsx'))
+            conversions.append({'input': key, **entry})
+            converted_paths.append(str(converted))
+        selected[key] = converted_paths if isinstance(value, list) else converted_paths[0]
+    if conversions:
+        (work / 'xls_conversion_report.json').write_text(
+            json.dumps({'conversions': conversions}, ensure_ascii=False), encoding='utf-8')
     job = work / 'job.json'
     job.write_text(json.dumps({'skill_id': skill_id, 'inputs': selected}, ensure_ascii=False), encoding='utf-8')
     command = ([sys.executable, '--builtin-skill-worker', str(job)] if getattr(sys, 'frozen', False)

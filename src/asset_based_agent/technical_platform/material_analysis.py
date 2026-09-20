@@ -51,16 +51,22 @@ def statement_metadata(path):
 
     entity, period = None, None
     evidence = []
-    try:
-        book = load_workbook(path, read_only=True, data_only=True)
-    except Exception:  # noqa: BLE001 - unreadable workbook means unidentifiable
-        return None, None, ('工作簿不可读取',)
-    try:
-        sheet = book['资产负债表'] if '资产负债表' in book.sheetnames else book.worksheets[0]
-        values = [str(cell.value).strip() for row in sheet.iter_rows(max_row=_HEADER_SCAN_ROWS)
-                  for cell in row if cell.value not in (None, '')]
-    finally:
-        book.close()
+    if Path(path).suffix.lower() == '.xls':
+        from .xls_support import xls_header_values
+        values = xls_header_values(path, _HEADER_SCAN_ROWS)
+        if values is None:
+            return None, None, ('工作簿不可读取',)
+    else:
+        try:
+            book = load_workbook(path, read_only=True, data_only=True)
+        except Exception:  # noqa: BLE001 - unreadable workbook means unidentifiable
+            return None, None, ('工作簿不可读取',)
+        try:
+            sheet = book['资产负债表'] if '资产负债表' in book.sheetnames else book.worksheets[0]
+            values = [str(cell.value).strip() for row in sheet.iter_rows(max_row=_HEADER_SCAN_ROWS)
+                      for cell in row if cell.value not in (None, '')]
+        finally:
+            book.close()
     unit = next((item for item in values if '编制单位' in item or '单位名称' in item), '')
     if unit:
         name = re.sub(r'.*(?:编制单位|单位名称)[:：]?\s*', '', unit).strip()

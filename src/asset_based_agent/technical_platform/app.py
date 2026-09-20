@@ -1197,7 +1197,7 @@ class PlatformWindow(QMainWindow):
         if not self.project_id or not self.attach.isEnabled():
             return
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "添加项目资料", "", "资料 (*.docx *.xlsx *.xlsm *.pdf *.json *.zip)"
+            self, "添加项目资料", "", "资料 (*.docx *.xlsx *.xls *.xlsm *.pdf *.json *.zip)"
         )
         self.import_files(paths)
 
@@ -1234,7 +1234,7 @@ class PlatformWindow(QMainWindow):
                 if path.is_dir():
                     errors.append(f"{path.name}：不支持文件夹")
                     continue
-                if path.suffix.lower() not in {".docx", ".xlsx", ".xlsm", ".pdf", ".json", ".zip"}:
+                if path.suffix.lower() not in {".docx", ".xlsx", ".xls", ".xlsm", ".pdf", ".json", ".zip"}:
                     errors.append(f"{path.name}：不支持的文件类型")
                     continue
                 hashed = digest(path)

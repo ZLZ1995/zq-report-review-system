@@ -1,7 +1,7 @@
 {
   "schema_version": 1, "id": "valuation-detail-workbook-fill", "version": "0.2.0",
   "purpose": "识别本轮财务资料，按锁定Excel模板生成评估明细表副本",
-  "source_extensions": [".xlsx"],
+  "source_extensions": [".xlsx", ".xls"],
   "required_roles": ["balance_sheet"], "optional_roles": ["trial_balance", "journal", "bank_statement"],
   "outputs": ["xlsx_workbook"],
   "acceptance_gates": ["source_evidence", "output_validation", "original_hash_unchanged", "template_links_unchanged"],
