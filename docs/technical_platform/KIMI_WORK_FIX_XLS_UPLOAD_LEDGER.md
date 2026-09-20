@@ -66,3 +66,12 @@
 - 服务端 prompt `task_understanding.txt`：新增 evidence 使用规则（首要证据、readable=false/缺失警告按资料不足处理）
 - `compound_task.py`：计划文件版本比较限定 id/name/sha256 三键，避免 evidence 字段破坏既有校验
 - 测试：`test_material_summary.py`（11）+ `test_understanding_evidence.py`（6）+ `test_understanding_evidence_client.py`（2）+ `test_material_evidence.py`（3）；修复前 9 failed，修复后 22 passed；相关回归 92 passed（agent_controller/compound/routing/remote/server understanding/capabilities）
+
+## K04：同主体多期间自动消歧
+
+- `material_analysis.resolve_materials` 扩展 `trial_balance`/`journal` 多候选分支：经 `material_summary.summarize_file` 做表内主体/期间提取（TB 取 `期间: YYYY-MM`，TBD 取期间列最大值），同主体多期间确定性选最新；较早期间记入新字段 `reference_artifact_ids`（历史参考，**不进** `comparison_artifact_ids`，不会被当作 --financial-statement 对比报表）
+- 追问仅限真实冲突：多主体 / 主体缺失 / 期间缺失 / 同主体同期间多版本；问题只点名无法推断的最小信息
+- 新增 TB/TBD 配对核验：选中对的主体不一致或最新期间不一致 → waiting_user 精确提问；一致 → reasons 记录"自动配对"
+- 文件名不覆盖表内证据（测试固定：名为 2023 的 TB 表内期间 2026-07 仍按 2026-07 处理）
+- `MaterialResolution` 新增 `reference_artifact_ids`（置于末尾，位置构造兼容）；`resolution_snapshot` 同步输出
+- 测试：`test_material_auto_disambiguation.py` 9 个（修复前 9 failed）；A8T 形态合成集（BS+TB×2+TBD×2）直接 resolved 无提问；既有 `test_material_multiperiod.py`/`test_material_analysis.py` 24 个回归全过；相关子集 45 passed

@@ -6,6 +6,7 @@ from datetime import date
 from pathlib import Path
 from typing import Literal, Mapping
 
+from .material_summary import summarize_file
 from .skills import digest
 
 ROLES = {'balance_sheet', 'trial_balance', 'journal', 'bank_statement', 'other'}
@@ -39,6 +40,9 @@ class MaterialResolution:
     comparison_artifact_ids: tuple[str, ...] = ()
     questions: tuple[str, ...] = ()
     reasons: tuple[str, ...] = ()
+    # Earlier same-entity periods of non-statement roles: audit trail only,
+    # never pipeline comparison input.
+    reference_artifact_ids: tuple[str, ...] = ()
 
 
 def statement_metadata(path):
@@ -118,6 +122,7 @@ def resolve_materials(plan, files):
     selected = {}
     candidates = {}
     comparison = []
+    reference = []
     questions = []
     reasons = []
     for role, members in groups.items():
@@ -177,6 +182,63 @@ def resolve_materials(plan, files):
             candidates[role] = tuple(
                 MaterialCandidate(i, role, e, p, ev + (r,), 1.0) for i, e, p, ev, r in ordered)
             continue
+        if role in ('trial_balance', 'journal'):
+            label = '试算表' if role == 'trial_balance' else '序时账'
+            info = []
+            for identity, reason in members:
+                path = by_id[identity].get('path')
+                if path:
+                    summary = summarize_file(path, identity,
+                                             by_id[identity].get('name'))
+                    entity = summary['entity_name']
+                    period = (date.fromisoformat(summary['period_end'])
+                              if summary['period_end'] else None)
+                    evidence = (tuple(summary['header_evidence'][:6])
+                                + tuple(summary['warnings']))
+                else:
+                    entity, period, evidence = None, None, ('缺少可读取的文件路径',)
+                info.append((identity, entity, period, evidence, reason))
+            entities = {entity for _, entity, _, _, _ in info if entity}
+            names = {identity: by_id[identity].get('name', identity) for identity, *_ in info}
+            if len(entities) > 1:
+                questions.append('检测到 ' + '、'.join(sorted(entities))
+                                 + ' 两组' + label + '，请选择本轮使用的主体')
+                candidates[role] = tuple(
+                    MaterialCandidate(i, role, e, p, ev + (r,), 1.0) for i, e, p, ev, r in info)
+                continue
+            if any(entity is None for _, entity, _, _, _ in info):
+                questions.append('部分' + label + '无法从正文识别主体（涉及：'
+                                 + '、'.join(names[i] for i, e, _, _, _ in info if e is None)
+                                 + '），请说明本轮使用的主体及对应文件')
+                candidates[role] = tuple(
+                    MaterialCandidate(i, role, e, p, ev + (r,), 1.0) for i, e, p, ev, r in info)
+                continue
+            if any(period is None for _, _, period, _, _ in info):
+                questions.append('部分' + label + '无法从正文识别期间（涉及：'
+                                 + '、'.join(names[i] for i, _, p, _, _ in info if p is None)
+                                 + '），请说明各文件对应的期间')
+                candidates[role] = tuple(
+                    MaterialCandidate(i, role, e, p, ev + (r,), 1.0) for i, e, p, ev, r in info)
+                continue
+            periods = [period for _, _, period, _, _ in info]
+            if len(set(periods)) != len(periods):
+                dupes = sorted({p.isoformat() for p in periods if periods.count(p) > 1})
+                questions.append('同一主体同一期间（' + '、'.join(dupes)
+                                 + '）存在多份' + label + '版本，请确认以哪一份为准')
+                candidates[role] = tuple(
+                    MaterialCandidate(i, role, e, p, ev + (r,), 1.0) for i, e, p, ev, r in info)
+                continue
+            ordered = sorted(info, key=lambda item: item[2])
+            chosen = ordered[-1]
+            selected[role] = chosen[0]
+            reference.extend(i for i, *_ in ordered[:-1])
+            reasons.append('同一主体（' + chosen[1] + '）识别到 ' + str(len(ordered))
+                           + ' 期' + label + '，按表内期间选择最新一期 '
+                           + chosen[2].isoformat() + '（' + names[chosen[0]]
+                           + '）作为主输入，其余期间保留为历史参考（不作为对比报表）')
+            candidates[role] = tuple(
+                MaterialCandidate(i, role, e, p, ev + (r,), 1.0) for i, e, p, ev, r in ordered)
+            continue
         # Duplicated non-statement roles cannot be disambiguated deterministically.
         questions.append('识别到多份同类资料（' + role + '：'
                          + '、'.join(by_id[i].get('name', i) for i, _ in members)
@@ -184,11 +246,34 @@ def resolve_materials(plan, files):
         candidates[role] = tuple(
             MaterialCandidate(i, role, None, None, (r,), 1.0) for i, r in members)
 
+    # Cross-check the selected TB/TBD pair: in-table entity and period must
+    # agree before the two are treated as one dataset.
+    pair = {}
+    for role in ('trial_balance', 'journal'):
+        identity = selected.get(role)
+        if not identity:
+            continue
+        path = by_id[identity].get('path')
+        if path:
+            summary = summarize_file(path, identity, by_id[identity].get('name'))
+            pair[role] = (summary['entity_name'], summary['period_end'])
+    if len(pair) == 2:
+        tb_entity, tb_period = pair['trial_balance']
+        tbd_entity, tbd_period = pair['journal']
+        if tb_entity and tbd_entity and tb_entity != tbd_entity:
+            questions.append('试算表主体（' + tb_entity + '）与序时账主体（' + tbd_entity
+                             + '）不一致，请确认本轮使用的主体')
+        elif tb_period and tbd_period and tb_period != tbd_period:
+            questions.append('最新试算表期间（' + tb_period + '）与序时账最新期间（'
+                             + tbd_period + '）不一致，请确认本轮使用的期间')
+        elif tb_period and tbd_period:
+            reasons.append('最新试算表与序时账期间一致（' + tb_period + '），自动配对')
     if questions:
         return MaterialResolution('waiting_user', dict(selected), candidates, (),
-                                  tuple(questions), tuple(reasons))
+                                  tuple(questions), tuple(reasons),
+                                  reference_artifact_ids=tuple(reference))
     return MaterialResolution('resolved', selected, candidates, tuple(comparison), (),
-                              tuple(reasons))
+                              tuple(reasons), reference_artifact_ids=tuple(reference))
 
 
 def resolve_roles(plan, files):
@@ -212,6 +297,7 @@ def resolution_snapshot(resolution):
     return {'status': resolution.status, 'selected': dict(resolution.selected),
             'candidates': candidates,
             'comparison_artifact_ids': list(resolution.comparison_artifact_ids),
+            'reference_artifact_ids': list(resolution.reference_artifact_ids),
             'questions': list(resolution.questions), 'reasons': list(resolution.reasons)}
 
 
