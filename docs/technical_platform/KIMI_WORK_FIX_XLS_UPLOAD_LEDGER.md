@@ -75,3 +75,21 @@
 - 文件名不覆盖表内证据（测试固定：名为 2023 的 TB 表内期间 2026-07 仍按 2026-07 处理）
 - `MaterialResolution` 新增 `reference_artifact_ids`（置于末尾，位置构造兼容）；`resolution_snapshot` 同步输出
 - 测试：`test_material_auto_disambiguation.py` 9 个（修复前 9 failed）；A8T 形态合成集（BS+TB×2+TBD×2）直接 resolved 无提问；既有 `test_material_multiperiod.py`/`test_material_analysis.py` 24 个回归全过；相关子集 45 passed
+
+## K05：复现补充文件后的任务理解异常
+
+- 复现测试 `test_clarification_resume.py`：完整两轮会话（9 资料 → ask → 同会话补 BS/PL → "本轮已补充资产负债表和利润表" → resume → plan），同步驱动 UnderstandingWorker，捕获 task_id/revision/新旧文件集合/问题上下文/请求Schema校验/异常类与阶段，诊断工件写入 `D:\KimiData\kimi\Workspaces\Agent开发\k05_repro\diagnostics.json`（无 Token/路径/业务内容）
+- **关键结论**：本地续接链路（controller.prepare resume + 新增文件进范围 + 第二轮理解 + complete）修复前即可走通——生产第二次故障不在本地状态/revision/文件作用域层，而在服务端响应或传输层被 `routing.py` 宽泛 `except Exception` 吞掉后误报为"连接及服务端状态"
+- 固定误分类缺陷：`RemoteAuthenticationError`（服务端响应Schema校验失败）修复前显示"请检查连接及服务端状态"（测试修复前失败）
+
+## K06：澄清会话文件增量续接
+
+- 复现证明既有实现已满足：澄清状态持久化（question/context/revision）、第二轮请求携带原始目标+上轮问题+用户回答+当前勾选范围、新增文件可进范围且未被误判"文件变化"、第二轮成功后澄清关闭且下一轮开启新 task_id、客户端重启（重建 AgentController）后可恢复
+- 无生产代码改动；既有 `test_file_metadata_change_invalidates_result_without_reading_source` 继续固定"飞行中旧请求因范围变化失效"，`test_resume_after_clarification_skips_model_and_completes` 固定澄清恢复不重复调用模型（不重复扣费）
+
+## K07：错误分类与可观察性
+
+- `remote_auth_service.py`：`RemoteAuthenticationError` 增加 `error_code`/`http_status`；新增 `RequestSchemaError`（请求本地Schema校验失败，未发送）与 `ResponseSchemaError`（服务端响应Schema校验失败）；`understand_task` 分层包装；`_raise_for_response` 对 422/409/5xx 保留 `http_<status>` 安全错误码；五个既有异常类带默认 error_code
+- `routing.py` 两个 Worker：按 NetworkUnavailable/SessionRevoked/InsufficientBalance/BillingReconciliationRequired/ServerCapabilityUnavailable/请求Schema/响应Schema/安全服务端消息/本地校验/未分类内部错误 十层分类；理解阶段失败一律明示"Skill尚未启动，未创建业务任务"；未知异常不再冒充网络故障
+- `diagnostics.py`（恢复原模块后追加）：`log_worker_failure` 记录 stage/异常类/error_code/http_status/request_id/task_id/revision + 脱敏 detail（Bearer/token/api-key/password/Cookie  scrub，限长300）；**教训记录**：本轮曾误覆盖既有 diagnostics 模块，被 test_billing_feedback 收集错误即时发现，已恢复原内容并改为追加
+- 测试 `test_error_classification.py` 15 个（修复前 13 failed）：逐类断言文案、未分类不冒充网络、日志含 ids 且不含秘密、422/409/500 分码、RequestSchema/ResponseSchema 分层；K05 复现测试同步转绿；相关回归 79 passed
