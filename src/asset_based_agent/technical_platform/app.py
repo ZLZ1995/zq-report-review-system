@@ -933,7 +933,10 @@ class PlatformWindow(QMainWindow):
                 if result.get('kind') == 'generation':
                     try:
                         from .artifact_contract import (
-                            deliverable_label, display_name_of, user_artifacts)
+                            deliverable_label,
+                            display_name_of,
+                            user_artifacts,
+                        )
                         visible_artifacts = user_artifacts(result)
                     except (ValueError, KeyError, TypeError):
                         content.append('<p>生成成果记录校验失败，请核对任务状态。</p>')
@@ -1366,8 +1369,7 @@ class PlatformWindow(QMainWindow):
         ):
             self.status.setText('已取消联网理解，未发送本轮内容。')
             return
-        from .agent_controller import AgentController
-        from .routing import UnderstandingWorker
+        from .routing import ConsultWorker
         from .skill_installation import SkillInstallation
         manager = SkillInstallation(self.store)
         self._routing_packages = {}
@@ -1380,22 +1382,16 @@ class PlatformWindow(QMainWindow):
                 self._routing_packages[version['skill_id']] = package
                 candidates.append({'id': version['skill_id'], 'name': package.manifest['name'],
                                    'adapter': package.manifest['adapter'], 'description': package.instructions[:1000]})
-        controller = AgentController(self.store)
-        try:
-            pending = controller.prepare(self.session_id, prompt, model_id=model_id,
-                                         selected_ids=list(self.selected_file_ids()), candidates=candidates,
-                                         browser_enabled=callable(getattr(self.client, 'propose_browser_step', None)),
-                                         envelope=envelope)
-        except (ValueError, PermissionError):
-            self.status.setText('本轮要求或文件范围无效，请检查后重试。')
-            return
-        worker = UnderstandingWorker(self.client, pending, self)
-        worker.controller = controller
-        self.register_understanding_worker(worker)
+        worker = ConsultWorker(
+            self.client, self.store, self.session_id, prompt,
+            model_id=model_id, selected_ids=list(self.selected_file_ids()),
+            candidates=candidates,
+            browser_enabled=callable(getattr(self.client, 'propose_browser_step', None)),
+            envelope=envelope, parent=self)
+        self.register_consult_worker(worker)
         self.composer.clear()
-        self.render_messages()
         self.set_busy(True)
-        self.status.setText('Agent 正在理解本轮要求并选择执行能力…')
+        self.status.setText('Agent 正在理解本轮要求…')
         worker.start()
 
     def try_local_builtin(self, prompt: str) -> bool:
@@ -1530,6 +1526,44 @@ class PlatformWindow(QMainWindow):
             prompt = ('本轮用户对话：\n' + '\n'.join(
                 m.text for m in pending.request.context if m.role == 'user') + '\n' + prompt)
         self.execute_plan(prompt, spec, package=package, selected_files=files, record_user=False)
+
+    def consult_finished(self, worker, destination):
+        if not self.release_worker(worker, destination):
+            return
+        outcome, error = worker.outcome, worker.error
+        prompt = worker.prompt
+        worker.deleteLater()
+        if error or outcome is None:
+            # The router persisted nothing on this path; restore the prompt so no
+            # user input is lost and nothing half-written pollutes the session.
+            if destination.visible(self):
+                self.composer.setPlainText(prompt)
+                self.status.setText(error or '本轮消息已取消。')
+            return
+        if outcome.kind == 'execution':
+            if not destination.visible(self):
+                from .agent_controller import AgentController
+                try:
+                    AgentController(destination.store).cancel(outcome.pending)
+                    destination.store.append(worker.session_id, 'assistant',
+                        '任务理解已取消；当前已切换会话，未自动执行。请返回本会话重新发起。')
+                except (ValueError, PermissionError):
+                    pass
+                return
+            from .agent_controller import AgentController
+            from .routing import UnderstandingWorker
+            controller = AgentController(self.store)
+            understanding = UnderstandingWorker(self.client, outcome.pending, self)
+            understanding.controller = controller
+            self.register_understanding_worker(understanding)
+            self.render_messages()
+            self.set_busy(True)
+            self.status.setText('Agent 正在理解本轮要求并选择执行能力…')
+            understanding.start()
+            return
+        if destination.visible(self):
+            self.status.setText('已回复')
+            self.render_messages()
 
     def confirm_compound_plan(self, snapshot):
         from .agent_permission_modes import (
@@ -1765,6 +1799,14 @@ class PlatformWindow(QMainWindow):
             pending.session_id, f'understanding:{pending.task_id}:{pending.revision}'))
         worker.routing_packages = dict(getattr(self, '_routing_packages', {}))
         return self.register_completion_worker(worker, destination, 'understanding')
+
+    def register_consult_worker(self, worker):
+        from uuid import uuid4
+        store = worker.store
+        session = store.session(worker.session_id)
+        destination = TaskDestination(store, TaskBinding(store.owner, session['project'],
+            worker.session_id, f'consult:{uuid4().hex}'))
+        return self.register_completion_worker(worker, destination, 'consult')
 
     def register_annotation_worker(self, worker):
         return self.register_completion_worker(worker,

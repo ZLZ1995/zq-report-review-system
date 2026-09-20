@@ -63,7 +63,8 @@ while window.task_manager.active() and time.monotonic()<deadline: QTest.qWait(10
 assert not window.task_manager.active()
 assert len(confirmations)==(0 if choice=='upload_decline' else 1), window.transcript.toPlainText()
 if choice in ('accept','upload_accept'):
-    assert calls==(['understand','select_upload','browser'] if choice=='upload_accept' else ['understand','browser'])
+    # 两阶段路由（§4.2）：阶段1轻量理解 + 阶段2带证据理解，然后才进入浏览器提案。
+    assert calls==(['understand','understand','select_upload','browser'] if choice=='upload_accept' else ['understand','understand','browser'])
     assert len(store.runs(session))==1
     record=store.run(window.run_id)
     assert json.loads(record['result'])['status']=='needs_input'
@@ -77,7 +78,7 @@ if choice in ('accept','upload_accept'):
     assert [m.text for m in reply.request.context]==['打开https://example.com并查看公告','Which announcement?']
     assert len(store.runs(session))==1  # Answering cannot itself authorize another browser run.
 else:
-    assert calls==(['understand','select_upload'] if choice=='upload_decline' else ['understand']) and store.runs(session)==[]
+    assert calls==(['understand','understand','select_upload'] if choice=='upload_decline' else ['understand','understand']) and store.runs(session)==[]
     assert window.browser_panel is None
 window.client=None; window.close(); qt.processEvents()
 '''

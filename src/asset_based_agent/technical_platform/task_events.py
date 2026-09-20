@@ -81,7 +81,7 @@ class CompletionEventRelay(TaskEventRelay):
     """Only the two fixed auxiliary lifecycles are accepted, not model callbacks."""
 
     def __init__(self, window, worker, destination, kind):
-        if kind not in {'understanding', 'annotation'}:
+        if kind not in {'understanding', 'annotation', 'consult'}:
             raise ValueError('Unknown worker lifecycle')
         super().__init__(window, worker, destination)
         self.kind = kind
@@ -91,6 +91,8 @@ class CompletionEventRelay(TaskEventRelay):
         if self.active():
             if self.kind == 'understanding':
                 self.window.routing_finished(self.worker, self.destination)
+            elif self.kind == 'consult':
+                self.window.consult_finished(self.worker, self.destination)
             else:
                 self.window.annotation_finished(self.worker, self.destination)
         self.deleteLater()

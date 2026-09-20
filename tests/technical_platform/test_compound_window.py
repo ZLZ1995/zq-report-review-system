@@ -52,7 +52,9 @@ def test_dialogue_compound_plan_confirmation_and_real_execution(tmp_path, accept
             app.processEvents()
             time.sleep(.01)
         assert window.worker is None
-        assert calls == ['understand', 'plan']
+        # Two-phase routing (§4.2): stage-1 light intent analysis, then the full
+        # understanding call with material evidence, then the plan proposal.
+        assert calls == ['understand', 'understand', 'plan']
         assert len(confirmations) == 1
         if accept is True:
             assert store.run(window.run_id)['state'] == 'succeeded'

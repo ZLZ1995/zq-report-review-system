@@ -71,10 +71,14 @@ def scrub(text, limit=300):
     return cleaned[:limit]
 
 
-def log_worker_failure(stage, exc, *, request_id=None, task_id=None, revision=None):
+def log_worker_failure(stage, exc, *, request_id=None, task_id=None, revision=None,
+                       server_build=None):
     """Structured failure line: no credentials, no paths, no business content."""
+    from .release_info import CLIENT_VERSION
     code = getattr(exc, 'error_code', None) or '-'
     status = getattr(exc, 'http_status', None) or '-'
     logger.error(
-        'stage=%s exception=%s error_code=%s http_status=%s request_id=%s task_id=%s revision=%s detail=%s',
-        stage, type(exc).__name__, code, status, request_id, task_id, revision, scrub(exc))
+        'stage=%s exception=%s error_code=%s http_status=%s client_version=%s server_build=%s '
+        'request_id=%s task_id=%s revision=%s detail=%s',
+        stage, type(exc).__name__, code, status, CLIENT_VERSION, server_build or '-',
+        request_id, task_id, revision, scrub(exc))
