@@ -34,6 +34,9 @@ _ENTITY_PATTERNS = (
     re.compile(r'(?<![\u4e00-\u9fff])名称\s*[:：]\s*(\S+)'),
 )
 
+_RANGE_PERIOD = re.compile(
+    r'(?:本期|期间)\s*[:：]?\s*(20\d{2})\s*[-年/.]\s*(\d{1,2})'
+    r'\s*[-~—至]\s*(20\d{2})\s*[-年/.]\s*(\d{1,2})')
 _MARKER_PERIOD = (
     re.compile(r'(?:本期|期间)\s*[:：]?\s*(20\d{2})\s*[-年/.]\s*(\d{1,2})(?:\s*[-月/.]\s*(\d{1,2}))?'),
     re.compile(r'(20\d{2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日'),
@@ -115,6 +118,17 @@ def _detect_entity(texts):
 
 
 def _detect_period(texts, doc_type, warnings):
+    for text in texts:
+        match = _RANGE_PERIOD.search(text)
+        if match:
+            year1, month1, year2, month2 = (int(group) for group in match.groups())
+            if (1 <= month1 <= 12 and 1 <= month2 <= 12
+                    and (year1, month1) <= (year2, month2)):
+                end = _month_end(year2, month2)
+                warnings.append(
+                    f'期间识别为区间 {year1:04d}-{month1:02d} 至 {year2:04d}-{month2:02d}，'
+                    f'period_end 按月末规则推导为 {end}')
+                return f'{year1:04d}-{month1:02d}-01', end
     for text in texts:
         for pattern in _MARKER_PERIOD:
             match = pattern.search(text)

@@ -1,5 +1,6 @@
 """Read cover identity and reporting date from explicitly supplied statements."""
 
+import calendar
 import re
 from datetime import date, datetime
 from pathlib import Path
@@ -53,6 +54,14 @@ def read_statement_metadata(path):
         if text in {'资产', '流动资产：', '流动资产:', '流动资产'}:
             break
         match = re.match(r'^(?:编制单位|单位名称)\s*[:：]\s*(.*)$', text)
+        if not match:
+            coded = re.match(r'^公司\s*[=:：]\s*[A-Za-z0-9]+\s*[(（](.+)[)）]\s*$', text)
+            dashed = re.match(r'^公司\s*[=:：]\s*[A-Za-z0-9]+\s*-\s*(\S[^期]*?)\s*(?:期间.*)?$', text)
+            if coded or dashed:
+                name = (coded or dashed).group(1).strip()
+                if name:
+                    company = name
+                    company_cell = f'{get_column_letter(c)}{r}'
         if match:
             name = match.group(1).strip()
             source_col = c
@@ -67,6 +76,16 @@ def read_statement_metadata(path):
         parsed = statement_date(value)
         if parsed is not None and not any(word in text for word in ('打印', '导出', '编制日期', '填表日期')):
             dates.append((parsed, f'{get_column_letter(c)}{r}'))
+    if not dates:
+        for r, c, value in records:
+            text = str(value or '').strip()
+            match = re.search(r'(?:本期|期间)\s*[:：]?\s*(\d{4})\s*[-/年]\s*(\d{1,2})', text)
+            if match:
+                year, month = int(match.group(1)), int(match.group(2))
+                if 1 <= month <= 12:
+                    dates.append((datetime(year, month, calendar.monthrange(year, month)[1]),
+                                  f'{get_column_letter(c)}{r}'))
+                    break
     if not company or not dates:
         raise ValueError(f'statement_cover_metadata_missing: {path}')
     report_date, date_cell = max(dates)

@@ -209,6 +209,25 @@ class MaterialSummaryTest(unittest.TestCase):
         self.assertTrue(summary['warnings'])
         self.assertLess(summary['confidence'], 0.5)
 
+    def test_journal_period_range_header(self):
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = 'Sheet0'
+        ws['A1'] = '总帐明细帐追溯报表'
+        ws['A2'] = '公司：A8T-A8T帐套：PRCGAAP(CNY)　 币种：CNY　期间：2026-01-2026-07'
+        ws['A3'] = '公司代码'
+        ws['B3'] = '期间'
+        ws['A4'] = 'A8T'
+        ws['B4'] = '2026-01'
+        path = self.dir / '2026.1-7_TBD.xlsx'
+        wb.save(path)
+        summary = self.summarize(path)
+        self.assertEqual('journal', summary['document_type'])
+        self.assertEqual('A8T', summary['entity_name'])
+        self.assertEqual('2026-01-01', summary['period_start'])
+        self.assertEqual('2026-07-31', summary['period_end'])
+        self.assertTrue(any('区间' in w for w in summary['warnings']), summary['warnings'])
+
     def test_unsupported_extension(self):
         path = self.dir / 'notes.csv'
         path.write_text('a,b,c', encoding='utf-8')

@@ -93,3 +93,49 @@
 - `routing.py` 两个 Worker：按 NetworkUnavailable/SessionRevoked/InsufficientBalance/BillingReconciliationRequired/ServerCapabilityUnavailable/请求Schema/响应Schema/安全服务端消息/本地校验/未分类内部错误 十层分类；理解阶段失败一律明示"Skill尚未启动，未创建业务任务"；未知异常不再冒充网络故障
 - `diagnostics.py`（恢复原模块后追加）：`log_worker_failure` 记录 stage/异常类/error_code/http_status/request_id/task_id/revision + 脱敏 detail（Bearer/token/api-key/password/Cookie  scrub，限长300）；**教训记录**：本轮曾误覆盖既有 diagnostics 模块，被 test_billing_feedback 收集错误即时发现，已恢复原内容并改为追加
 - 测试 `test_error_classification.py` 15 个（修复前 13 failed）：逐类断言文案、未分类不冒充网络、日志含 ids 且不含秘密、422/409/500 分码、RequestSchema/ResponseSchema 分层；K05 复现测试同步转绿；相关回归 79 passed
+
+## K08：完整回归和 A8T 真实文件只读复测
+
+复测方式：`k08_real_run.py`（ReplayProvider 确定性回放，不走模型计费）注册 A8T 真实 11 文件 → material_summary 表内证据分类 → resolve_materials 真实消歧 → execute_generation 完整 DETAIL 管线 → 验收矩阵。复测驱动管线修复共 9 项，全部测试先行。
+
+**第一批（真实表结构适配）**
+
+- `material_summary.py`：新增区间期间识别（真实 TBD row2 为 `期间：2026-01-2026-07` 区间形式，旧正则会把 `-2026` 误读为"日=20"）→ period_start=2026-01-01、period_end=2026-07-31，推导记入 warnings；测试并入 `test_material_summary.py::test_journal_period_range_header`
+- `cover_metadata.py`：公司识别支持 `公司=CODE (全称)`、`公司: CODE - 全称`；无完整日期时从 `本期/期间：YYYY-MM` 按月末推导；测试 `test_cover_metadata_a8t.py`（3）
+- `run_detail_workbook_pipeline.py` 单边资产负债表布局检测（ERP 导出：表头行 B=年初余额/C=期末余额、A 列标签），不再按双边误解析出垃圾键；单边分支内 `预提费用` 并入 `其他流动负债`（真实 BS 预提 109,884.54、其他流动负债显式 0，alias 回退拿不到值导致 stage1 门禁差 -109,884.54）；测试 `test_balance_sheet_single_sided.py`（3）
+- 锁定模板明细写入跳过非确认输入单元格（H 列第二账面值/审定额列不在 confirmed_input_cells，锁定模板下写 H6 抛 ProtectionViolation）；测试 `test_locked_detail_write.py`（2）
+- `stage2_postfix_key_sheets` 职工薪酬/股权投资直写块跳过公式单元格（G6 `=F6` 被静态值覆盖触发 template_formula_changed）
+
+**第二批（序时账解析——根因）**
+
+- `load_journal_rows_from_xlsx_xml` 只探测金蝶式表头（科目编码/科目名称/方向/金额），Oracle ERP 序时账识别失败后静默回退到固定列字母 → tb_code 解析成"日记帐摘要"、客商两列全空，下游全部 journal_unmatched。新增 ERP 表头探测（`会计科目代码` + `往来描述`/`供应商名称`）按表头名取列
+- ERP 每行有两个合法客商列（AP 子模块供应商名称、往来段描述），而管线不变式"vendor_name == counterparty_desc"诞生于两字段同源单列的时代，`build_journal_entity_index` 遇真实双列即抛 conflicting_journal_counterparties。改为按科目语义择一：内部往来科目取往来描述，其余取供应商名称，各自以另一列兜底并剔除禁用占位词（默认值）；既有冲突守卫测试语义不变
+- 测试 `test_journal_erp_header.py`（6）：修复前 4 failed；真实 TBD 验证 2,239 条干净分录、1124050000+天猫 65 行、0 垃圾行
+
+**第三批（写入侧与复核侧候选集统一）**
+
+- 写入侧用全序时账无过滤选发生日期/业务内容，复核侧 `strict_journal_candidates` 只认表根科目（2241 等），1124 内部往来重分类行被两边反向处理 → journal_unmatched 与 source_mismatch 并存。严格候选规则下沉到 pipeline 共享，两侧同用，并扩展"本行 tb_code 精确匹配"接纳重分类来源科目；测试 `test_journal_candidate_unification.py`（4）
+
+**第四批（验收一致性）**
+
+- 新增共享 `resolve_tb_counterparty`：TB 辅助名有效一律保留（修复 1124050000 上淘宝/阿里上海/阿里网络被最大发生额序时账客商天猫整体改标），禁用/空名取该科目最大单笔发生额的序时账客商（保留 安永/平安/阿里商旅/管仁良 的正确解析），`ALLOWED_EXCEPTION_COUNTERPARTIES`（待查资金入账）按例外名单解析；group_rows 与复核 expected 键同用此规则（修复成对 source_mismatch）
+- 复核业务描述规范化补传 account_name 上下文（填入侧有、复核侧无 → SETTLEMENT_INV_MATCH vs 进项税暂估 不一致）
+- 2241990000 待查资金入账按 credit_end-debit_end 保留净额 -32,537.99（原取 credit_end=0 被丢弃 → 明细合计差 +32,537.99）
+- `stage2_postfix_key_sheets` 新增其他流动负债（预提费用）BS 证据行直写（修复分类汇总链 -109,884.54 差异）
+- 写入记录新增 `_written_cells`（只记实际写入单元格），复核不再向锁定模板跳过列索要数值（预收 H6）
+- 复核"非六科目无显式证据映射"分支豁免 SEMANTIC_EXEMPT_SHEETS（银行存款/应交税费为聚合行，天然无单一来源单元格；银行无对账单时另有 no_bank_account_detail 边界声明）
+- 复核对例外名单客商（待查资金入账）跳过序时账匹配要求，改记 needs_materials 提示（需银行流水另行佐证）
+- 语义占位门禁的小额容限（≤1000 且有占位行）从仅其他应付款推广到全部必填明细表（预收账款 -0.32 适用）
+- 测试 `test_a8t_validation_consistency.py`（9）：修复前 8 failed
+
+**复测验收矩阵（`K08 REAL RUN OK`，日志 `k08-real-run/run.log`）**
+
+- 11 个文件全部注册（含 2 个原始 .xls）；主体识别 A8T；自动选中 2026-07 最新 TB/TBD/BS；2023—2025 六份自动列为历史参考（不进 comparison）；无提问直接 resolved
+- 只创建一次生成任务（run state: succeeded）
+- 最终产出评估明细表主成果（531,535 字节，openpyxl 可打开），用户可见成果仅 1 个，显示名"阿里云飞天（北京）云计算有限公司评估明细表（2026-07-31）.xlsx"；内部校验 JSON 不列示
+- 11 个原件 SHA256 前后一致；锁定模板哈希不变；delivery gate: pass；xls_conversion_report 记录 balance_sheet.xls 转换（XDO_METADATA 隐藏表跳过；PL.xls 为参考证据非生成输入，不经转换，摘要经 xlrd 读取）
+- 声明的证据边界（不阻塞、如实列示）：银行存款无对账单逐户明细（no_bank_account_detail）、预收账款 -0.32 客商为禁用占位词（forbidden_term）
+- 明细勾稽：其他应付款明细合计 14,043,611.33 = BS（含待查资金入账 -32,537.99 净额行）；分类汇总负债全链差异清零；资产负债表 11,934.09 = 11,934.09 平衡
+- Excel/WPS 真实打开验证：本机无自动化手段，以 openpyxl/zip 结构校验 + fullCalcOnLoad 代替，未做真实 Office 打开确认（如实标注）
+
+**全量回归**：`tests/technical_platform` + `tests/report_review_app` + `tests/report_review_server` 共 **1774 passed, 1 skipped**（9m40s，日志 pytest-full-k08.log，EXIT=0；较 K07 基线 1746 净增 28 个本轮新测试）
