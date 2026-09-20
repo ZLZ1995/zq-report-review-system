@@ -63,13 +63,13 @@ class LockedDetailWriteTest(unittest.TestCase):
         pipeline = load_pipeline()
         wb = Workbook()
         ws = wb.active
-        ws.title = '职工薪酬'
-        ws['G6'] = '=F6'
-        bs = {'values': {'应付职工薪酬': 1301505.97}, 'values_prior': {}}
+        ws.title = '股权投资'
+        ws['I6'] = '=G6'
+        bs = {'values': {'长期股权投资': 4200.0}, 'values_prior': {}}
         writes = pipeline.stage2_postfix_key_sheets(wb, bs)
-        self.assertEqual(1301505.97, ws['F6'].value)
-        self.assertEqual('=F6', ws['G6'].value, '公式单元格不得被静态值覆盖')
-        self.assertNotIn('G6', {w['cell'] for w in writes})
+        self.assertEqual(4200.0, ws['G6'].value)
+        self.assertEqual('=G6', ws['I6'].value, '公式单元格不得被静态值覆盖')
+        self.assertNotIn('I6', {w['cell'] for w in writes})
 
 
 if __name__ == '__main__':
