@@ -1729,6 +1729,17 @@ class PlatformWindow(QMainWindow):
         # adapter path usable for local previews and deterministic Qt tests;
         # authenticated production clients remain new-Agent-only below.
         if self._can_use_stage1_compat_client():
+            # The compatibility adapter still performs a model/network call.
+            # It must therefore pass the same permission gate as the new Agent
+            # path; otherwise request mode would clear the composer and start
+            # work even after the user rejected approval.
+            if not self.agent_operation_allowed(
+                'network', '确认 Agent 执行',
+                f'确认允许 Agent 按本轮选中的 {len(self.selected_file_ids())} 个文件和用户要求执行？',
+            ):
+                self.composer.setPlainText(prompt)
+                self.status.setText('已取消执行，未启动任务。')
+                return
             self._submit_stage1_compat(prompt)
             return
         # 正式客户端只允许新 Agent；旧 TurnRouter 链路不再作为回退入口。

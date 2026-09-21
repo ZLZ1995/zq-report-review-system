@@ -11,6 +11,7 @@
 3. 新 Agent-only 门控把所有无令牌适配器和离线本地路径提前拦截。现在仅对非 `RemoteSessionClient` 且显式暴露 `understand_task` 的适配器启用 stage-1 兼容 worker；真实 `RemoteSessionClient` 仍只构造新 Agent gateway。
 4. stage-1 兼容 worker 现在读取已启用、依赖完整的外部 Skill manifest，使外部 Skill 能参与自然语言路由；不执行 ZIP 内脚本。
 5. 本地内置路由补齐“评估明细表”及“评估明细表 + 财务简报”的复合识别；注入 Agent gateway 的测试/生产路径不被本地快捷路由截获。
+6. 修复 stage-1 兼容适配器遗漏权限门禁的问题：请求批准模式下用户拒绝后不再清空输入或启动模型调用；该路径现在与新 Agent 的 `network` 操作门禁保持一致。
 
 ## Verification
 
@@ -19,7 +20,8 @@
 - `tests/technical_platform/test_local_migrations.py`: **20 passed**。
 - `tests/technical_platform/test_browser_window.py`: **6 passed**。
 - `tests/technical_platform/test_turn_context.py tests/technical_platform/test_offline.py`: **51 passed**。
-- 针对性回归未发现本轮新增失败；未将被中断的长时间全量运行误报为全绿。
+- 最终针对性回归（`SystemDrive=D:`，避免将测试临时目录误判为业务系统盘）：**510 passed, 9 xfailed**；其中权限模式专项已验证拒绝后 `calls=[]` 且输入保留。
+- 此前一次未设置 `SystemDrive=D:` 的本地回归出现 31 个环境策略误报（测试临时目录位于 `C:` 被业务目录保护拒绝），不计入代码验收；已用正确环境变量重跑并通过。
 - S44 EXE 已构建并通过打包健康探活：`client=0.2.11`、`schema=15`、登录窗口可见、WebEngine 导入通过。
 - 普通候选包：`dist/s44/ZQ-Workspace-0.2.11-Windows.zip`，281,868,183 bytes，SHA256 `f01cd6d7984d6bebae3366690d9abf327541ac3bf91227277f2219f8fd65ed81`。
 - 托管更新候选包：`dist/s44/ZQ-Workspace-0.2.11-Managed-Windows.zip`，421,611,052 bytes，SHA256 `d55d2330245a1b01a1c1f7ef2f57235c1e89c7af6885caf23df8ca48e29b8e71`。
@@ -29,7 +31,7 @@
 
 - GitHub 写入仍受当前环境网络/凭据限制，不能虚报推送。
 - Zeabur 当前在线 release 仍是 0.2.10/schema 11；本地新构建需在服务端接口和 GitHub 写入恢复后再发布。
-- 本轮代码变更尚未覆盖已发布 EXE；下一步应执行 S44 构建、签名、离线 manifest 校验，再按外部授权发布。
+- 本轮代码变更已包含在 S44 候选 EXE、签名包和离线验签结果中；仍未覆盖线上已发布版本，需待外部发布权限恢复后再部署。
 
 ## Commit intent
 
