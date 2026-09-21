@@ -155,3 +155,19 @@ def test_permission_mode_survives_reopen(tmp_path):
     repo.create_session('s1', project_id='p1', owner_id='alice', title='会话')
     repo.set_permission_mode('s1', 'assisted')
     assert _repo(tmp_path / 'db.sqlite').session_permission_mode('s1') == 'assisted'
+
+
+def test_file_scope_snapshot_is_persisted_with_operation(tmp_path):
+    import json
+    repo = _repo(tmp_path / 'db.sqlite')
+    repo.create_session('s1', project_id='p1', owner_id='alice', title='one')
+    operation = repo.begin_operation('s1', 'main', user_text='scope', request_id='r')
+    repo.set_file_scope_snapshot(operation.id, {
+        'files': [{'file_id': 'f1', 'sha256': 'abc'}],
+    })
+    with sqlite3.connect(repo.path) as db:
+        snapshot = db.execute(
+            'SELECT file_scope_snapshot_json FROM agent_operations WHERE id=?',
+            (operation.id,),
+        ).fetchone()[0]
+    assert json.loads(snapshot)['files'][0]['file_id'] == 'f1'

@@ -618,7 +618,15 @@ class SQLiteSessionRepo:
                 '(operation_id,file_id,binding_kind,source_entry_id,role,sha256) '
                 'VALUES(?,?,?,?,?,?)',
                 (operation_id, file_id, binding_kind, source_entry_id, role,
-                 sha256))
+                sha256))
+
+    def set_file_scope_snapshot(self, operation_id, snapshot):
+        with self.connect() as db:
+            updated = db.execute(
+                'UPDATE agent_operations SET file_scope_snapshot_json=? WHERE id=?',
+                (json.dumps(snapshot or {}, ensure_ascii=False), operation_id))
+            if updated.rowcount != 1:
+                raise KeyError(f'未知 operation: {operation_id}')
 
     def operation_files(self, operation_id, kinds=None):
         wanted = EXPLICIT_BINDING_KINDS if kinds is None else frozenset(kinds)

@@ -235,6 +235,19 @@ def test_same_lane_rejects_concurrent_operation():
     run(hold_first())
 
 
+def test_invalid_file_binding_does_not_leave_an_open_operation():
+    kernel, repo, _model = make_runtime([text_turn('不会执行')])
+
+    with pytest.raises(Exception):
+        run(kernel.submit('s1', 'main', {
+            'text': '坏绑定',
+            'file_bindings': [{'file_id': '', 'sha256': ''}],
+        }))
+
+    assert repo.open_operations('s1') == []
+    assert [entry.entry_type for entry in repo.entries('s1', 'main')] == []
+
+
 def test_different_lanes_may_run_concurrently():
     kernel, repo, _model = make_runtime([text_turn('一'), text_turn('二')])
     repo.create_lane('s1', 'side', name='side')

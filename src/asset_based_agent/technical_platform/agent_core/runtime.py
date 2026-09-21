@@ -95,9 +95,18 @@ class AgentKernel:
         }
         if request.get('model_id'):
             operation_args['model_id'] = request['model_id']
+        file_bindings = tuple(request.get('file_bindings') or ())
+        # Validate the complete batch before accepting the operation. This
+        # prevents malformed input from leaving a lane permanently busy.
+        for binding in file_bindings:
+            file_id = str(binding.get('file_id', '')).strip()
+            binding_sha256 = str(binding.get('sha256', '')).strip()
+            if not file_id or not binding_sha256:
+                from .errors import InvalidRequest
+                raise InvalidRequest('file binding requires file_id and sha256')
         operation = self.repo.begin_operation(
             session_id, lane_id, **operation_args)
-        for binding in request.get('file_bindings') or ():
+        for binding in file_bindings:
             # 本轮勾选/上传的文件必须先绑定再进入 loop：ContextBuilder 只读取
             # 当前 operation 的 explicit 绑定，缺绑定即“本轮文件摘要：无”。
             file_id = str(binding.get('file_id', '')).strip()
@@ -110,6 +119,16 @@ class AgentKernel:
                 binding.get('binding_kind') or 'explicit_selection',
                 sha256=sha256, role=binding.get('role'),
                 source_entry_id=binding.get('source_entry_id'))
+        if hasattr(self.repo, 'set_file_scope_snapshot'):
+            self.repo.set_file_scope_snapshot(
+                operation.id,
+                {'files': [
+                    {'file_id': str(binding.get('file_id')),
+                     'sha256': str(binding.get('sha256')),
+                     'binding_kind': binding.get('binding_kind') or
+                     'explicit_selection'}
+                    for binding in file_bindings
+                ]})
         if snapshot:
             self.repo.set_resource_snapshot(operation.id, snapshot)
         accepted = OperationAccepted(
