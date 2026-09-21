@@ -89,9 +89,14 @@ class AgentKernel:
             # Operation accept 时解析资源并固定版本快照（S07 运行时规则）
             tools, snapshot = self._tool_resolver.resolve_for_operation(
                 skill_ids=request.get('skill_ids'))
+        operation_args = {
+            'user_text': request['text'].strip(),
+            'request_id': uuid4().hex,
+        }
+        if request.get('model_id'):
+            operation_args['model_id'] = request['model_id']
         operation = self.repo.begin_operation(
-            session_id, lane_id, user_text=request['text'].strip(),
-            request_id=uuid4().hex)
+            session_id, lane_id, **operation_args)
         if snapshot:
             self.repo.set_resource_snapshot(operation.id, snapshot)
         accepted = OperationAccepted(

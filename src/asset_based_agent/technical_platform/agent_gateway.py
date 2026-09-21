@@ -53,11 +53,12 @@ class NullBrowserBackend:
 
 class AgentGateway:
     def __init__(self, store, session_id, *, flags, model_port_factory,
-                 permission_mode_getter, provider_factory=None,
+                 model_id='', permission_mode_getter, provider_factory=None,
                  browser_backend=None, approver=None,
                  force_all_tools: bool = False) -> None:
         self._store = store
         self._session_id = session_id
+        self._model_id = model_id
         self._flags = flags
         self._model_port_factory = model_port_factory
         self._mode_getter = permission_mode_getter
@@ -146,8 +147,9 @@ class AgentGateway:
         if on_event is not None:
             kernel.subscribe(on_event)
         try:
-            asyncio.run(kernel.submit(self._session_id, 'main',
-                                      {'text': text}))
+            asyncio.run(kernel.submit(
+                self._session_id, 'main',
+                {'text': text, 'model_id': self._model_id}))
         except Exception as exc:  # noqa: BLE001 - 网关边界不泄露堆栈
             code = getattr(exc, 'code', type(exc).__name__)
             message = str(exc).strip()

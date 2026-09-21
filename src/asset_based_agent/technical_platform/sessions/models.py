@@ -82,13 +82,15 @@ class Operation:
     def __init__(self, *, id, session_id, lane_id, request_id, source_entry_id,
                  kind='consult', status='running', current_turn_id=None,
                  error_code=None, error_summary=None, accepted_at=None,
-                 started_at=None, finished_at=None, recovery_policy='manual'):
+                 started_at=None, finished_at=None, recovery_policy='manual',
+                 model_id=None):
         self.id = id
         self.session_id = session_id
         self.lane_id = lane_id
         self.kind = kind
         self.status = status
         self.request_id = request_id
+        self.model_id = model_id
         self.source_entry_id = source_entry_id
         self.current_turn_id = current_turn_id
         self.error_code = error_code

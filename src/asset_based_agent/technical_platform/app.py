@@ -343,7 +343,7 @@ class PlatformWindow(QMainWindow):
             provider_factory = production_provider_factory(self.client, model_id)
         return AgentGateway(
             self.store, self.session_id,
-            flags=self._feature_flags(),
+            flags=self._feature_flags(), model_id=model_id or '',
             model_port_factory=model_factory,
             permission_mode_getter=self.agent_permission_mode,
             provider_factory=provider_factory,
