@@ -8,14 +8,13 @@ from asset_based_agent.technical_platform.release_info import (
 )
 
 
-def test_release_identity_tracks_schema_12_waiting_user_migration():
+def test_release_identity_tracks_current_schema_for_next_release():
     from asset_based_agent.technical_platform.local_migrations import SCHEMA_VERSION
 
-    # Client version stays at the last signed release; schema advanced
-    # locally for the waiting_user step-state migration (v12) and must
-    # move together with the next release cut.
-    assert CLIENT_VERSION == '0.2.10'
-    assert SCHEMA_VERSION == 12
+    # The next release carries the current local schema.  The online
+    # 0.2.10 release is schema 11, so this candidate must not claim 12.
+    assert CLIENT_VERSION == '0.2.11'
+    assert SCHEMA_VERSION == 15
 
 
 def test_local_release_contains_actual_rule_hash():
@@ -175,10 +174,10 @@ def test_version_panel_offers_only_new_stable_signed_release():
 
     from asset_based_agent.technical_platform.app import PlatformWindow
 
-    manifest = {'payload': {'version': '0.2.11', 'sequence': 6}, 'signature': 'x'}
+    manifest = {'payload': {'version': '0.2.12', 'sequence': 7}, 'signature': 'x'}
     encoded = json.dumps(manifest, sort_keys=True, separators=(',', ':'),
                          ensure_ascii=True).encode('ascii')
-    record = {'status': 'stable', 'version': '0.2.11', 'sequence': 6,
+    record = {'status': 'stable', 'version': '0.2.12', 'sequence': 7,
               'manifest': manifest,
               'manifest_sha256': hashlib.sha256(encoded).hexdigest()}
     visibility = []

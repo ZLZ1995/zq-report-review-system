@@ -10,8 +10,8 @@ import httpx
 from .local_migrations import SCHEMA_VERSION
 from .skills import BUILTINS, GENERATORS, REVIEW, digest
 
-CLIENT_VERSION = "0.2.10"
-CLIENT_RELEASE_SEQUENCE = 5
+CLIENT_VERSION = "0.2.11"
+CLIENT_RELEASE_SEQUENCE = 6
 UPDATER_VERSION = "0.2.10"
 
 
