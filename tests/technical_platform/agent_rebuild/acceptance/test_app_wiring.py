@@ -78,6 +78,17 @@ class FailingGateway(FakeGateway):
                 'error_message': '服务端尚未部署新 Agent 流式接口，请先升级服务端'}
 
 
+class SlowStreamingGateway(FakeGateway):
+    def submit(self, text, *, on_event=None):
+        self.calls.append(text)
+        for part in ('第一段', '第二段'):
+            if on_event is not None:
+                on_event(SimpleNamespace(event_type='message_delta',
+                                         payload={'text': part}))
+            time.sleep(0.11)
+        return {'status': 'completed', 'reply': '第一段第二段', 'error_code': ''}
+
+
 # ---------------------------------------------------------------- 回退
 
 def test_flags_off_still_uses_new_agent_in_single_path_build(tmp_path):
@@ -127,6 +138,23 @@ def test_single_path_failure_keeps_user_and_records_actionable_assistant(tmp_pat
     assert '根据资料生成评估明细表' in transcript
     assert '服务端尚未部署新 Agent 流式接口' in transcript
     assert 'model.protocol_error' not in transcript
+    window.close()
+
+
+def test_streaming_reply_is_visible_in_conversation_panel_before_completion(tmp_path):
+    app, _store, window = make_window(tmp_path)
+    gateway = SlowStreamingGateway()
+    window._make_agent_gateway = lambda: gateway
+    window.composer.setPlainText('流式测试')
+    window.submit()
+    deadline = time.perf_counter() + 0.5
+    while time.perf_counter() < deadline and '第一段' not in window.transcript.toPlainText():
+        app.processEvents()
+        time.sleep(0.01)
+    assert '流式测试' in window.transcript.toPlainText()
+    assert '第一段' in window.transcript.toPlainText()
+    drain(app, window)
+    assert '第一段第二段' in window.transcript.toPlainText()
     window.close()
 
 
@@ -217,4 +245,121 @@ def test_flags_rebind_to_project_file_when_catalog_activates(tmp_path, monkeypat
     assert flags.enabled('chat') is True  # 内存期勾选被迁移
     from asset_based_agent.technical_platform.flags import FeatureFlagStore
     assert FeatureFlagStore(flags.path).enabled('chat') is True  # 已落盘
+    window.close()
+
+
+# ================================================================ S16 时间线 UI
+
+def test_reply_displayed_once_and_no_fixed_status_bar(tmp_path):
+    """T1：回复只出现一次；输入框上方不存在可见通用状态栏。"""
+    app, store, window = make_window(tmp_path)
+    flags_store_for(store).set_enabled('chat', True)
+    gateway = FakeGateway()
+    window._make_agent_gateway = lambda: gateway
+    window.composer.setPlainText('你好')
+    window.submit()
+    drain(app, window)
+    transcript = window.transcript.toPlainText()
+    assert transcript.count('新路径回复') == 1
+    assert not window.status.isVisible()  # 固定状态栏已拆除
+    assert '新路径回复' not in window.status.text()  # 适配器不得显示完整回复
+    window.close()
+
+
+def test_live_status_in_timeline_then_replaced(tmp_path):
+    """T2：轮次状态进入对话时间线（用户消息之后），完成后被终态替换。"""
+    app, store, window = make_window(tmp_path)
+    flags_store_for(store).set_enabled('chat', True)
+    gateway = BlockingGateway()
+    window._make_agent_gateway = lambda: gateway
+    window.composer.setPlainText('长跑任务')
+    window.submit()
+    deadline = time.perf_counter() + 5
+    while '正在生成' not in window.transcript.toPlainText() \
+            and time.perf_counter() < deadline:
+        app.processEvents()
+        time.sleep(0.02)
+    running_html = window.transcript.toPlainText()
+    assert '正在生成' in running_html
+    assert running_html.index('长跑任务') < running_html.index('正在生成')  # 状态在本轮消息之后
+    gateway.stop()
+    drain(app, window)
+    final_text = window.transcript.toPlainText()
+    assert '正在生成' not in final_text  # 临时状态已消失
+    assert '本轮未完成：aborted' in final_text  # 终态原位替换
+    window.close()
+
+
+def test_empty_session_hint_lives_in_transcript(tmp_path):
+    """T3：空会话提示只出现在 transcript 空状态，首条消息后消失。"""
+    app, store, window = make_window(tmp_path)
+    assert '添加本轮资料' in window.transcript.toPlainText()
+    assert '添加本轮资料' not in window.status.text()  # 不再占用状态适配器
+    flags_store_for(store).set_enabled('chat', True)
+    gateway = FakeGateway()
+    window._make_agent_gateway = lambda: gateway
+    window.composer.setPlainText('你好')
+    window.submit()
+    drain(app, window)
+    assert '添加本轮资料' not in window.transcript.toPlainText()
+    window.close()
+
+
+def test_artifacts_stay_with_owning_message(tmp_path):
+    """T4：历史成果锚定产生它的回复；新聊天不带出旧成果；无归属旧 run 进独立区域。"""
+    import json as _json
+
+    _app, store, window = make_window(tmp_path)
+    session = window.session_id
+    user1 = store.append(session, 'user', '审核这份报告')
+    run = store.start_run(session, {'selected_files': [], 'permissions': {}})
+    store.transition(run, 'running', 's')
+    store.transition(run, 'validating', 'c')
+    store.transition(run, 'succeeded', 'd')
+    with store.connect() as db:
+        db.execute('UPDATE runs SET result=? WHERE id=?',
+                   (_json.dumps({'kind': 'review', 'issues': [{'rule': 'x'}]}), run))
+    store.append_and_link(session, 'assistant', '审核完成，返回 1 项问题；原文件未变化。',
+                          run, source_message_id=user1)
+    # 无归属旧 run（迁移前数据形态）
+    with store.connect() as db:
+        db.execute("INSERT INTO runs VALUES('legacy-run',?,?,?,?,?)",
+                   (session, 'succeeded', '{}',
+                    _json.dumps({'kind': 'review', 'issues': []}),
+                    '2020-01-01T00:00:00+00:00'))
+    store.append(session, 'user', '你好')
+    store.append(session, 'assistant', '你好，请问需要核对哪些资料？')
+    window.render_messages()
+    html = window.transcript.toHtml()
+    artifact_pos = html.find('zq-export:')
+    assert artifact_pos != -1
+    second_turn_pos = html.find('你好，请问需要核对哪些资料？')
+    assert artifact_pos < second_turn_pos  # 成果仍在第一轮回复之下
+    zone_pos = html.find('历史成果（旧版本）')
+    assert zone_pos != -1
+    assert zone_pos > second_turn_pos  # 无归属旧成果在独立区域，不挂最新回复
+    # 重新构造窗口（模拟重启）顺序不变
+    project_id = window.project_id
+    window.close()
+    reopened = PlatformWindow(store)
+    reopened.reload_projects(project_id)
+    reopened.render_messages()
+    html2 = reopened.transcript.toHtml()
+    assert html2.find('zq-export:') < html2.find('你好，请问需要核对哪些资料？')
+    reopened.close()
+
+
+def test_cancel_produces_single_event_without_duplicate(tmp_path):
+    """T8：取消只产生一条时间线内容，不与固定状态文字重复。"""
+    app, store, window = make_window(tmp_path)
+    flags_store_for(store).set_enabled('chat', True)
+    gateway = BlockingGateway()
+    window._make_agent_gateway = lambda: gateway
+    window.composer.setPlainText('长跑任务')
+    window.submit()
+    window.cancel_run()
+    drain(app, window)
+    transcript = window.transcript.toPlainText()
+    assert transcript.count('本轮未完成') == 1
+    assert '本轮未完成' not in window.status.text()
     window.close()

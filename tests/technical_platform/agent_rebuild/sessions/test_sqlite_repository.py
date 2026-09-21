@@ -71,6 +71,16 @@ def test_data_survives_repo_reopen(tmp_path):
     assert reopened.get_operation(operation.id).status == 'completed'
 
 
+def test_operation_model_id_is_carried_into_model_request(tmp_path):
+    repo = _repo(tmp_path / 'db.sqlite')
+    repo.create_session('s1', project_id='p1', owner_id='alice', title='会话')
+    operation = repo.begin_operation(
+        's1', 'main', user_text='你好', request_id='r-model',
+        model_id='model-uuid')
+    request = repo.build_model_request(operation)
+    assert request.model_id == 'model-uuid'
+
+
 def test_operation_events_are_durable_and_ordered(tmp_path):
     path = tmp_path / 'db.sqlite'
     repo = _repo(path)

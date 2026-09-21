@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -111,21 +112,48 @@ def _build_worker_class():
         delta = Signal(str)
         done = Signal(dict)
 
-        def __init__(self, gateway, text, parent=None) -> None:
+        def __init__(self, gateway, text, parent=None, file_ids=(),
+                     upload_ids=()) -> None:
             super().__init__(parent)
             self.gateway = gateway  # 供 cancel_run 调用 gateway.stop()
             self._text = text
+            self._file_ids = tuple(file_ids)
+            self._upload_ids = tuple(upload_ids)
 
         def run(self) -> None:
+            delta_buffer = []
+            last_delta_emit = 0.0
+
+            def flush_delta() -> None:
+                nonlocal last_delta_emit
+                if delta_buffer:
+                    self.delta.emit(''.join(delta_buffer))
+                    delta_buffer.clear()
+                    last_delta_emit = time.monotonic()
+
             def forward(event) -> None:
                 if getattr(event, 'event_type', '') == 'message_delta':
-                    self.delta.emit(str((event.payload or {}).get('text', '')))
+                    text = str((event.payload or {}).get('text', ''))
+                    if not text:
+                        return
+                    delta_buffer.append(text)
+                    # Avoid one queued Qt signal per token.  The panel itself
+                    # renders on an 80 ms timer, so a 40 ms worker-side batch
+                    # keeps both the worker and GUI queues bounded.
+                    if time.monotonic() - last_delta_emit >= 0.04:
+                        flush_delta()
 
             try:
-                result = self.gateway.submit(self._text, on_event=forward)
+                kwargs = {'on_event': forward}
+                if self._file_ids:
+                    kwargs['file_ids'] = self._file_ids
+                if self._upload_ids:
+                    kwargs['upload_ids'] = self._upload_ids
+                result = self.gateway.submit(self._text, **kwargs)
             except Exception as exc:  # noqa: BLE001 - 边界不泄露堆栈
                 result = {'status': 'failed', 'reply': '',
                           'error_code': type(exc).__name__}
+            flush_delta()
             self.done.emit(result)
 
     return AgentTurnWorker

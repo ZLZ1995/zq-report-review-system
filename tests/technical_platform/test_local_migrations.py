@@ -254,8 +254,13 @@ def test_real_legacy_store_preserves_all_existing_rows_and_attachment(tmp_path):
     with sqlite3.connect(backup) as db:
         assert list(db.iterdump()) == before
     with sqlite3.connect(path) as db:
-        existing_inserts = [row for row in db.iterdump() if row.startswith('INSERT INTO')]
+        # v14 起新增 run_message_links 回填行，属预期增量；其余 INSERT 必须逐字节不变
+        existing_inserts = [row for row in db.iterdump()
+                            if row.startswith('INSERT INTO')
+                            and 'run_message_links' not in row]
+        links = list(db.execute('SELECT run_id, relation FROM run_message_links'))
     assert existing_inserts == [row for row in before if row.startswith('INSERT INTO')]
+    assert links == [(run, 'legacy_unlinked')]  # 该 run 终态后无 assistant 回复
 
 
 def test_v11_upgrade_rebuilds_step_state_check_and_preserves_rows(tmp_path):
@@ -294,3 +299,116 @@ def test_v11_upgrade_rebuilds_step_state_check_and_preserves_rows(tmp_path):
         assert db.execute('SELECT value FROM sample').fetchone()[0] == 'preserve-me'
         db.execute("UPDATE execution_steps SET state='waiting_user' "
                    "WHERE run='run-1' AND step_id='execute'")
+
+
+# ---------------------------------------------------------------- v14 run_message_links
+
+def make_v13_fixture(tmp_path):
+    """构造 v13 形态库：全量建库后回退 user_version 并移除 v14 产物。
+
+    时间戳全部显式指定，规避 Windows 计时器分辨率造成的并列。
+    """
+    from asset_based_agent.technical_platform.store import PlatformStore
+    path = tmp_path / 'v13.sqlite'
+    store = PlatformStore(path, 'alice')
+    project = store.create_project('迁移项目')
+    session = store.create_session(project, '迁移会话')
+    with sqlite3.connect(path) as db:
+        rows = [
+            (session, 'user', '生成本期明细表', '2026-09-01T09:00:00+00:00'),
+            (session, 'assistant', '已生成 3 个文件。', '2026-09-01T09:00:06+00:00'),
+            (session, 'user', '再核对一遍', '2026-09-01T09:30:00+00:00'),
+            (session, 'assistant', '第二条回复。', '2026-09-01T10:02:00+00:00'),
+        ]
+        db.executemany(
+            'INSERT INTO messages(session,role,text,created) VALUES(?,?,?,?)', rows)
+        runs = [
+            ('run-ok', session, 'succeeded', '{}', '{"kind":"generation"}',
+             '2026-09-01T09:00:01+00:00'),
+            ('run-x', session, 'succeeded', '{}', '{}',
+             '2026-09-01T10:00:00+00:00'),
+            ('run-y', session, 'succeeded', '{}', '{}',
+             '2026-09-01T10:01:00+00:00'),
+        ]
+        db.executemany(
+            'INSERT INTO runs(id,session,state,snapshot,result,created) '
+            'VALUES(?,?,?,?,?,?)', runs)
+        db.execute("INSERT INTO events(run,state,detail,created) "
+                   "VALUES('run-ok','succeeded','done','2026-09-01T09:00:05+00:00')")
+        db.execute('DROP TABLE IF EXISTS run_message_links')
+        db.execute('PRAGMA user_version=13')
+    return path, session
+
+
+def test_v14_upgrade_links_inferable_runs_and_marks_rest_unlinked(tmp_path):
+    from asset_based_agent.technical_platform.local_migrations import (
+        SCHEMA_VERSION,
+        migrate_database,
+    )
+    path, _session = make_v13_fixture(tmp_path)
+    with sqlite3.connect(path) as db:
+        before_inserts = [row for row in db.iterdump()
+                          if row.startswith('INSERT INTO')]
+    backup = migrate_database(path)
+    assert backup is not None and '-v13-' in backup.name
+    with sqlite3.connect(path) as db:
+        assert db.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
+        db.row_factory = sqlite3.Row
+        links = {row['run_id']: dict(row) for row in
+                 db.execute('SELECT * FROM run_message_links')}
+        assert set(links) == {'run-ok', 'run-x', 'run-y'}
+        # 唯一可推断：run-ok 终态 09:00:05 → 紧邻 assistant 09:00:06
+        assert links['run-ok']['relation'] == 'legacy_inferred'
+        assistant = db.execute(
+            'SELECT text FROM messages WHERE id=?',
+            (links['run-ok']['assistant_message_id'],)).fetchone()
+        assert assistant[0] == '已生成 3 个文件。'
+        source = db.execute(
+            'SELECT text FROM messages WHERE id=?',
+            (links['run-ok']['source_message_id'],)).fetchone()
+        assert source[0] == '生成本期明细表'
+        # 两个 run 共享同一候选回复 → 均不可唯一推断
+        assert links['run-x']['relation'] == 'legacy_unlinked'
+        assert links['run-x']['assistant_message_id'] is None
+        assert links['run-y']['relation'] == 'legacy_unlinked'
+        # 审计数量可查询
+        counts = dict(db.execute(
+            'SELECT relation, COUNT(*) FROM run_message_links GROUP BY relation'))
+        assert counts == {'legacy_inferred': 1, 'legacy_unlinked': 2}
+        # 历史消息/runs 逐字节不变
+        after_inserts = [row for row in db.iterdump()
+                         if row.startswith('INSERT INTO')
+                         and 'run_message_links' not in row]
+        assert after_inserts == before_inserts
+
+
+def test_v14_backfill_idempotent_across_repeated_migrations(tmp_path):
+    from asset_based_agent.technical_platform.local_migrations import (
+        migrate_database,
+    )
+    path, _session = make_v13_fixture(tmp_path)
+    migrate_database(path)
+    with sqlite3.connect(path) as db:
+        first = list(db.execute('SELECT * FROM run_message_links ORDER BY run_id'))
+        db.execute('PRAGMA user_version=13')  # 强制重放 v14
+    migrate_database(path)
+    with sqlite3.connect(path) as db:
+        second = list(db.execute('SELECT * FROM run_message_links ORDER BY run_id'))
+    assert second == first  # 无重复、无改写
+
+
+def test_v14_backfill_tolerates_database_without_business_tables(tmp_path):
+    from asset_based_agent.technical_platform.local_migrations import (
+        SCHEMA_VERSION,
+        migrate_database,
+    )
+    path = tmp_path / 'bare.sqlite'
+    legacy(path)  # 只有 sample 表：runs/messages 均不存在
+    with sqlite3.connect(path) as db:
+        db.execute('PRAGMA user_version=13')
+    backup = migrate_database(path)
+    assert backup is not None
+    with sqlite3.connect(path) as db:
+        assert db.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
+        assert db.execute('SELECT COUNT(*) FROM run_message_links').fetchone()[0] == 0
+        assert db.execute('SELECT value FROM sample').fetchone()[0] == 'preserve-me'

@@ -606,3 +606,48 @@
 - GitHub 推送阻塞：`git push` 与 `git ls-remote` 均返回 HTTP 400；GitHub 页面同样返回 Bad Request，无法把提交发送到 Zeabur 绑定的源码分支。
 - Zeabur 未执行“重新部署”：当前源码仍为旧版本，直接点击重新部署会重新发布旧镜像，已避免误操作。
 - 当前结论：EXE 已完成本地构建；服务端部署与在线能力探活尚未完成，阻塞原因是 GitHub 外部访问不可用。
+
+---
+
+## S16 对话时间线 UI 修复（本轮，按 KIMI_WORK_FIX_CONVERSATION_TIMELINE_UI.md 执行）
+
+- 范围：修复 6 个 UI 问题（回复重复显示、状态固定在输入框上方、空会话提示占位、历史成果挂到最新回复、跨会话污染、双列表拼接非时间线）。
+- 本地提交（未推远端）：
+  - `0156c06 feat: bind per-turn file scope into agent operations`（上轮遗留的文件范围特性，8 例测试绿后一并收编）
+  - `9566921 test: stub legacy_project_files in in-memory session repo`
+  - `d590ae2 fix: conversation timeline UI with run-message attribution (S16)`
+- 交付内容：
+  - v14 迁移 `run_message_links`（含 legacy 回填：终态 run 锚定其后最近 assistant；多 run 共享候选时全部保留为 legacy_unlinked；幂等）。
+  - `conversation_status.py` 轮次状态控制器；`conversation_timeline.py` 纯函数时间线投影（6 种 TimelineItem）。
+  - `app.py`：状态栏从输入框上方拆除（保留为不可见适配器，103 处 setText 调用点不崩）；`render_messages` 只消费 TimelineItem；完成/失败/取消经 `append_and_link`/`link_run_messages` 绑定 run↔消息；空会话提示移入 transcript。
+- 阶段验证（先红后绿）：T1-T8 先行 5 红符合预期；实现后 `test_app_wiring.py` 15/15 绿（三次连跑 + 全文件确定性绿）。
+- 故障注入记录：施工中途曾出现 6 例确定性 `本轮未完成：TypeError`，单独复跑与手动脚本均正常；定位为测试文件 FakeGateway 与 worker `file_ids` 调用约定的中间态不一致（delta 双事件版本），测试文件定稿后消失，无生产代码缺陷。
+- 回归（提交后状态，offscreen）：`agent_rebuild + 4 个 S16 专项文件` **413 passed, 9 xfailed**；`tests/report_review_server` **228 passed, 1 skipped**。ruff 全部改动文件 **All checks passed**。
+- 既有失败（非 S16 回归，未放宽断言）：`test_compound_window.py::test_dialogue_compound_plan_confirmation_and_real_execution` 4 例在 HEAD（4d601d8）上即失败——bot 单路径化提交使 `submit()` 无条件路由新 Agent，旧 TurnRouter 复合计划链路运行时不可达；按施工文件"不得回退 4d601d8"保持现状，待用户裁决旧链路测试的存废。
+- 内容性断言更新（已核对非放水）：`test_v13_migration.py` 两处 `user_version == 13` → `== 14` 并新增 `run_message_links` 表存在断言；`test_local_migrations.py` v14 三例新增。
+- EXE（已含 S16 全部改动）：
+  - `dist/technical_platform/ZQ技术平台/ZQ技术平台.exe`
+  - SHA256：`52b7289b7e9f99c2d44e3dfd49972260e07cedcd7a5ec3babf934915343188e8`（产物目录 683M）
+  - PYZ 复核：agent_gateway / agent_switch / flags / conversation_status / conversation_timeline / local_migrations / store / app / agent_core.runtime / context_builder / loop / sessions.sqlite_repository 全部在包。
+  - offscreen 冷启动 25s：EXIT=124 存活，止于登录框，无异常输出。
+- 证据截图（offscreen 离屏渲染，非真实显示器；实机验收留给用户）：
+  - `remediation/s16/s16_t4_anchored_artifacts.png`（成果锚定所属回复 + 历史成果独立区）
+  - `remediation/s16/s16_t2_live_status.png`（生成中状态卡在时间线内、状态栏无回复）
+  - `remediation/s16/s16_t5_cross_session.png`（会话 A 生成中，会话 B 无污染）
+- 门禁核对：未改业务 Skill 模板/审核规则/服务端计费；未回退 4d601d8；未推远端、未部署 Zeabur。
+
+---
+
+## S16+ 本轮文件范围补丁纳入（0001-fix-agent-turn-file-scope.patch）
+
+- 用户指令：阅读 `patches/0001-fix-agent-turn-file-scope.patch` 并将变更纳入重构 EXE 范围。
+- 核对结论：`git apply --reverse --check` 通过——补丁内容（upload_ids/explicit_upload 管线、_pending_upload_ids UI 透传、【项目历史资料】可发现清单、行为规则更新、legacy_project_files、14 条测试）此前已随构建窗口期的工作区更新进入 `0156c06`，当前 HEAD 与补丁完全一致，无需二次套用。
+- 测试验证：补丁 14 条测试全绿；ruff 修复 1 处导入排序（commit `style: sort imports in agent file scope acceptance tests`）。
+- 回归：客户端 `agent_rebuild + S16 专项` **413 passed, 9 xfailed**；服务端 **228 passed, 1 skipped**。
+- EXE 重建：
+  - 首次构建在 COLLECT 清理阶段进程死亡（日志 14 分钟无更新，无退出标记），定位为残留 `ZQ技术平台.exe`（PID 47528，上一构建冒烟遗留）锁文件；结束进程、清理 dist/build 后第二次构建成功（ROUND EXIT 0）。
+  - 产物：`dist/technical_platform/ZQ技术平台/ZQ技术平台.exe`
+  - SHA256：`e30e4c9e52031b00c510520dff8f5d61a577635f42f9235f17bf2660db2fced9`
+  - PYZ 复核：12 个目标模块在包； marshal 字节级确认 `upload_ids`/`explicit_upload`/`项目历史资料`/`_pending_upload_ids` 均已进包。
+  - offscreen 冷启动 25s：EXIT=124 存活，无异常输出，无残留进程。
+- 注意：本次构建替代了 S16 节记录的 `52b7289b…` EXE（该文件已被覆盖，SHA256 以本节为准）。

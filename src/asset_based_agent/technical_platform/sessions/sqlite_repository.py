@@ -253,7 +253,7 @@ class SQLiteSessionRepo:
     # ---------------------------------------------------------- operations
 
     def begin_operation(self, session_id, lane_id, *, user_text, request_id,
-                        kind='consult'):
+                        kind='consult', model_id=None):
         if kind not in OPERATION_KINDS:
             raise ValueError(f'非法 operation 类型: {kind}')
         now = _now()
@@ -276,12 +276,12 @@ class SQLiteSessionRepo:
                 db.execute(
                     'INSERT INTO agent_operations '
                     '(id,session_id,lane_id,kind,status,request_id,source_entry_id,'
-                    'accepted_context_sha256,permission_snapshot_json,'
+                    'accepted_context_sha256,model_id,permission_snapshot_json,'
                     'file_scope_snapshot_json,resource_snapshot_json,recovery_policy,'
                     'accepted_at,started_at,schema_version) '
-                    'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                    'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                     (operation_id, session_id, lane_id, kind, 'running', request_id,
-                     source.id, _EMPTY_SHA, '{}', '{}', '{}', 'manual', now, now,
+                     source.id, _EMPTY_SHA, model_id, '{}', '{}', '{}', 'manual', now, now,
                      SESSION_SCHEMA_VERSION))
             except sqlite3.IntegrityError as exc:
                 if 'one_open_operation_per_lane' in str(exc):
@@ -293,7 +293,8 @@ class SQLiteSessionRepo:
             return Operation(id=operation_id, session_id=session_id,
                              lane_id=lane_id, request_id=request_id,
                              source_entry_id=source.id, kind=kind,
-                             status='running', accepted_at=now, started_at=now)
+                             status='running', accepted_at=now, started_at=now,
+                             model_id=model_id)
 
     def _operation_row(self, db, operation_id):
         row = db.execute(
@@ -310,6 +311,7 @@ class SQLiteSessionRepo:
         return Operation(
             id=row['id'], session_id=row['session_id'], lane_id=row['lane_id'],
             request_id=row['request_id'], source_entry_id=row['source_entry_id'],
+            model_id=row['model_id'],
             kind=row['kind'], status=row['status'],
             current_turn_id=row['current_turn_id'], error_code=row['error_code'],
             error_summary=row['error_summary'], accepted_at=row['accepted_at'],
@@ -617,10 +619,37 @@ class SQLiteSessionRepo:
         wanted = EXPLICIT_BINDING_KINDS if kinds is None else frozenset(kinds)
         placeholders = ','.join('?' for _ in wanted)
         with self.connect() as db:
-            rows = db.execute(
+            rows = [dict(row) for row in db.execute(
                 f'SELECT * FROM turn_file_bindings WHERE operation_id=? '
                 f'AND binding_kind IN ({placeholders})',
-                (operation_id, *sorted(wanted))).fetchall()
+                (operation_id, *sorted(wanted))).fetchall()]
+            if rows:
+                # 绑定表不存文件名；尝试关联同库 legacy files 表补名称，
+                # 独立新库（无 files 表）安全回退为仅 id。
+                holders = ','.join('?' for _ in rows)
+                try:
+                    names = {row['id']: row['name'] for row in db.execute(
+                        f'SELECT id, name FROM files WHERE id IN ({holders})',
+                        tuple(row['file_id'] for row in rows)).fetchall()}
+                except sqlite3.OperationalError:
+                    names = {}
+                for row in rows:
+                    row['name'] = names.get(row['file_id'])
+        return rows
+
+    def legacy_project_files(self, project_id):
+        """同库 legacy files 表的项目文件清单（id/name/sha256）。
+
+        供上下文装配列出“项目历史资料”可发现清单；独立新库（无 files 表）
+        安全回退为空。内容不进入上下文，是否读取由 Agent 执行期决定。
+        """
+        try:
+            with self.connect() as db:
+                rows = db.execute(
+                    'SELECT id, name, sha256 FROM files WHERE project=?'
+                    ' ORDER BY created, name', (project_id,)).fetchall()
+        except sqlite3.OperationalError:
+            return []
         return [dict(row) for row in rows]
 
     # --------------------------------------------------------- compaction
@@ -685,7 +714,7 @@ class SQLiteSessionRepo:
         history = tuple(
             {'role': e.entry_type, 'payload': e.payload}
             for e in self.entries(operation.session_id, operation.lane_id))
-        return ModelRequest(model_id='', messages=history,
+        return ModelRequest(model_id=operation.model_id or '', messages=history,
                             request_id=operation.request_id)
 
     # ---------------------------------------------------------- integrity

@@ -176,6 +176,9 @@ class InMemorySessionRepo:
         return [dict(b) for key, b in self._bindings.items()
                 if key[0] == operation_id and b['binding_kind'] in wanted]
 
+    def legacy_project_files(self, project_id):
+        return []  # 内存仓储无 legacy files 表
+
     # --------------------------------------------------------- compaction
 
     def save_compaction(self, session_id, lane_id, *, source_start_entry_id,
