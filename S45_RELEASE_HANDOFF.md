@@ -13,6 +13,12 @@
 
 ## GitHub 发布顺序
 
+### 替代上传路径：GitHub REST API
+
+如果 `git push`/`git ls-remote` 所在网络继续返回 HTTP 400，可改用 GitHub REST API：先用 Git 数据接口创建 blob/tree/commit/ref（同步 `kimi/pi-agent-core-rebuild` 的提交链），再调用 `POST /repos/{owner}/{repo}/releases` 创建 `v0.2.11`，最后使用返回的 `upload_url` 上传 ZIP 和 manifest 资产。该路径绕过 Git Smart HTTP，不改变客户端清单或签名。
+
+REST API 只读探测已验证可用；写入仍必须提供具有仓库写权限的 GitHub PAT 或已认证浏览器/API 会话。不能把 PAT 写入仓库、清单或日志。
+
 1. 将源代码分支 `kimi/pi-agent-core-rebuild` 合入目标发布分支。
 2. 创建公开 Release tag `v0.2.11`，目标提交必须是包含 S45 修复的提交 `ce93726` 及其父提交链。
 3. 上传两个 ZIP；将 `release-manifest.json` 和 `managed-release-manifest.json` 作为对应清单资产上传。若总控约定资产名不同，只允许改名，不得修改 JSON 内容。
@@ -29,4 +35,3 @@
 ## 当前阻塞
 
 截至 2026-09-22，GitHub REST API 只读正常，但 Git remote 写入仍 HTTP 400，环境没有可用 GitHub 写凭据；Zeabur 当前稳定版仍为 `0.2.10/sequence 5/schema 11`。恢复 GitHub 写权限或由管理员在总控完成以上操作后，继续做线上验收，不得提前宣称发布完成。
-
