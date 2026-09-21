@@ -37,6 +37,10 @@ signed updater reject the candidate as a replay or incompatible downgrade.
   `44297ce7bf4f3c9b70ba8403919995f8fc01dea9418e21efe0c9ae871ee3275d`.
 - Offline signature verification: passed with `D:/1/KEY`, key id
   `zq-release-20260917`, sequence `6`, schema range `[15,15]`.
+- Managed manifest verification: passed; manifest SHA-256
+  `30f1b2ffed51c04182586568a70a92fc18771a160854d77bffc3802400dbc157`.
+- Release workflow asset set is locally complete: ordinary and managed ZIPs,
+  plus their JSON manifests, are present under `dist/s42`.
 
 ## Online evidence and remaining gate
 
