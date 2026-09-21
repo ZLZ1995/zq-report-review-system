@@ -38,6 +38,7 @@
 - 在线能力探活仍为 HTTP 200，服务端 build SHA `eda21aec50ba68d70c1db06f624094ca3d14506e`，全部声明能力保持可用。
 - `GET /api/v1/client-releases/current` 仍返回稳定版 `0.2.10`、sequence `5`、schema `11`；S45 `0.2.11` 尚未进入线上发布表。
 - GitHub REST API 仅读探测成功（HTTP 200）；当前 Git remote 写入仍返回 HTTP 400，环境中没有可用 GitHub 写凭据，浏览器发布页也返回 GitHub Bad Request，因此不能安全执行推送或创建 Release。
+- 本地总控发布/版本相关回归在业务盘环境变量下通过：`24 passed`（`tests/report_review_server/test_client_releases.py`、版本导出/版本信息/基线测试）；说明 S45 清单格式、签名校验和发布状态机在本地服务端逻辑中可接受。
 
 ## S45 post-fix candidate
 
