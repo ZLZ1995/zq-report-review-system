@@ -358,12 +358,14 @@ class PlatformWindow(QMainWindow):
             from .model_port.provider_factory import production_provider_factory
 
             provider_factory = production_provider_factory(self.client, model_id)
+        browser_backend = getattr(self.browser_panel, 'agent_backend', None)
         gateway = AgentGateway(
             self.store, self.session_id,
             flags=self._feature_flags(), model_id=model_id or '',
             model_port_factory=model_factory,
             permission_mode_getter=self.agent_permission_mode,
             provider_factory=provider_factory,
+            browser_backend=browser_backend,
             approver=ApproverBridge(self._ask_approval_gui),
             force_all_tools=True)
         self._agent_gateway = gateway
