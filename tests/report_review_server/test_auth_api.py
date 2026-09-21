@@ -92,6 +92,21 @@ def test_new_login_revokes_previous_session(client: TestClient) -> None:
 def test_refresh_token_is_rotated_and_cannot_be_reused(
     client: TestClient,
 ) -> None:
+    """S06 起 refresh 改为宽容窗口语义：
+
+    - 每次 refresh 仍轮换 token（新 != 旧）；
+    - 宽容窗口内旧 token 可用（双进程客户端不互相注销）；
+    - 超出宽容窗口后旧 token 必须被拒绝（不可无限复用）。
+    """
+    from datetime import timedelta
+
+    from sqlalchemy import select
+
+    from asset_based_agent.report_review_server.models import (
+        AuthSession,
+        utc_now,
+    )
+
     session = login(
         client,
         "admin",
@@ -103,15 +118,31 @@ def test_refresh_token_is_rotated_and_cannot_be_reused(
         "/api/v1/auth/refresh",
         json={"refresh_token": session["refresh_token"]},
     )
-    reused = client.post(
+    assert refreshed.status_code == 200
+    assert refreshed.json()["refresh_token"] != session["refresh_token"]
+
+    # 宽容窗口内：旧 token 仍被接受（并发进程容忍）
+    reused_in_grace = client.post(
         "/api/v1/auth/refresh",
         json={"refresh_token": session["refresh_token"]},
     )
+    assert reused_in_grace.status_code == 200
 
-    assert refreshed.status_code == 200
-    assert refreshed.json()["refresh_token"] != session["refresh_token"]
-    assert reused.status_code == 401
-    assert reused.json()["error"]["code"] == "invalid_refresh_token"
+    # 超出宽容窗口：旧 token 必须拒绝
+    with client.app.state.session_factory() as db:
+        auth_session = db.scalar(
+            select(AuthSession).where(
+                AuthSession.user_id == session["user"]["user_id"]
+            )
+        )
+        auth_session.refresh_rotated_at = utc_now() - timedelta(seconds=3600)
+        db.commit()
+    reused_beyond_grace = client.post(
+        "/api/v1/auth/refresh",
+        json={"refresh_token": session["refresh_token"]},
+    )
+    assert reused_beyond_grace.status_code == 401
+    assert reused_beyond_grace.json()["error"]["code"] == "invalid_refresh_token"
 
 
 def test_admin_password_reset_revokes_user_session(

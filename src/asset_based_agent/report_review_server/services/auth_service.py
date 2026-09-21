@@ -24,11 +24,13 @@ from ..security import (
 
 
 class ServiceError(RuntimeError):
-    def __init__(self, code: str, message: str, status_code: int) -> None:
+    def __init__(self, code: str, message: str, status_code: int,
+                 *, details: dict | None = None) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.status_code = status_code
+        self.details = details or {}
 
 
 @dataclass(frozen=True)
@@ -67,9 +69,30 @@ class AuthService:
             .where(AuthSession.refresh_token_hash == token_hash)
             .with_for_update()
         )
+        if auth_session is None:
+            # 宽容窗口：刚被轮换的上一令牌在 grace 内仍可用，
+            # 双进程共享会话时 refresh 不互相注销。
+            auth_session = db.scalar(
+                select(AuthSession)
+                .where(AuthSession.previous_refresh_token_hash == token_hash)
+                .with_for_update()
+            )
+            rotated_at = (
+                auth_session.refresh_rotated_at
+                if auth_session is not None else None
+            )
+            if rotated_at is not None and rotated_at.tzinfo is None:
+                rotated_at = rotated_at.replace(tzinfo=timezone.utc)
+            grace = timedelta(seconds=self.settings.refresh_grace_seconds)
+            if (
+                auth_session is None
+                or rotated_at is None
+                or datetime.now(timezone.utc) - rotated_at > grace
+            ):
+                raise ServiceError(
+                    "invalid_refresh_token", "刷新令牌无效或已过期。", 401)
         if (
-            auth_session is None
-            or auth_session.revoked_at is not None
+            auth_session.revoked_at is not None
             or is_expired(auth_session.expires_at)
         ):
             raise ServiceError("invalid_refresh_token", "刷新令牌无效或已过期。", 401)
@@ -77,7 +100,9 @@ class AuthService:
         if user is None or user.status != "active":
             raise ServiceError("account_disabled", "账号不可用。", 401)
         rotated = new_refresh_token()
+        auth_session.previous_refresh_token_hash = auth_session.refresh_token_hash
         auth_session.refresh_token_hash = hash_refresh_token(rotated)
+        auth_session.refresh_rotated_at = utc_now()
         auth_session.last_heartbeat_at = utc_now()
         db.commit()
         return self._token_response(user, auth_session, rotated)

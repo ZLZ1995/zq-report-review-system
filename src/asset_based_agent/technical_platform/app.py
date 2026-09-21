@@ -154,6 +154,9 @@ class TaskWorker(QThread):
 
 
 class PlatformWindow(QMainWindow):
+    # S15 接线子集：Worker 线程 → GUI 线程的批准请求桥（queued，跨线程安全）
+    _approval_requested = Signal(str, str, str, object)
+
     def __init__(self, store: PlatformStore, *, client=None, models=None, storage_preferences=None):
         super().__init__()
         configure_fonts()
@@ -176,6 +179,9 @@ class PlatformWindow(QMainWindow):
         self.available_update = None
         self._close_after_update = False
         self._local_chain = None
+        self._agent_worker = None  # S15：新 Agent 路径轮次 Worker（不占用 task_manager）
+        self._feature_flags_cache = None
+        self._approval_requested.connect(self._handle_approval_request)
         self.network_state = "connected"
         self.setWindowTitle(
             "ZQ 技术平台" + (" · 本地交互预览" if client is None else "")
@@ -263,6 +269,146 @@ class PlatformWindow(QMainWindow):
         from .agent_permission_modes import requires_confirmation
 
         return requires_confirmation(self.agent_permission_mode(), 'generate_file')
+
+    # ------------------------------------------------------------ 新 Agent 接线
+    # 正式客户端只允许新 Agent；旧路由仅保留在源码中供迁移审计，不作为运行时回退。
+
+    def _feature_flags(self):
+        from .agent_switch import flags_store_for
+        from .flags import FeatureFlagStore
+
+        cache = self._feature_flags_cache
+        if cache is not None and cache.path is not None:
+            return cache
+        try:
+            resolved = flags_store_for(self.store)
+        except ValueError:
+            # ProjectCatalog 未激活（尚未创建/打开项目）：退回内存开关，
+            # 项目激活后下一次访问自动重新绑定持久化文件
+            if cache is None:
+                cache = FeatureFlagStore()
+                self._feature_flags_cache = cache
+            return cache
+        if cache is not None:  # 内存期勾选迁移进项目持久化文件
+            for category, on in cache.snapshot().items():
+                if on:
+                    resolved.set_enabled(category, True)
+        self._feature_flags_cache = resolved
+        return resolved
+
+    def refresh_grayscale_menu(self) -> None:
+        from .agent_switch import FLAG_LABELS, enabled_count
+        from .flags import FEATURE_FLAG_ORDER
+
+        flags = self._feature_flags()
+        menu = self.grayscale_button.menu()
+        menu.clear()
+        for category in FEATURE_FLAG_ORDER:
+            action = menu.addAction(FLAG_LABELS[category])
+            action.setCheckable(True)
+            action.setChecked(flags.enabled(category))
+            action.triggered.connect(
+                lambda _checked=False, key=category, item=action:
+                    self.set_grayscale_flag(key, item.isChecked())
+            )
+        total = len(FEATURE_FLAG_ORDER)
+        self.grayscale_button.setText(f'灰度：新路径 {enabled_count(flags)}/{total}')
+        self.grayscale_button.setToolTip(
+            '逐类切换到新 Agent 内核；默认全部关闭（旧路径），可随时退回。')
+
+    def set_grayscale_flag(self, category: str, enabled: bool) -> None:
+        from .agent_switch import FLAG_LABELS
+
+        self._feature_flags().set_enabled(category, enabled)
+        self.refresh_grayscale_menu()
+        target = '新路径' if enabled else '旧路径'
+        self.status.setText(f'灰度开关：{FLAG_LABELS[category]} → {target}。')
+
+    def _make_agent_gateway(self):
+        """装配新 Agent 网关；未连接服务端时返回 None，由调用方展示可行动失败。"""
+        from .agent_gateway import AgentGateway
+        from .agent_switch import ApproverBridge, client_model_port_factory
+
+        try:
+            model_factory = client_model_port_factory(
+                self.client, client_version=CLIENT_VERSION)
+        except ValueError:
+            self.status.setText('新 Agent 需要先连接服务端；本轮未发送。')
+            return None
+        model_id = self.model_combo.currentData()
+        provider_factory = None
+        if model_id:
+            from .model_port.provider_factory import production_provider_factory
+
+            provider_factory = production_provider_factory(self.client, model_id)
+        return AgentGateway(
+            self.store, self.session_id,
+            flags=self._feature_flags(),
+            model_port_factory=model_factory,
+            permission_mode_getter=self.agent_permission_mode,
+            provider_factory=provider_factory,
+            approver=ApproverBridge(self._ask_approval_gui),
+            force_all_tools=True)
+
+    def _try_agent_submit(self, prompt: str) -> bool:
+        """生产客户端只使用新 Agent；连接不完整时阻止旧路径接管。"""
+        if self._agent_worker is not None:
+            return True  # 上一轮未结束，吞掉重复提交（与旧 worker 语义一致）
+        gateway = self._make_agent_gateway()
+        if gateway is None:
+            self.status.setText('新 Agent 尚未连接服务端，本轮未发送；请先连接并重试。')
+            return True
+        from .agent_switch import AgentTurnWorker
+
+        self.store.append(self.session_id, 'user', prompt)  # 灰期双写：供 UI 显示
+        self.render_messages()
+        worker = AgentTurnWorker(gateway, prompt, parent=self)
+        worker.delta.connect(self._on_agent_delta)
+        worker.done.connect(self._on_agent_done)
+        worker.finished.connect(self._on_agent_worker_finished)
+        self._agent_worker = worker
+        self.composer.clear()
+        self.set_busy(True)
+        self.status.setText('新 Agent 路径：正在生成…')
+        worker.start()
+        return True
+
+    def _on_agent_delta(self, text: str) -> None:
+        if text:
+            self.status.setText(f'新 Agent 路径：{text}')
+
+    def _on_agent_done(self, result: dict) -> None:
+        reply = (result.get('reply') or '').strip()
+        if not reply:
+            reason = (result.get('error_message') or result.get('error_code')
+                      or result.get('status') or '未知原因')
+            reply = f'本轮未完成：{reason}。'
+        self.store.append(self.session_id, 'assistant', reply)  # 灰期双写
+        self.render_messages()
+        self.status.setText(reply)
+
+    def _on_agent_worker_finished(self) -> None:
+        self._agent_worker = None
+        self.set_busy(False)
+
+    def _ask_approval_gui(self, operation: str, title: str, reason: str) -> bool:
+        """ApproverBridge 在 Worker 线程内调用；转到 GUI 线程弹旧批准框。"""
+        if QThread.currentThread() is self.thread():
+            return self.agent_operation_allowed(operation, title, reason)
+        verdict = {}
+        ready = threading.Event()
+
+        def callback(ok) -> None:
+            verdict['ok'] = bool(ok)
+            ready.set()
+
+        self._approval_requested.emit(operation, title, reason, callback)
+        ready.wait()
+        return verdict.get('ok', False)
+
+    def _handle_approval_request(self, operation: str, title: str, reason: str,
+                                 callback) -> None:
+        callback(self.agent_operation_allowed(operation, title, reason))
 
     def _build(self):
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -381,6 +527,12 @@ class PlatformWindow(QMainWindow):
         self.permission_button.setMenu(QMenu(self.permission_button))
         actions.addWidget(self.permission_button)
         self.refresh_permission_menu()
+        self.grayscale_button = QPushButton(self)
+        self.grayscale_button.setAccessibleName('新 Agent 灰度开关')
+        self.grayscale_button.setMenu(QMenu(self.grayscale_button))
+        actions.addWidget(self.grayscale_button)
+        self.refresh_grayscale_menu()
+        self.grayscale_button.hide()
         self.stop = self.button("停止", self.cancel_run, actions)
         self.stop.setEnabled(False)
         self.send = self.button("执行 ↑", self.submit, actions)
@@ -1328,71 +1480,16 @@ class PlatformWindow(QMainWindow):
         return True
 
     def submit(self):
-        if not self.session_id or self.worker:
+        if not self.session_id or self.worker or self._agent_worker is not None:
             return
         prompt = self.composer.toPlainText().strip()
         if not prompt:
             return
         if self.try_local_skill_install(prompt):
             return
-        if self.try_local_builtin(prompt):
-            return
-        from .input_gateway import InputGateway
-        from .turn_scope_policy import ScopeClarificationNeeded, format_scope_summary
-        gateway = InputGateway(self.store, self.agent_permission_mode)
-        try:
-            envelope = gateway.create(
-                self.session_id, prompt,
-                selected_ids=list(self.selected_file_ids()),
-                model_id=self.model_combo.currentData() or 'pending',
-            )
-        except ScopeClarificationNeeded as exc:
-            self.status.setText(str(exc))
-            return
-        except (ValueError, PermissionError):
-            self.status.setText('本轮要求或文件范围无效，请检查后重试。')
-            return
-        self.last_turn_envelope = envelope
-        self.status.setText(format_scope_summary(envelope))
-        if (self.client is None or self.network_state != 'connected') and not self.connect_service():
-            return
-        if not self.session_id:
-            self.status.setText("账号已切换，请选择当前账号的项目后重新输入任务。")
-            return
-        model_id = self.model_combo.currentData()
-        if not model_id:
-            self.status.setText('请先连接模型服务；自动判断任务需要联网验证。')
-            return
-        if not self.agent_operation_allowed(
-            'network', '确认 Agent 联网',
-            '允许 Agent 将本轮要求及选中文件的受控摘要发送给已连接的模型服务，用于理解任务并选择 Skill？',
-        ):
-            self.status.setText('已取消联网理解，未发送本轮内容。')
-            return
-        from .routing import ConsultWorker
-        from .skill_installation import SkillInstallation
-        manager = SkillInstallation(self.store)
-        self._routing_packages = {}
-        candidates = []
-        for version in manager.list_versions():
-            if not version['enabled'] or version['skill_id'] in {s.id for s in BUILTINS}:
-                continue
-            package = manager.load(version['skill_id'], version['version'])
-            if package.ready:
-                self._routing_packages[version['skill_id']] = package
-                candidates.append({'id': version['skill_id'], 'name': package.manifest['name'],
-                                   'adapter': package.manifest['adapter'], 'description': package.instructions[:1000]})
-        worker = ConsultWorker(
-            self.client, self.store, self.session_id, prompt,
-            model_id=model_id, selected_ids=list(self.selected_file_ids()),
-            candidates=candidates,
-            browser_enabled=callable(getattr(self.client, 'propose_browser_step', None)),
-            envelope=envelope, parent=self)
-        self.register_consult_worker(worker)
-        self.composer.clear()
-        self.set_busy(True)
-        self.status.setText('Agent 正在理解本轮要求…')
-        worker.start()
+        # 正式客户端只允许新 Agent；旧 TurnRouter 链路不再作为回退入口。
+        self._try_agent_submit(prompt)
+        return
 
     def try_local_builtin(self, prompt: str) -> bool:
         """Route new local-only built-ins without requiring a cloud schema change."""
@@ -2226,6 +2323,11 @@ class PlatformWindow(QMainWindow):
                 # Compatibility for independently supplied preview workers.
                 self.worker.cancel.set()
             self.status.setText("正在停止；已提交的模型调用可能仍需结束并结算，本地不再继续生成。")
+            self.stop.setEnabled(False)
+        elif self._agent_worker is not None:
+            # S15：停止新 Agent 路径轮次（abort 内核开放操作，Worker 随后自行结束）
+            self._agent_worker.gateway.stop()
+            self.status.setText("正在停止新 Agent 轮次；已提交的模型调用可能仍需结束并结算。")
             self.stop.setEnabled(False)
 
     def check_versions(self):

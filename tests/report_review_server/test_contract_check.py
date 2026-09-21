@@ -40,3 +40,19 @@ def test_contract_check_flags_schema_without_capability_declaration():
         'EvidenceRef': {'type': 'object', 'properties': {'id': {}, 'evidence': {}}}}}}
     issues = check_capabilities_against_openapi(capabilities, openapi)
     assert any('未声明 material_evidence' in issue for issue in issues)
+
+
+def test_contract_check_requires_stream_route_and_capability_to_match():
+    from asset_based_agent.report_review_server.contract_check import (
+        check_capabilities_against_openapi,
+    )
+    capabilities = {'schema_version': 1, 'protocol_version': 1,
+                    'capabilities': {'agent_completion_stream': 1}}
+    openapi = {'paths': {}, 'components': {'schemas': {'Any': {}}}}
+    issues = check_capabilities_against_openapi(capabilities, openapi)
+    assert any('agent_completion_stream' in issue for issue in issues)
+
+    capabilities['capabilities'] = {}
+    openapi['paths'] = {'/api/v1/agent/completions/stream': {'post': {}}}
+    issues = check_capabilities_against_openapi(capabilities, openapi)
+    assert any('未声明 agent_completion_stream' in issue for issue in issues)

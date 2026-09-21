@@ -16,6 +16,7 @@ class ServerSettings:
     environment: str = "development"
     access_token_minutes: int = 15
     refresh_token_days: int = 7
+    refresh_grace_seconds: int = 120
     provider_encryption_key: str = ""
     build_sha: str | None = None
 

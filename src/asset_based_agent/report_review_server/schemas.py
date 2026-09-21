@@ -273,3 +273,32 @@ class SkillReleaseResponse(BaseModel):
     capabilities: list[str]
     minimum_client_version: str
     status: str
+
+
+class AgentCompletionMessage(BaseModel):
+    """流式请求消息：纯文本内容；禁止文件路径/二进制等额外字段。"""
+
+    model_config = ConfigDict(extra='forbid')
+
+    role: Literal['system', 'user', 'assistant', 'tool']
+    content: str = Field(min_length=0, max_length=200_000)
+
+
+class AgentCompletionToolSpec(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
+    name: str = Field(min_length=1, max_length=128)
+    description: str = Field(default='', max_length=2000)
+    input_schema: dict
+
+
+class AgentCompletionStreamRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
+    protocol_version: int
+    client_version: str = Field(default='', max_length=64)
+    model_id: str = Field(min_length=1, max_length=64)
+    client_request_id: str = Field(min_length=8, max_length=128)
+    messages: list[AgentCompletionMessage] = Field(min_length=1)
+    tools: list[AgentCompletionToolSpec] = Field(default_factory=list)
+    sampling: dict = Field(default_factory=dict)

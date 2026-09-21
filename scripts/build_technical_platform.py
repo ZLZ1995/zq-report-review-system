@@ -23,7 +23,34 @@ NEW_HARNESS_MODULES = (
     "turn_normalizer", "turn_scope_policy", "workflow_compiler",
     "workflow_events", "workflow_journal", "workflow_plan",
     "workflow_reconciliation", "workflow_runtime", "workflow_scheduler",
+    # S15 接线子集：app.py 运行时惰性导入，静态分析不可达，必须显式冻结
+    "agent_gateway", "agent_switch",
 )
+
+# Pi Agent Core 重构（S02—S14）新增包：app.py 尚未切换到新路径（S15），
+# 静态分析不可达，必须显式冻结进包供灰度 feature flag 启用。
+NEW_AGENT_PACKAGES = (
+    "agent_core", "sessions", "resources", "tools", "policies",
+    "business_tools", "application", "model_port", "shadow",
+    "acceptance", "flags",
+)
+
+
+def agent_package_arguments():
+    """冻结新架构包的全部子模块（包 __init__ 未导入的子模块静态不可达）。"""
+    arguments = []
+    base = ROOT / 'src/asset_based_agent/technical_platform'
+    for package in NEW_AGENT_PACKAGES:
+        directory = base / package
+        if not directory.is_dir():
+            arguments += ["--hidden-import",
+                          f"asset_based_agent.technical_platform.{package}"]
+            continue
+        for file in sorted(directory.glob('*.py')):
+            arguments += ["--hidden-import",
+                          f"asset_based_agent.technical_platform."
+                          f"{package}.{file.stem}"]
+    return arguments
 
 
 def hidden_import_arguments():
@@ -112,6 +139,7 @@ def main():
             "--hidden-import",
             "asset_based_agent.technical_platform.skill_improvement",
             *hidden_import_arguments(),
+            *agent_package_arguments(),
             "--hidden-import",
             "asset_based_agent.technical_platform.ui.memory_panel",
             "--copy-metadata",

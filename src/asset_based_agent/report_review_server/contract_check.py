@@ -17,6 +17,10 @@ CAPABILITY_SCHEMA_REQUIREMENTS: dict[str, dict[str, Any]] = {
     },
 }
 
+CAPABILITY_ROUTE_REQUIREMENTS: dict[str, tuple[str, str]] = {
+    'agent_completion_stream': ('/api/v1/agent/completions/stream', 'post'),
+}
+
 
 def check_capabilities_against_openapi(capabilities_doc: dict[str, Any],
                                        openapi_doc: dict[str, Any]) -> list[str]:
@@ -38,6 +42,17 @@ def check_capabilities_against_openapi(capabilities_doc: dict[str, Any],
     if not isinstance(schemas, dict) or not schemas:
         issues.append('OpenAPI 缺少 components.schemas')
         return issues
+    paths = openapi_doc.get('paths')
+    if not isinstance(paths, dict):
+        paths = {}
+    for capability, (path, method) in CAPABILITY_ROUTE_REQUIREMENTS.items():
+        declared = caps.get(capability) == 1
+        operation = paths.get(path, {}).get(method)
+        present = isinstance(operation, dict)
+        if declared and not present:
+            issues.append(f'/capabilities 声明 {capability}=1，但 OpenAPI 缺少 {method.upper()} {path}')
+        if present and not declared:
+            issues.append(f'OpenAPI 已包含 {method.upper()} {path}，但 /capabilities 未声明 {capability}')
     for capability, requirement in CAPABILITY_SCHEMA_REQUIREMENTS.items():
         declared = caps.get(capability) == 1
         required_schemas = requirement['schemas']

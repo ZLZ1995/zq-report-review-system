@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -138,6 +140,125 @@ class HttpProviderClient:
                 retryable=False,
             )
         return ProviderResponse(payload=response_payload, usage=usage)
+
+    def stream(
+        self,
+        route: ProviderRoute,
+        payload: dict[str, object],
+    ) -> Iterator[dict[str, object]]:
+        """OpenAI 兼容 SSE 流；产出 iter_openai_stream_events 归一化事件。"""
+        request_payload = dict(payload)
+        request_payload["model"] = route.provider_model
+        request_payload["stream"] = True
+        request_payload["stream_options"] = {"include_usage": True}
+        api_key = self.cipher.decrypt(
+            route.api_key_ciphertext,
+            purpose=f"provider-route:{route.model_id}:{route.priority}",
+        )
+        try:
+            with httpx.stream(
+                "POST",
+                _chat_completions_endpoint(route),
+                json=request_payload,
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=route.timeout_seconds,
+            ) as response:
+                if response.status_code >= 400:
+                    raise ProviderCallError(
+                        f"provider_http_{response.status_code}",
+                        "模型渠道返回错误。",
+                        retryable=response.status_code in {401, 403, 408, 409, 429}
+                        or response.status_code >= 500,
+                    )
+                yield from iter_openai_stream_events(response.iter_lines())
+        except httpx.HTTPError as exc:
+            raise ProviderCallError(
+                "provider_network_error",
+                "模型渠道网络请求失败。",
+                retryable=True,
+            ) from exc
+
+
+def iter_openai_stream_events(
+    lines: Iterable[str],
+) -> Iterator[dict[str, object]]:
+    """把 OpenAI 兼容 SSE 行流归一化为内部流事件。
+
+    产出 kind ∈ {message_start, text_delta, tool_call_delta,
+    tool_call_complete, usage, message_complete}。
+    """
+    started = False
+    tool_buffers: dict[int, dict[str, object]] = {}
+    finish_reason: str | None = None
+    usage: dict[str, int] | None = None
+    for raw in lines:
+        line = raw.strip()
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if data == "[DONE]":
+            break
+        try:
+            chunk = json.loads(data)
+        except ValueError as exc:
+            raise ProviderCallError(
+                "provider_invalid_json",
+                "模型渠道流式帧不是有效JSON。",
+                retryable=True,
+            ) from exc
+        if not isinstance(chunk, dict):
+            continue
+        raw_usage = chunk.get("usage")
+        if isinstance(raw_usage, dict) and raw_usage:
+            details = raw_usage.get("completion_tokens_details") or {}
+            usage = {
+                "input_tokens": int(raw_usage.get("prompt_tokens") or 0),
+                "output_tokens": int(raw_usage.get("completion_tokens") or 0),
+                "cache_hit_tokens": int(
+                    raw_usage.get("prompt_cache_hit_tokens") or 0),
+                "cache_miss_tokens": int(
+                    raw_usage.get("prompt_cache_miss_tokens") or 0),
+                "reasoning_tokens": int(details.get("reasoning_tokens") or 0),
+            }
+        for choice in chunk.get("choices") or []:
+            delta = choice.get("delta") or {}
+            if not started:
+                started = True
+                yield {"kind": "message_start", "data": {}}
+            content = delta.get("content")
+            if content:
+                yield {"kind": "text_delta", "data": {"text": content}}
+            for tool_call in delta.get("tool_calls") or []:
+                index = int(tool_call.get("index") or 0)
+                buffer = tool_buffers.setdefault(
+                    index, {"id": None, "name": "", "fragments": []})
+                if tool_call.get("id"):
+                    buffer["id"] = tool_call["id"]
+                function = tool_call.get("function") or {}
+                if function.get("name"):
+                    buffer["name"] = function["name"]
+                fragment = function.get("arguments") or ""
+                buffer["fragments"].append(fragment)
+                yield {"kind": "tool_call_delta", "data": {
+                    "index": index, "name": buffer["name"],
+                    "arguments_fragment": fragment,
+                }}
+            if choice.get("finish_reason"):
+                finish_reason = str(choice["finish_reason"])
+    if tool_buffers:
+        for index in sorted(tool_buffers):
+            buffer = tool_buffers[index]
+            try:
+                arguments = json.loads("".join(buffer["fragments"]) or "{}")
+            except ValueError:
+                arguments = None
+            yield {"kind": "tool_call_complete", "data": {
+                "id": buffer["id"] or f"call-{index}",
+                "name": buffer["name"], "arguments": arguments,
+            }}
+    if usage is not None:
+        yield {"kind": "usage", "data": usage}
+    yield {"kind": "message_complete", "data": {"finish_reason": finish_reason}}
 
 
 def _chat_completions_endpoint(route: ProviderRoute) -> str:
