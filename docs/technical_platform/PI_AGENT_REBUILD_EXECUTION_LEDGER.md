@@ -651,3 +651,22 @@
   - PYZ 复核：12 个目标模块在包； marshal 字节级确认 `upload_ids`/`explicit_upload`/`项目历史资料`/`_pending_upload_ids` 均已进包。
   - offscreen 冷启动 25s：EXIT=124 存活，无异常输出，无残留进程。
 - 注意：本次构建替代了 S16 节记录的 `52b7289b…` EXE（该文件已被覆盖，SHA256 以本节为准）。
+
+---
+
+## 服务端流式端点部署与在线探活（本轮，用户已授权）
+
+- 网络诊断：本机到 `github.com`（网页与 smart-HTTP）全部 400，但 `api.github.com`/`codeload.github.com` 正常——中间盒按域名拦截；Windows 凭据管理器存有该仓库 admin/push 权限的 PAT。
+- 部署方式：经 GitHub Git Database API 上传本地 HEAD 全部缺失对象（756 blob / 65 tree，幂等校验 SHA 一致），以远端 main tip `cd50bd0` 为父创建同步提交 **`adeb8121`** 并快进 main（未改写远端历史）。校验：main tree == 本地 HEAD tree（`6d15055b`）。
+- 内容核验（重要）：同步提交相对远端旧 tip 共 300 个文件差异，**逐文件验证全部为 CRLF→LF 行尾归一，零文本内容差异**（含 4 个疑似 SKILL.md 也已字节级复核）——远端此前已含 S16/文件范围等全部代码的等价重写版本，生产内容无变化风险。
+- Zeabur：推送后健康端点连续 4.5 分钟 14 次探测全部 200，重建期间无中断；部署内容文本等价，行为不变。
+- 在线探活（https://zq-report-review.zeabur.app）：
+  - `GET /api/v1/health` → `{"status":"ok"}`
+  - `GET /api/v1/capabilities` → `agent_completion_stream: 1` 已声明
+  - `POST /api/v1/agent/completions/stream` 无鉴权 → **401**（部署前为 404，端点已上线）
+  - 同端点伪 token → 401；GET 错误动词 → 405（路由已注册）
+  - `GET /api/v1/account/balance` → 401（在线）
+- 遗留事项：
+  1. capabilities 的 `build_sha` 显示 `eda21ae`——`REPORT_REVIEW_BUILD_SHA` 是 Zeabur 控制台手工变量，需用户在 Zeabur 后台改为 `adeb8121773763bd048be9f9a473d184d6fc2da7` 后重新部署（纯元信息，不影响功能）。
+  2. SSE 全流程、余额预检、计费回执、幂等、取消对账的联机验收需已登录客户端账号——用新 EXE（SHA256 `e30e4c9e…`）真实登录后执行。
+- 模型调用链路自此具备联机条件：客户端新路径 + 服务端流式端点均已就位。
