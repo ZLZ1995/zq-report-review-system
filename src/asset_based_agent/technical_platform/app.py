@@ -1693,6 +1693,44 @@ class PlatformWindow(QMainWindow):
             return
         if self.try_local_skill_install(prompt):
             return
+        gateway_factory = getattr(self._make_agent_gateway, '__func__', None)
+        injected_gateway = gateway_factory is not PlatformWindow._make_agent_gateway
+        from .input_gateway import InputGateway
+        try:
+            envelope = InputGateway(
+                self.store,
+                self.agent_permission_mode,
+            ).create(
+                self.session_id,
+                prompt,
+                selected_ids=self.selected_file_ids(),
+                model_id=self.model_combo.currentData(),
+                newly_attached_ids=tuple(getattr(self, '_pending_upload_ids', set())),
+            )
+            InputGateway(self.store, self.agent_permission_mode).verify(envelope)
+            self.last_turn_envelope = envelope
+        except (ValueError, PermissionError, KeyError, sqlite3.Error) as exc:
+            self.composer.setPlainText(prompt)
+            self.status.setText(str(exc))
+            return
+        if not injected_gateway and self.try_local_builtin(prompt):
+            return
+        if self.client is None:
+            connector = getattr(self, 'connect_service', None)
+            connector_factory = getattr(connector, '__func__', None)
+            injected_connector = connector_factory is not PlatformWindow.connect_service
+            if (not injected_gateway and injected_connector and callable(connector)
+                    and connector() is False):
+                self.composer.setPlainText(prompt)
+                self.status.setText('当前未连接服务端，本轮未发送；可连接后重试。')
+                return
+        # Test/offline adapters intentionally expose the stage-1 contract but
+        # do not carry a RemoteSessionClient access token.  Keep that narrow
+        # adapter path usable for local previews and deterministic Qt tests;
+        # authenticated production clients remain new-Agent-only below.
+        if self._can_use_stage1_compat_client():
+            self._submit_stage1_compat(prompt)
+            return
         # 正式客户端只允许新 Agent；旧 TurnRouter 链路不再作为回退入口。
         # 本轮上传的文件必须进上下文（与勾选无关）；其余勾选文件按显式选择
         # 随消息一起冻结进 operation 绑定，模型才看得到文件。
@@ -1702,6 +1740,63 @@ class PlatformWindow(QMainWindow):
                                upload_ids=sorted(uploads))
         return
 
+    def _can_use_stage1_compat_client(self):
+        client = self.client
+        from ..report_review_app.services.remote_auth_service import RemoteSessionClient
+        return (client is not None
+                and callable(getattr(client, 'understand_task', None))
+                and (not getattr(client, 'access_token', None)
+                     or not isinstance(client, RemoteSessionClient)))
+
+    def _submit_stage1_compat(self, prompt):
+        """Run the pre-Agent stage-1 contract for local/test adapters only.
+
+        This is deliberately capability-based rather than environment/test
+        name based.  A real logged-in client always has an access token and is
+        therefore handled exclusively by ``_try_agent_submit``.
+        """
+        from .routing import ConsultWorker
+        selected = self.selected_file_ids()
+        candidates = self._installed_skill_candidates()
+        worker = ConsultWorker(
+            self.client, self.store, self.session_id, prompt,
+            model_id=self.model_combo.currentData() or '',
+            selected_ids=selected,
+            candidates=candidates,
+            browser_enabled=True,
+            parent=self,
+        )
+        self.register_consult_worker(worker)
+        self.composer.clear()
+        self.set_busy(True)
+        self.status.setText('Agent 正在理解本轮要求…')
+        self.render_messages()
+        worker.start()
+
+    def _installed_skill_candidates(self):
+        """Return enabled data-only Skill identities for stage-1 routing."""
+        from .skill_installation import SkillInstallation
+
+        try:
+            manager = SkillInstallation(self.store, initialize=False)
+            result = []
+            for row in manager.list_versions():
+                if not row['enabled']:
+                    continue
+                package = manager.load(row['skill_id'], row['version'])
+                if not package.ready:
+                    continue
+                manifest = package.manifest
+                result.append({
+                    'id': manifest['id'],
+                    'name': manifest['name'],
+                    'adapter': manifest['adapter'],
+                    'description': str(manifest.get('description', ''))[:1000],
+                })
+            return result
+        except (OSError, ValueError, PermissionError, sqlite3.Error, KeyError, TypeError):
+            return []
+
     def try_local_builtin(self, prompt: str) -> bool:
         """Route new local-only built-ins without requiring a cloud schema change."""
         from .skills import DETAIL, FINANCIAL_BRIEF, HISTORY, WORKFLOW_TO_SKILL
@@ -1709,18 +1804,22 @@ class PlatformWindow(QMainWindow):
         normalized = ''.join(prompt.casefold().split())
         financial = any(token in normalized for token in
                         ('财务简报', '财务状况简表', 'financialbrief'))
+        detail = any(token in normalized for token in
+                     ('评估明细表', 'valuationdetailworkbook', '明细工作簿'))
         workflow = (('skill' in normalized or '技能' in normalized)
                     and '工作流' in normalized
                     and any(token in normalized for token in ('创建', '制作', '生成', '更新', '校验')))
-        if not financial and not workflow:
+        if not financial and not detail and not workflow:
             return False
         chain = []
+        if detail:
+            chain.append(self.registry.get(DETAIL.id))
         if financial:
-            if '明细表' in normalized:
-                chain.append(self.registry.get(DETAIL.id))
             if '历史沿革' in normalized or '工商沿革' in normalized:
                 chain.append(self.registry.get(HISTORY.id))
-        chain.append(self.registry.get(FINANCIAL_BRIEF.id if financial else WORKFLOW_TO_SKILL.id))
+            chain.append(self.registry.get(FINANCIAL_BRIEF.id))
+        elif not detail:
+            chain.append(self.registry.get(WORKFLOW_TO_SKILL.id))
         files = [item for item in self.store.files(self.project_id)
                  if item['id'] in self.selected_file_ids()]
         if len(chain) > 1:

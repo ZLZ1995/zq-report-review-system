@@ -351,6 +351,13 @@ def apply_v15(db):
     entry from another session.  Rebuild each leaf from the newest entry in
     its own (session_id, lane_id) partition; empty lanes retain their anchor.
     """
+    tables = {row[0] for row in db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    # Some pre-lane databases legitimately reached v15 through the generic
+    # migration runner.  v15 is a repair-only migration; it must be a no-op
+    # when the lane tables were never created, rather than making startup fail.
+    if not {'agent_lanes', 'conversation_entries'} <= tables:
+        return
     lanes = db.execute(
         'SELECT session_id, id, anchor_entry_id FROM agent_lanes'
     ).fetchall()
