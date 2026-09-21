@@ -78,6 +78,17 @@ class FailingGateway(FakeGateway):
                 'error_message': '服务端尚未部署新 Agent 流式接口，请先升级服务端'}
 
 
+class SlowStreamingGateway(FakeGateway):
+    def submit(self, text, *, on_event=None):
+        self.calls.append(text)
+        for part in ('第一段', '第二段'):
+            if on_event is not None:
+                on_event(SimpleNamespace(event_type='message_delta',
+                                         payload={'text': part}))
+            time.sleep(0.11)
+        return {'status': 'completed', 'reply': '第一段第二段', 'error_code': ''}
+
+
 # ---------------------------------------------------------------- 回退
 
 def test_flags_off_still_uses_new_agent_in_single_path_build(tmp_path):
@@ -127,6 +138,23 @@ def test_single_path_failure_keeps_user_and_records_actionable_assistant(tmp_pat
     assert '根据资料生成评估明细表' in transcript
     assert '服务端尚未部署新 Agent 流式接口' in transcript
     assert 'model.protocol_error' not in transcript
+    window.close()
+
+
+def test_streaming_reply_is_visible_in_conversation_panel_before_completion(tmp_path):
+    app, _store, window = make_window(tmp_path)
+    gateway = SlowStreamingGateway()
+    window._make_agent_gateway = lambda: gateway
+    window.composer.setPlainText('流式测试')
+    window.submit()
+    deadline = time.perf_counter() + 0.5
+    while time.perf_counter() < deadline and '第一段' not in window.transcript.toPlainText():
+        app.processEvents()
+        time.sleep(0.01)
+    assert '流式测试' in window.transcript.toPlainText()
+    assert '第一段' in window.transcript.toPlainText()
+    drain(app, window)
+    assert '第一段第二段' in window.transcript.toPlainText()
     window.close()
 
 

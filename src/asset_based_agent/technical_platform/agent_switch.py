@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -117,15 +118,34 @@ def _build_worker_class():
             self._text = text
 
         def run(self) -> None:
+            delta_buffer = []
+            last_delta_emit = 0.0
+
+            def flush_delta() -> None:
+                nonlocal last_delta_emit
+                if delta_buffer:
+                    self.delta.emit(''.join(delta_buffer))
+                    delta_buffer.clear()
+                    last_delta_emit = time.monotonic()
+
             def forward(event) -> None:
                 if getattr(event, 'event_type', '') == 'message_delta':
-                    self.delta.emit(str((event.payload or {}).get('text', '')))
+                    text = str((event.payload or {}).get('text', ''))
+                    if not text:
+                        return
+                    delta_buffer.append(text)
+                    # Avoid one queued Qt signal per token.  The panel itself
+                    # renders on an 80 ms timer, so a 40 ms worker-side batch
+                    # keeps both the worker and GUI queues bounded.
+                    if time.monotonic() - last_delta_emit >= 0.04:
+                        flush_delta()
 
             try:
                 result = self.gateway.submit(self._text, on_event=forward)
             except Exception as exc:  # noqa: BLE001 - 边界不泄露堆栈
                 result = {'status': 'failed', 'reply': '',
                           'error_code': type(exc).__name__}
+            flush_delta()
             self.done.emit(result)
 
     return AgentTurnWorker

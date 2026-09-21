@@ -180,6 +180,14 @@ class PlatformWindow(QMainWindow):
         self._close_after_update = False
         self._local_chain = None
         self._agent_worker = None  # S15：新 Agent 路径轮次 Worker（不占用 task_manager）
+        self._agent_session_id = None
+        # 新 Agent 的增量文本先在内存中合并，再以低频刷新到对话面板。
+        # 逐 token 调用 setHtml 会把 GUI 事件队列塞满，长回复看起来就像“卡死”。
+        self._live_agent_text = ''
+        self._live_render_timer = QTimer(self)
+        self._live_render_timer.setSingleShot(True)
+        self._live_render_timer.setInterval(80)
+        self._live_render_timer.timeout.connect(self._flush_live_agent_render)
         self._feature_flags_cache = None
         self._approval_requested.connect(self._handle_approval_request)
         self.network_state = "connected"
@@ -367,6 +375,8 @@ class PlatformWindow(QMainWindow):
         worker.done.connect(self._on_agent_done)
         worker.finished.connect(self._on_agent_worker_finished)
         self._agent_worker = worker
+        self._agent_session_id = self.session_id
+        self._live_agent_text = ''
         self.composer.clear()
         self.set_busy(True)
         self.status.setText('新 Agent 路径：正在生成…')
@@ -375,20 +385,38 @@ class PlatformWindow(QMainWindow):
 
     def _on_agent_delta(self, text: str) -> None:
         if text:
-            self.status.setText(f'新 Agent 路径：{text}')
+            self._live_agent_text += text
+            # 只把“正在生成”状态写到状态栏；正文在对话面板中增量显示。
+            if self.session_id == self._agent_session_id:
+                self.status.setText('新 Agent 路径：正在生成…')
+            if (self.session_id == self._agent_session_id
+                    and not self._live_render_timer.isActive()):
+                self._live_render_timer.start()
+
+    def _flush_live_agent_render(self) -> None:
+        if (self._agent_worker is not None
+                and self.session_id == self._agent_session_id
+                and self._live_agent_text):
+            self.render_messages()
 
     def _on_agent_done(self, result: dict) -> None:
+        self._live_render_timer.stop()
+        self._live_agent_text = ''
         reply = (result.get('reply') or '').strip()
         if not reply:
             reason = (result.get('error_message') or result.get('error_code')
                       or result.get('status') or '未知原因')
             reply = f'本轮未完成：{reason}。'
-        self.store.append(self.session_id, 'assistant', reply)  # 灰期双写
-        self.render_messages()
-        self.status.setText(reply)
+        target_session = self._agent_session_id or self.session_id
+        if target_session:
+            self.store.append(target_session, 'assistant', reply)  # 灰期双写
+        if self.session_id == target_session:
+            self.render_messages()
+            self.status.setText(reply)
 
     def _on_agent_worker_finished(self) -> None:
         self._agent_worker = None
+        self._agent_session_id = None
         self.set_busy(False)
 
     def _ask_approval_gui(self, operation: str, title: str, reason: str) -> bool:
@@ -926,6 +954,8 @@ class PlatformWindow(QMainWindow):
         from .session_service import SessionService
         from .task_recovery import reconcile_execution
 
+        self._live_render_timer.stop()
+        self._live_agent_text = ''
         self._draft_binding = None
         self.session_id = item.data(Qt.ItemDataRole.UserRole) if item else None
         self.run_id = getattr(self.worker, 'run_id', None)
@@ -1118,6 +1148,13 @@ class PlatformWindow(QMainWindow):
                     if result.get('exported_report'):
                         name = html.escape(Path(result['exported_report']).name)
                         content.append(f'<p>📄 {name}　<a href="zq-report:{identity}">打开文件</a>　<a href="zq-folder:{identity}">打开所在文件夹</a></p>')
+        if self._live_agent_text:
+            live = html.escape(self._live_agent_text).replace("\n", "<br>")
+            content.append(
+                '<p style="font-size:13px;color:#3e4c66"><b>ZQ</b>'
+                ' <span style="font-size:10px;color:#a0a6b1"> / ASSISTANT · 生成中</span></p>'
+                f'<p style="font-size:14px;line-height:170%;margin-bottom:28px">{live}</p>'
+            )
         self.transcript.setHtml(
             "".join(content)
             or (
@@ -1130,7 +1167,10 @@ class PlatformWindow(QMainWindow):
                 "项目上下文　 /　 只读资料预检　 /　 可追溯的执行记录</p>"
             )
         )
-        scroll.setValue(scroll.maximum() if follow_output else previous_position)
+        # setHtml 后 QTextDocument 的布局在本轮事件循环末尾才完成；立即 setValue
+        # 会读到旧 maximum，导致新消息写入但视图仍停在顶部。延后一拍再定位。
+        target = scroll.maximum() if follow_output else previous_position
+        QTimer.singleShot(0, lambda: scroll.setValue(scroll.maximum() if follow_output else target))
 
     def handle_branch_link(self, url):
         from .session_service import SessionService
@@ -2294,6 +2334,8 @@ class PlatformWindow(QMainWindow):
                           if isinstance(self.store, ProjectCatalog)
                           else PlatformStore(self.store.path, payload["owner"]))
             self.project_id = self.session_id = self.run_id = None
+            self._live_render_timer.stop()
+            self._live_agent_text = ''
             self.composer.clear()
             self.transcript.clear()
             self.sessions.clear()
