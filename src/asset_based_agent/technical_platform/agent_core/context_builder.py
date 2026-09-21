@@ -23,6 +23,16 @@ DEFAULT_BEHAVIOR_RULES = (
     '不得声称拿不到项目文件。')
 
 
+# Keep file selection analysis in the Agent/tool loop. Inspection is
+# read-only; write targets still require explicit operation bindings.
+FILE_DISCOVERY_RULES = (
+    'When a request refers to uploaded, supplemental, recent, or historical '
+    'project files and the current operation has no file bindings, first call '
+    'inspect_project_files, then analyze_file_roles and read_project_file for '
+    'relevant candidates. Do not ask the user to re-upload merely because a '
+    'file is not checked in the UI. Never use an unbound historical file as a '
+    'write target; require an explicit target binding for generated output.')
+
 @dataclass
 class BuiltContext:
     messages: tuple
@@ -47,6 +57,7 @@ class ContextBuilder:
         sections = [
             self._system(self.system_rules),
             self._system(self.behavior_rules),
+            self._system(FILE_DISCOVERY_RULES),
             self._system(f'【当前权限快照】模式：{mode}；每次工具调用以 PolicyEngine 实时决定为准。'),
         ]
         if tools:

@@ -168,6 +168,14 @@ def test_historical_file_catalog_includes_stable_ids_for_follow_up_reads():
     assert 'history-1' in joined
 
 
+def test_file_discovery_rule_directs_read_only_agent_inspection():
+    repo = make_repo()
+    built = ContextBuilder().build(repo=repo, operation=current_operation(repo), tools=[])
+    joined = '\n'.join(texts(built))
+    assert 'inspect_project_files' in joined
+    assert 'read_project_file' in joined
+
+
 def test_kernel_uses_context_builder_when_provided():
     repo = make_repo()
     scripts = [[ModelEvent('message_start', {}),
