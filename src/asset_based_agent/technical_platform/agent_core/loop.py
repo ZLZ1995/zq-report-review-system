@@ -192,6 +192,7 @@ async def _run_turn(*, repo, model, tools_by_name, operation, turn_id,
     accumulator = _ToolCallAccumulator()
     tool_calls = []
     usage = {}
+    message_complete = False
     emit('model_request_started', turn_id=turn_id)
     stream_iter = model.stream(request, cancel)
     while True:
@@ -209,9 +210,16 @@ async def _run_turn(*, repo, model, tools_by_name, operation, turn_id,
             tool_calls.append(accumulator.finalize(event.data))
         elif event.kind == 'usage':
             usage = dict(event.data)
+        elif event.kind == 'message_complete':
+            message_complete = True
         elif event.kind == 'request_failed':
             raise ModelProtocolError(
                 event.data.get('error', '模型请求失败'))
+        # ``ModelPort`` may terminate a stream without a request_failed frame.
+        # Treat that as a protocol failure instead of committing a partial or
+        # empty assistant message as if the turn succeeded.
+    if not message_complete:
+        raise ModelProtocolError('模型流缺少 message_complete 终止事件')
     cancel.raise_if_cancelled()
     if not tool_calls:
         entry = repo.append_entry(
