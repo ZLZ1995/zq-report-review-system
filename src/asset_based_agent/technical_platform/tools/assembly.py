@@ -27,10 +27,14 @@ class CompositeToolResolver:
         self.extra = tuple(extra or ())
 
     def resolve_for_operation(self, skill_ids=None):
-        return assemble_agent_tools(
+        tools, snapshot = assemble_agent_tools(
             tool_registry=self.tool_registry, skill_ids=skill_ids,
             business_service=self.business_service, browser=self.browser,
             extra=self.extra)
+        if self.extra and self.business_service is None:
+            snapshot.append({'id': 'business.run_harness', 'kind': 'builtin',
+                             'version': BUILTIN_SNAPSHOT_VERSION})
+        return tools, snapshot
 
     def resolve_pinned(self, snapshot):
         skill_snapshot = [entry for entry in (snapshot or [])

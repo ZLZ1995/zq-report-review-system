@@ -39,3 +39,12 @@ def test_gateway_wires_browser_backend_into_resolved_tools(tmp_path):
     result = __import__('asyncio').run(
         tools['browser_open'].execute(None, {'url': 'https://example.com'}, None))
     assert result.status == 'succeeded'
+
+
+def test_gateway_resolver_honors_browser_write_flag(tmp_path):
+    _store, _session, gateway = _gateway(tmp_path)
+    gateway._force_all_tools = False
+    gateway._flags.set_enabled('browser_write_upload', False)
+    names = {tool.descriptor.name for tool in gateway._build_kernel().tools}
+    assert 'browser_open' in names
+    assert 'browser_upload' not in names

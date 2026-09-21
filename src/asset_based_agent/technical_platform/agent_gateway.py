@@ -116,16 +116,23 @@ class AgentGateway:
         service = BusinessRunService(
             self._store, self._session_id,
             provider_factory=self._provider_factory)
+        business = []
+        for tool in business_tools(service):
+            category = _BUSINESS_TOOL_CATEGORY.get(tool.descriptor.name)
+            if category is None or self._enabled(category):
+                business.append(tool)
         browser = ()
         if self._enabled('browser_readonly') or self._enabled('browser_write_upload'):
             backend = self._browser_backend or NullBrowserBackend()
-            browser = tuple(build_browser_tools(self._session_id, backend))
+            write = self._enabled('browser_write_upload')
+            browser = tuple(tool for tool in build_browser_tools(
+                self._session_id, backend)
+                if tool.descriptor.name in _BROWSER_READONLY_TOOLS or write)
         registry = self._tool_registry if any(
             self._enabled(category) for category in _SKILL_CATEGORIES) else None
         resolver = CompositeToolResolver(
             tool_registry=registry,
-            business_service=service,
-            browser=browser)
+            browser=browser, extra=business)
         project_id = self.repo.session_project_id(self._session_id)
         project_root = self._store.path.parent
         attachment_root = project_root / 'attachments' / project_id
