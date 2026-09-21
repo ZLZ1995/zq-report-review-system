@@ -7,11 +7,11 @@ from hashlib import sha256
 
 import pytest
 
-from asset_based_agent.technical_platform.agent_core.contracts import (
-    ModelEvent,
-)
 from asset_based_agent.technical_platform.agent_core.context_builder import (
     ContextBuilder,
+)
+from asset_based_agent.technical_platform.agent_core.contracts import (
+    ModelEvent,
 )
 from asset_based_agent.technical_platform.agent_core.errors import (
     InvalidRequest,
