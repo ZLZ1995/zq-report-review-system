@@ -453,6 +453,36 @@ def test_required_stream_capability_blocks_before_model_request():
     assert requests[-1] == '/api/v1/capabilities'
 
 
+def test_versioned_base_url_does_not_duplicate_api_prefix():
+    """The production auth client passes a base URL ending in /api/v1."""
+    requests = []
+
+    def handler(request):
+        requests.append(request.url.path)
+        if request.url.path == BALANCE_PATH:
+            return httpx.Response(200, json={'balance': '50', 'currency': 'CNY'})
+        if request.url.path == '/api/v1/capabilities':
+            return httpx.Response(200, json={
+                'schema_version': 1, 'protocol_version': 1,
+                'capabilities': {'agent_completion_stream': 1}})
+        if request.url.path == STREAM_PATH:
+            return httpx.Response(
+                200, headers={'content-type': 'text/event-stream'},
+                content=sse_body(GREEN_EVENTS).encode('utf-8'))
+        return httpx.Response(404)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    port = ServerModelPort(
+        base_url=BASE + '/api/v1',
+        token_manager=TokenManager(access_token='tok-old',
+                                   refresh_fn=_never_refresh),
+        client=client, require_stream_capability=True)
+    events = collect(port, make_request())
+    assert any(event.kind == 'message_complete' for event in events)
+    assert '/api/v1/api/v1/capabilities' not in requests
+    assert '/api/v1/api/v1/agent/completions/stream' not in requests
+
+
 # ------------------------------------------------------------------ 消息映射
 
 def test_entries_to_wire_messages_flattens_all_entry_types():

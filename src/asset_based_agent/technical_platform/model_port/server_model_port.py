@@ -78,6 +78,20 @@ class ServerModelPort:
         self._stream_capability_checked = False
         self.last_receipt: dict | None = None
 
+    def _endpoint(self, path: str) -> str:
+        """Join an API path without duplicating the ``/api/v1`` prefix.
+
+        The authentication client exposes the versioned service URL
+        (``.../api/v1``), while the model port owns versioned endpoint paths.
+        The previous direct concatenation therefore queried
+        ``.../api/v1/api/v1/capabilities`` in the packaged client and surfaced
+        a misleading ``server.capability_missing`` error.
+        """
+        prefix = '/api/v1'
+        if self.base_url.endswith(prefix) and path.startswith(prefix + '/'):
+            return self.base_url + path[len(prefix):]
+        return self.base_url + path
+
     # ------------------------------------------------------------- 入口
 
     async def stream(
@@ -128,7 +142,7 @@ class ServerModelPort:
         """余额预检：权威拦截余额不足；预检本身失败（网络等）不阻断。"""
         try:
             response = await self._get_with_auth_retry(
-                self.base_url + self.balance_path, cancel)
+                self._endpoint(self.balance_path), cancel)
         except (httpx.RequestError, ModelTimeout):
             return  # 服务端计费仍是权威，预检失败降级为建议性
         try:
@@ -165,7 +179,7 @@ class ServerModelPort:
 
     async def _ensure_stream_capability(self, cancel: CancelToken) -> None:
         response = await self._get_with_auth_retry(
-            self.base_url + '/api/v1/capabilities', cancel)
+            self._endpoint('/api/v1/capabilities'), cancel)
         if response.status_code == 404:
             raise ServerCapabilityUnavailable(
                 '服务端未提供能力协商接口，请先升级服务端。')
@@ -197,7 +211,7 @@ class ServerModelPort:
     async def _post_stream(self, payload: dict, token: str,
                            cancel: CancelToken) -> httpx.Response:
         request = self.client.build_request(
-            'POST', self.base_url + self.stream_path, json=payload,
+            'POST', self._endpoint(self.stream_path), json=payload,
             headers={'Authorization': f'Bearer {token}'})
         try:
             return await _race_transport(self.client.send(request, stream=True),
