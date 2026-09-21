@@ -15,5 +15,5 @@
 
 ## 验证
 
-- 新 Agent 全量回归基线：389 passed、9 xfailed（S25）。
+- 新 Agent 全量回归：389 passed、9 xfailed；`py_compile` 通过。
 - Qt 审批路径仍需在 Windows 实机执行“弹窗关闭/切换会话/超时”验收；本阶段不宣称 GUI 实机验收已完成。
