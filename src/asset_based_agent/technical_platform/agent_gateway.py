@@ -120,9 +120,33 @@ class AgentGateway:
 
     # ------------------------------------------------------------ 运行
 
-    def submit(self, text, *, on_event=None) -> dict:
-        """同步执行一轮新 Agent 对话；结果含 status/reply/error_code。"""
+    def submit(self, text, *, file_ids=(), upload_ids=(), on_event=None) -> dict:
+        """同步执行一轮新 Agent 对话；结果含 status/reply/error_code。
+
+        upload_ids 为本轮新上传的项目文件：必须进入上下文，绑定为
+        explicit_upload（与勾选状态无关）；file_ids 为本轮额外勾选的历史
+        文件，绑定为 explicit_selection。两者逐个校验归属，重叠时按
+        explicit_upload 处理。
+        """
         self._mirror_session()
+        upload_ids = tuple(upload_ids)
+        file_ids = tuple(fid for fid in file_ids if fid not in set(upload_ids))
+        bindings = []
+        if upload_ids or file_ids:
+            if len(set(upload_ids)) != len(upload_ids) \
+                    or len(set(file_ids)) != len(file_ids):
+                raise ValueError('本轮文件范围存在重复选择')
+            session = self._store.session(self._session_id)
+            available = {f['id']: f for f in self._store.files(session['project'])}
+            for kind, ids in (('explicit_upload', upload_ids),
+                              ('explicit_selection', file_ids)):
+                for file_id in ids:
+                    record = available.get(file_id)
+                    if record is None:
+                        raise ValueError('本轮文件范围不属于当前项目或已变化')
+                    bindings.append({'file_id': file_id,
+                                     'sha256': record['sha256'],
+                                     'binding_kind': kind})
         kernel = AgentKernel(
             repo=self.repo, model=self._model_port_factory(),
             tools=self.active_tools(), policy=RuleBasedPolicyEngine(),
@@ -149,7 +173,8 @@ class AgentGateway:
         try:
             asyncio.run(kernel.submit(
                 self._session_id, 'main',
-                {'text': text, 'model_id': self._model_id}))
+                {'text': text, 'model_id': self._model_id,
+                 'file_bindings': bindings}))
         except Exception as exc:  # noqa: BLE001 - 网关边界不泄露堆栈
             code = getattr(exc, 'code', type(exc).__name__)
             message = str(exc).strip()

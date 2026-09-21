@@ -97,6 +97,19 @@ class AgentKernel:
             operation_args['model_id'] = request['model_id']
         operation = self.repo.begin_operation(
             session_id, lane_id, **operation_args)
+        for binding in request.get('file_bindings') or ():
+            # 本轮勾选/上传的文件必须先绑定再进入 loop：ContextBuilder 只读取
+            # 当前 operation 的 explicit 绑定，缺绑定即“本轮文件摘要：无”。
+            file_id = str(binding.get('file_id', '')).strip()
+            sha256 = str(binding.get('sha256', '')).strip()
+            if not file_id or not sha256:
+                from .errors import InvalidRequest
+                raise InvalidRequest('文件绑定必须包含 file_id 与 sha256')
+            self.repo.bind_file(
+                operation.id, file_id,
+                binding.get('binding_kind') or 'explicit_selection',
+                sha256=sha256, role=binding.get('role'),
+                source_entry_id=binding.get('source_entry_id'))
         if snapshot:
             self.repo.set_resource_snapshot(operation.id, snapshot)
         accepted = OperationAccepted(

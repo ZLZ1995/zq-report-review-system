@@ -619,10 +619,37 @@ class SQLiteSessionRepo:
         wanted = EXPLICIT_BINDING_KINDS if kinds is None else frozenset(kinds)
         placeholders = ','.join('?' for _ in wanted)
         with self.connect() as db:
-            rows = db.execute(
+            rows = [dict(row) for row in db.execute(
                 f'SELECT * FROM turn_file_bindings WHERE operation_id=? '
                 f'AND binding_kind IN ({placeholders})',
-                (operation_id, *sorted(wanted))).fetchall()
+                (operation_id, *sorted(wanted))).fetchall()]
+            if rows:
+                # 绑定表不存文件名；尝试关联同库 legacy files 表补名称，
+                # 独立新库（无 files 表）安全回退为仅 id。
+                holders = ','.join('?' for _ in rows)
+                try:
+                    names = {row['id']: row['name'] for row in db.execute(
+                        f'SELECT id, name FROM files WHERE id IN ({holders})',
+                        tuple(row['file_id'] for row in rows)).fetchall()}
+                except sqlite3.OperationalError:
+                    names = {}
+                for row in rows:
+                    row['name'] = names.get(row['file_id'])
+        return rows
+
+    def legacy_project_files(self, project_id):
+        """同库 legacy files 表的项目文件清单（id/name/sha256）。
+
+        供上下文装配列出“项目历史资料”可发现清单；独立新库（无 files 表）
+        安全回退为空。内容不进入上下文，是否读取由 Agent 执行期决定。
+        """
+        try:
+            with self.connect() as db:
+                rows = db.execute(
+                    'SELECT id, name, sha256 FROM files WHERE project=?'
+                    ' ORDER BY created, name', (project_id,)).fetchall()
+        except sqlite3.OperationalError:
+            return []
         return [dict(row) for row in rows]
 
     # --------------------------------------------------------- compaction
