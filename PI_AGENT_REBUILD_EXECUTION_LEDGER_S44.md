@@ -33,6 +33,12 @@
 - Zeabur 当前在线 release 仍是 0.2.10/schema 11；本地新构建需在服务端接口和 GitHub 写入恢复后再发布。
 - 本轮代码变更已包含在 S44 候选 EXE、签名包和离线验签结果中；仍未覆盖线上已发布版本，需待外部发布权限恢复后再部署。
 
+## Current external audit (2026-09-22)
+
+- 在线能力探活仍为 HTTP 200，服务端 build SHA `eda21aec50ba68d70c1db06f624094ca3d14506e`，全部声明能力保持可用。
+- `GET /api/v1/client-releases/current` 仍返回稳定版 `0.2.10`、sequence `5`、schema `11`；S45 `0.2.11` 尚未进入线上发布表。
+- GitHub REST API 仅读探测成功（HTTP 200）；当前 Git remote 写入仍返回 HTTP 400，环境中没有可用 GitHub 写凭据，浏览器发布页也返回 GitHub Bad Request，因此不能安全执行推送或创建 Release。
+
 ## S45 post-fix candidate
 
 为纳入本轮权限门禁修复，重新构建了同一 `0.2.11`/sequence 6 的候选包（不改变线上发布身份）：
