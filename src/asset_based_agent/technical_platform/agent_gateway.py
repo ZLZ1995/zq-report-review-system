@@ -154,10 +154,13 @@ class AgentGateway:
         self._kernel = kernel
         error_code = []
         completed = []
+        operation_ids = []
 
         def collector(event):
             if event.operation_id:
                 self._open_operations.add(event.operation_id)
+                if event.operation_id not in operation_ids:
+                    operation_ids.append(event.operation_id)
             if event.event_type == 'operation_failed':
                 error_code.append((event.payload or {}).get('error_code',
                                                            'failed'))
@@ -184,7 +187,8 @@ class AgentGateway:
                 message = ''
             return {'status': 'failed', 'reply': '', 'error_code': str(code),
                     'error_message': message}
-        reply = self._last_assistant_text()
+        operation_id = operation_ids[-1] if operation_ids else None
+        reply = self._last_assistant_text(operation_id)
         if 'operation_completed' in completed:
             return {'status': 'completed', 'reply': reply, 'error_code': ''}
         if 'operation_aborted' in completed:
@@ -193,10 +197,11 @@ class AgentGateway:
         return {'status': 'failed', 'reply': reply,
                 'error_code': error_code[0] if error_code else 'failed'}
 
-    def _last_assistant_text(self) -> str:
+    def _last_assistant_text(self, operation_id=None) -> str:
         entries = self.repo.entries(self._session_id, 'main')
         assistant = [e for e in entries if e.entry_type == 'assistant_message'
-                     and not e.payload.get('intermediate')]
+                     and not e.payload.get('intermediate')
+                     and (operation_id is None or e.operation_id == operation_id)]
         return assistant[-1].payload.get('text', '') if assistant else ''
 
     def stop(self) -> None:

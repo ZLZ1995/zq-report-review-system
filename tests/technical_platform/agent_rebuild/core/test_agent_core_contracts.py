@@ -107,7 +107,7 @@ def test_single_tool_call_round_trip():
     from asset_based_agent.technical_platform.agent_core.fakes import FakeTool
     echo = FakeTool('echo', handler=lambda args: {'echo': args['value']},
                     input_schema={'required': ['value']})
-    kernel, repo, _model = make_runtime(
+    kernel, repo, model = make_runtime(
         [tool_call_turn('echo', {'value': '数据'}), text_turn('结果是数据')], tools=[echo])
     accepted = run(kernel.submit('s1', 'main', {'text': '回声'}))
     entries = repo.entries('s1', 'main')
@@ -117,6 +117,7 @@ def test_single_tool_call_round_trip():
     assert entries[2].payload['result']['echo'] == '数据'
     assert echo.calls == [{'value': '数据'}]
     assert repo.get_operation(accepted.operation_id).status == 'completed'
+    assert [descriptor.name for descriptor in model.requests[0].tools] == ['echo']
 
 
 def test_multiple_tool_calls_across_turns():
@@ -133,6 +134,22 @@ def test_multiple_tool_calls_across_turns():
                      'tool_call', 'tool_result', 'assistant_message']
     assert tool.calls == [{'n': 1}, {'n': 2}]
     assert repo.get_operation(accepted.operation_id).status == 'completed'
+
+
+def test_each_model_turn_has_a_distinct_idempotency_request_id():
+    from asset_based_agent.technical_platform.agent_core.fakes import FakeTool
+
+    tool = FakeTool('step', handler=lambda args: {'n': args['n'] + 1},
+                    input_schema={'required': ['n']})
+    kernel, _repo, model = make_runtime(
+        [tool_call_turn('step', {'n': 1}), text_turn('完成')], tools=[tool])
+    run(kernel.submit('s1', 'main', {'text': '两轮'}))
+
+    request_ids = [request.request_id for request in model.requests]
+    assert len(request_ids) == 2
+    assert len(set(request_ids)) == 2
+    assert request_ids[0].endswith(':turn:1')
+    assert request_ids[1].endswith(':turn:2')
 
 
 def test_tool_invalid_arguments_rejected_without_execution():

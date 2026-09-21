@@ -148,6 +148,22 @@ def test_model_failure_returns_failed_with_error_code(tmp_path):
     assert [e for e in entries if e.entry_type == 'user_message']
 
 
+def test_failed_turn_does_not_reuse_previous_assistant_reply(tmp_path):
+    from asset_based_agent.technical_platform.agent_core.errors import (
+        ModelProtocolError,
+    )
+
+    _, _session, _, gateway = make_stack(
+        tmp_path, flags_on=('chat',),
+        scripts=[[text_script('旧回复')], [ModelProtocolError('上游失败')]],
+    )
+    assert gateway.submit('第一轮')['reply'] == '旧回复'
+    result = gateway.submit('第二轮')
+
+    assert result['status'] == 'failed'
+    assert result['reply'] == ''
+
+
 # ---------------------------------------------------------------- 业务工具链
 
 def test_skill_execution_flows_through_new_kernel(tmp_path):

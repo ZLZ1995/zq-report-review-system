@@ -83,8 +83,13 @@ class SQLiteSessionRepo:
             (entry_id, session_id, lane_id, leaf_entry_id, sequence, entry_type,
              json.dumps(payload, ensure_ascii=False), operation_id, turn_id,
              ENTRY_SCHEMA_VERSION, created))
-        db.execute('UPDATE agent_lanes SET leaf_entry_id=?, updated_at=? WHERE id=?',
-                   (entry_id, created, lane_id))
+        # lane ids are only unique inside a session (every session has ``main``).
+        # Omitting session_id here lets a write in one session move another
+        # session's leaf, which corrupts history and can surface stale replies.
+        db.execute(
+            'UPDATE agent_lanes SET leaf_entry_id=?, updated_at=? '
+            'WHERE session_id=? AND id=?',
+            (entry_id, created, session_id, lane_id))
         return ConversationEntry(
             id=entry_id, session_id=session_id, lane_id=lane_id,
             parent_id=leaf_entry_id, sequence=sequence, entry_type=entry_type,

@@ -9,6 +9,7 @@
 """
 import asyncio
 import json
+from dataclasses import replace
 from hashlib import sha256
 
 from .contracts import ToolResult
@@ -121,10 +122,20 @@ async def run_agent_loop(*, repo, model, tools, operation, cancel, emit,
         _drain_steer(repo, operation, steer_queue, emit)
         request = repo.build_model_request(operation)
         if context_builder is not None:
-            from dataclasses import replace
             built = context_builder.build(repo=repo, operation=operation,
                                           tools=tools)
             request = replace(request, messages=built.messages)
+        request = replace(
+            request,
+            tools=tuple(tool.descriptor for tool in tools),
+        )
+        # The operation request id identifies the user submission; each model
+        # turn needs its own idempotency key. Reusing it makes a second turn
+        # look like a conflicting replay to the streaming service.
+        request = replace(
+            request,
+            request_id=f'{operation.request_id}:turn:{ordinal}',
+        )
         turn_id = repo.begin_turn(
             operation.id, ordinal,
             input_context_sha256=_context_sha256(request),
