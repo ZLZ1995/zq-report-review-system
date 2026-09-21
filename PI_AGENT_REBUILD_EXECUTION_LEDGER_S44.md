@@ -41,6 +41,7 @@
 - 托管包：`dist/s45/ZQ-Workspace-0.2.11-Managed-Windows.zip`，421,612,219 bytes，SHA256 `f4319f73de77884377c604c797c7a0894a7669d3ea1a1748de17d80eee94dd71`。
 - 普通 manifest SHA256 `aa41ac7558c7632f3b774245fa81f4f15c596c54a27131864b209a37baa202b4`；托管 manifest SHA256 `858180361088293b72d5328c01dd4ee4915bab021d1501740b969b0fac69920c`。
 - 两个 manifest 均已离线验签通过，版本 `0.2.11`、sequence `6`、schema `[15,15]`、key id `zq-release-20260917`；新候选 EXE 健康探活通过。
+- 全量技术平台回归主体：`1804 passed, 9 xfailed`。另将验收运行器按其各自安全边界分环境复核：系统盘检查组 `4 passed`（`SystemDrive=C:`），显式临时目录/子进程输出组 `2 passed`（`SystemDrive=Z:`）。全量过程中的 4 个失败仅因把 `SystemDrive` 设为工作区所在 D 盘而触发验收脚本的预期拒绝，不属于代码回归；按脚本设计环境拆分后验收运行器 6 项全部通过。
 
 ## Commit intent
 
