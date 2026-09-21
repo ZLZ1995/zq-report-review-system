@@ -460,7 +460,10 @@ class PlatformWindow(QMainWindow):
             ready.set()
 
         self._approval_requested.emit(operation, title, reason, callback)
-        ready.wait()
+        # A closed/hidden dialog must not leave the worker or UI blocked
+        # forever.  Timeout is fail-closed; a late callback is ignored.
+        if not ready.wait(timeout=300):
+            return False
         return verdict.get('ok', False)
 
     def _handle_approval_request(self, operation: str, title: str, reason: str,
