@@ -77,4 +77,6 @@ def test_skill_release_migration_is_head_and_contains_audit_tables(tmp_path):
     with sqlite3.connect(path) as db:
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert {"report_review_skill_releases", "report_review_skill_release_audits"} <= tables
-        assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0007_skill_releases"
+        assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0008_auth_refresh_rotation"
+        columns = {row[1] for row in db.execute("PRAGMA table_info(report_review_sessions)")}
+        assert {"previous_refresh_token_hash", "refresh_rotated_at"}.issubset(columns)
