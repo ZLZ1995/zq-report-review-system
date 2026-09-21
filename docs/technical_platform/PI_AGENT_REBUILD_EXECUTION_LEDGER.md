@@ -593,3 +593,16 @@
 - 当前在线状态：生产 Zeabur 仍返回 `POST /api/v1/agent/completions/stream -> 404`，因此尚未达到可发布状态；本轮未推送 GitHub、未部署 Zeabur、未重建正式 EXE。
 - 验收结论：**客户端新路径代码验收通过；联机验收阻塞于服务端部署**。
 - 下一步：先部署包含该端点的服务端并通过在线能力探活，再构建只接新 Agent 的 EXE；随后进行真实账号、余额、取消、失败落库和历史会话复测。
+
+## S15 发布执行记录（本次请求）
+
+- 本地提交：`5b507a9 feat-switch-new-agent`。
+- EXE 已按该提交重新构建：
+  - `dist/technical_platform/ZQ技术平台/ZQ技术平台.exe`
+  - SHA256：`309c8e3c81ea25259adabdc2363e0225dd689a35e23cc9ba034d5dd88a19826a`
+  - 启动器 SHA256：`a70c701be6ee4fda118b17c709e519e9a7f9e212ca6f302593486bc596780a9f`
+- PyInstaller 包内复核已发现新 Agent 模块：`agent_gateway`、`server_model_port`、`agent_core`。
+- 冷启动探针已执行，未发现启动异常输出；真实登录和联网任务仍需服务端接口上线后复测。
+- GitHub 推送阻塞：`git push` 与 `git ls-remote` 均返回 HTTP 400；GitHub 页面同样返回 Bad Request，无法把提交发送到 Zeabur 绑定的源码分支。
+- Zeabur 未执行“重新部署”：当前源码仍为旧版本，直接点击重新部署会重新发布旧镜像，已避免误操作。
+- 当前结论：EXE 已完成本地构建；服务端部署与在线能力探活尚未完成，阻塞原因是 GitHub 外部访问不可用。
