@@ -33,6 +33,15 @@
 - Zeabur 当前在线 release 仍是 0.2.10/schema 11；本地新构建需在服务端接口和 GitHub 写入恢复后再发布。
 - 本轮代码变更已包含在 S44 候选 EXE、签名包和离线验签结果中；仍未覆盖线上已发布版本，需待外部发布权限恢复后再部署。
 
+## S45 post-fix candidate
+
+为纳入本轮权限门禁修复，重新构建了同一 `0.2.11`/sequence 6 的候选包（不改变线上发布身份）：
+
+- 普通包：`dist/s45/ZQ-Workspace-0.2.11-Windows.zip`，281,867,544 bytes，SHA256 `56af8971b6b943eb39f27cc937ca1a65436f32b6dd534aa6a20c6d86b2b3e8da`。
+- 托管包：`dist/s45/ZQ-Workspace-0.2.11-Managed-Windows.zip`，421,612,219 bytes，SHA256 `f4319f73de77884377c604c797c7a0894a7669d3ea1a1748de17d80eee94dd71`。
+- 普通 manifest SHA256 `aa41ac7558c7632f3b774245fa81f4f15c596c54a27131864b209a37baa202b4`；托管 manifest SHA256 `858180361088293b72d5328c01dd4ee4915bab021d1501740b969b0fac69920c`。
+- 两个 manifest 均已离线验签通过，版本 `0.2.11`、sequence `6`、schema `[15,15]`、key id `zq-release-20260917`；新候选 EXE 健康探活通过。
+
 ## Commit intent
 
-本账本与代码应作为同一 S44 提交，保留既有未跟踪 `NUL` 文件，不纳入提交。
+本账本与代码应作为同一提交，保留既有未跟踪 `NUL` 文件，不纳入提交。
