@@ -55,7 +55,7 @@ class AgentGateway:
     def __init__(self, store, session_id, *, flags, model_port_factory,
                  model_id='', permission_mode_getter, provider_factory=None,
                  browser_backend=None, approver=None,
-                 force_all_tools: bool = False) -> None:
+                 force_all_tools: bool = False, tool_registry=None) -> None:
         self._store = store
         self._session_id = session_id
         self._model_id = model_id
@@ -66,6 +66,7 @@ class AgentGateway:
         self._browser_backend = browser_backend
         self._approver = approver
         self._force_all_tools = force_all_tools
+        self._tool_registry = tool_registry
         self.repo = SQLiteSessionRepo(store.path, store.owner)
         self._kernel = None
         self._open_operations = set()
@@ -85,6 +86,9 @@ class AgentGateway:
         if not self.new_path_available:
             return ()
         tools = []
+        if self._tool_registry is not None and any(
+                self._enabled(category) for category in _SKILL_CATEGORIES):
+            tools.extend(self._tool_registry.resolve_for_operation()[0])
         service = BusinessRunService(self._store, self._session_id,
                                      provider_factory=self._provider_factory)
         for tool in business_tools(service):
