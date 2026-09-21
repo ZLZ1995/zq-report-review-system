@@ -180,6 +180,8 @@ class PlatformWindow(QMainWindow):
         self._close_after_update = False
         self._local_chain = None
         self._agent_worker = None  # S15：新 Agent 路径轮次 Worker（不占用 task_manager）
+        # S30：新 Agent worker 按会话隔离；_agent_worker 仅保留为当前会话兼容别名。
+        self._agent_jobs = {}
         self._agent_session_id = None
         # 新 Agent 的增量文本先在内存中合并，再以低频刷新到对话面板。
         # 逐 token 调用 setHtml 会把 GUI 事件队列塞满，长回复看起来就像“卡死”。
@@ -369,8 +371,8 @@ class PlatformWindow(QMainWindow):
 
     def _try_agent_submit(self, prompt: str, file_ids=(), upload_ids=()) -> bool:
         """生产客户端只使用新 Agent；连接不完整时阻止旧路径接管。"""
-        if self._agent_worker is not None:
-            return True  # 上一轮未结束，吞掉重复提交（与旧 worker 语义一致）
+        if self.session_id in self._agent_jobs:
+            return True  # 当前会话已有轮次；其他会话可以并行运行
         gateway = self._make_agent_gateway()
         if gateway is None:
             self.status.setText('新 Agent 尚未连接服务端，本轮未发送；请先连接并重试。')
@@ -391,17 +393,27 @@ class PlatformWindow(QMainWindow):
         if not hasattr(gateway, 'repo'):
             self._agent_user_message_id = self.store.append(
                 self.session_id, 'user', prompt)
-        self._agent_operation_id = uuid4().hex
+        operation_id = uuid4().hex
+        self._agent_operation_id = operation_id
         self.status_controller.set_turn_phase(
             self.session_id, self._agent_operation_id, '新 Agent 路径：正在生成…')
         worker = AgentTurnWorker(gateway, prompt, parent=self,
                                  file_ids=tuple(file_ids),
                                  upload_ids=tuple(upload_ids))
-        worker.delta.connect(self._on_agent_delta)
-        worker.done.connect(self._on_agent_done)
-        worker.finished.connect(self._on_agent_worker_finished)
+        session_id = self.session_id
+        worker.delta.connect(lambda text, sid=session_id:
+                             self._on_agent_delta_for(sid, text))
+        worker.done.connect(lambda result, sid=session_id:
+                            self._on_agent_done_for(sid, result))
+        worker.finished.connect(lambda sid=session_id:
+                                self._on_agent_worker_finished_for(sid))
+        self._agent_jobs[session_id] = {
+            'worker': worker, 'gateway': gateway,
+            'operation_id': operation_id, 'user_text': prompt,
+            'live_text': '',
+        }
         self._agent_worker = worker
-        self._agent_session_id = self.session_id
+        self._agent_session_id = session_id
         self._live_agent_text = ''
         self.composer.clear()
         self.set_busy(True)
@@ -412,51 +424,74 @@ class PlatformWindow(QMainWindow):
         return True
 
     def _on_agent_delta(self, text: str) -> None:
+        self._on_agent_delta_for(self._agent_session_id or self.session_id, text)
+
+    def _on_agent_delta_for(self, session_id: str | None, text: str) -> None:
         if text:
-            self._live_agent_text += text
+            job = self._agent_jobs.get(session_id)
+            if job is None:
+                return
+            job['live_text'] += text
+            if session_id == self.session_id:
+                self._live_agent_text = job['live_text']
             # 只把“正在生成”状态写到状态栏；正文在对话面板中增量显示。
-            if self.session_id == self._agent_session_id:
+            if self.session_id == session_id:
                 self.status.setText('新 Agent 路径：正在生成…')
-            if (self.session_id == self._agent_session_id
+            if (self.session_id == session_id
                     and not self._live_render_timer.isActive()):
                 self._live_render_timer.start()
 
     def _flush_live_agent_render(self) -> None:
-        if (self._agent_worker is not None
-                and self.session_id == self._agent_session_id
-                and self._live_agent_text):
+        job = self._agent_jobs.get(self.session_id)
+        if (job is not None and self._live_agent_text):
             self.render_messages()
 
     def _on_agent_done(self, result: dict) -> None:
+        self._on_agent_done_for(self._agent_session_id or self.session_id, result)
+
+    def _on_agent_done_for(self, session_id: str | None, result: dict) -> None:
         self._live_render_timer.stop()
-        self._live_agent_text = ''
+        job = self._agent_jobs.get(session_id)
+        if job is None:
+            return
+        if session_id == self.session_id:
+            self._live_agent_text = ''
         reply = (result.get('reply') or '').strip()
         if not reply:
             reason = (result.get('error_message') or result.get('error_code')
                       or result.get('status') or '未知原因')
             reply = f'本轮未完成：{reason}。'
-        target_session = self._agent_session_id or self.session_id
+        target_session = session_id
         # assistant_message/error_message 已由 AgentKernel 持久化；这里仅
         # 更新状态控制器，不能再次写入 legacy store.messages。
-        if (target_session and not hasattr(getattr(self, '_agent_gateway', None), 'repo')):
+        if (target_session and not hasattr(job.get('gateway'), 'repo')):
             self.store.append(target_session, 'assistant', reply)
         # S16：终态只进轮次控制器与消息表；禁止把完整回复写进状态控件
-        if self._agent_operation_id and target_session:
+        operation_id = job['operation_id']
+        if operation_id and target_session:
             if result.get('status') == 'completed':
                 self.status_controller.complete_turn(
-                    target_session, self._agent_operation_id, reply)
+                    target_session, operation_id, reply)
             elif result.get('status') == 'aborted':
                 self.status_controller.cancel_turn(
-                    target_session, self._agent_operation_id, reply)
+                    target_session, operation_id, reply)
             else:
                 self.status_controller.fail_turn(
-                    target_session, self._agent_operation_id,
+                    target_session, operation_id,
                     result.get('error_code') or 'failed', reply)
-        self._agent_operation_id = None  # 终态已定：live 状态卡退出时间线
+        if session_id == self.session_id:
+            self._agent_operation_id = None  # 终态已定：live 状态卡退出时间线
+        job['done'] = True
         if self.session_id == target_session:
             self.render_messages()
 
     def _on_agent_worker_finished(self) -> None:
+        self._on_agent_worker_finished_for(self._agent_session_id or self.session_id)
+
+    def _on_agent_worker_finished_for(self, session_id: str | None) -> None:
+        self._agent_jobs.pop(session_id, None)
+        if session_id != self.session_id:
+            return
         self._agent_worker = None
         self._agent_session_id = None
         self._agent_operation_id = None
@@ -1005,11 +1040,18 @@ class PlatformWindow(QMainWindow):
         from .task_recovery import reconcile_execution
 
         self._live_render_timer.stop()
-        self._live_agent_text = ''
         self._draft_binding = None
         self.session_id = item.data(Qt.ItemDataRole.UserRole) if item else None
+        current_job = self._agent_jobs.get(self.session_id)
+        if current_job and current_job.get('done'):
+            current_job = None
+        self._agent_worker = current_job['worker'] if current_job else None
+        self._agent_session_id = self.session_id if current_job else None
+        self._agent_operation_id = current_job['operation_id'] if current_job else None
+        self._agent_user_text = current_job['user_text'] if current_job else ''
+        self._live_agent_text = current_job['live_text'] if current_job else ''
         self.run_id = getattr(self.worker, 'run_id', None)
-        self.set_busy(self.worker is not None)
+        self.set_busy(self.worker is not None or current_job is not None)
         self._scope_submitted = False
         self._pending_upload_ids = set()
         self.composer.clear()
@@ -1215,13 +1257,14 @@ class PlatformWindow(QMainWindow):
             links = self.store.run_links(self.session_id)
             runs = self.store.runs(self.session_id)
         live = None
-        if (self._agent_worker is not None and self.session_id
-                and self.session_id == self._agent_session_id
-                and self._agent_operation_id):
-            live = {'after_message_id': self._agent_user_message_id,
-                    'operation_id': self._agent_operation_id,
-                    'user_text': self._agent_user_text,
-                    'text': self._live_agent_text or '新 Agent 路径：正在生成…'}
+        current_job = self._agent_jobs.get(self.session_id)
+        if current_job and current_job.get('done'):
+            current_job = None
+        if current_job is not None:
+            live = {'after_message_id': None,
+                    'operation_id': current_job['operation_id'],
+                    'user_text': current_job['user_text'],
+                    'text': current_job['live_text'] or '新 Agent 路径：正在生成…'}
         agent_entries = []
         if self.session_id:
             try:
