@@ -207,6 +207,23 @@ class AgentKernel:
         await self.wait(operation_id)
         return self.repo.get_operation(operation_id)
 
+    def cancel_open(self, operation_ids=None):
+        """Thread-safe cancellation signal for a UI thread.
+
+        The kernel owns asyncio Tasks on the worker loop; a foreign thread
+        must not call ``asyncio.run(abort())`` against that loop.  Cancellation
+        tokens are deliberately synchronous and are polled by model/tool
+        boundaries, while the worker loop performs the durable abort.
+        """
+        wanted = set(operation_ids) if operation_ids is not None else set(self._cancels)
+        cancelled = []
+        for operation_id in wanted:
+            token = self._cancels.get(operation_id)
+            if token is not None:
+                token.cancel()
+                cancelled.append(operation_id)
+        return cancelled
+
     async def steer(self, operation_id, message):
         """向运行中的 operation 注入用户消息，下一 turn 边界生效。"""
         text = str((message or {}).get('text', '')).strip()

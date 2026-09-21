@@ -242,13 +242,6 @@ class AgentGateway:
         """中止本网关全部活动 operation；无活动时安全返回。"""
         if self._kernel is None:
             return
-        for operation_id in list(self._open_operations):
-            try:
-                asyncio.run(self._kernel.abort(operation_id))
-            except Exception as exc:  # noqa: BLE001 - 停止路径尽力而为
-                import logging
-                logging.getLogger(__name__).warning(
-                    'abort operation %s failed: %s', operation_id,
-                    type(exc).__name__)
-            finally:
-                self._open_operations.discard(operation_id)
+        # The worker thread owns the asyncio loop.  Only signal cancellation
+        # here; the worker loop will persist the terminal abort event.
+        self._kernel.cancel_open(tuple(self._open_operations))
