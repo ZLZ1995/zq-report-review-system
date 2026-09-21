@@ -25,16 +25,8 @@ class QtBrowserAgentBackend:
         return {'url': url}
 
     def observe(self):
-        def read():
-            view = self.panel.current_view()
-            page = view.page()
-            result = {'url': view.url().toString(),
-                      'title': view.title(), 'content': ''}
-            page.toPlainText(lambda text: self.panel._agent_callback_result(
-                result, text))
-            return result
-        # ``toPlainText`` is asynchronous; the panel helper provides a
-        # callback-safe bounded read for the GUI thread.
+        # The panel helper performs the asynchronous QWebEngine read on the
+        # GUI thread and returns a bounded, non-secret snapshot.
         return self.panel.dispatch_agent_observe(timeout=self.timeout)
 
     def click(self, target):
