@@ -174,6 +174,10 @@ class AgentGateway:
         if on_event is not None:
             kernel.subscribe(on_event)
         try:
+            # A previous process may have died after accepting an operation.
+            # Reconcile those durable open operations before admitting a new
+            # turn; otherwise the stale lane remains busy forever.
+            asyncio.run(kernel.recover(self._session_id))
             asyncio.run(kernel.submit(
                 self._session_id, 'main',
                 {'text': text, 'model_id': self._model_id,
