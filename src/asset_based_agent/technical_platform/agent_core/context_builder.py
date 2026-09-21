@@ -55,9 +55,11 @@ class ContextBuilder:
             sections.append(self._system(f'【当前 Tool 描述】{listing}'))
         snapshot = repo.resource_snapshot(operation.id)
         if snapshot:
-            pinned = '；'.join(f"{item['skill_id']}@{item['version']}"
-                              for item in snapshot)
-            sections.append(self._system(f'【Skill 固定规则】{pinned}（版本已锁定）'))
+            pinned = '；'.join(
+                f"{item.get('skill_id', item.get('id', 'unknown'))}@{item.get('version', 'builtin')}"
+                for item in snapshot if item.get('kind', 'skill') == 'skill')
+            if pinned:
+                sections.append(self._system(f'【Skill 固定规则】{pinned}（版本已锁定）'))
         facts = repo.facts(project_id, status='confirmed')
         project_facts = [f for f in facts if f.get('scope') != 'user']
         user_facts = [f for f in facts if f.get('scope') == 'user']

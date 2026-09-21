@@ -10,6 +10,44 @@ from ..business_tools import business_tools
 BUILTIN_SNAPSHOT_VERSION = 1
 
 
+class CompositeToolResolver:
+    """Pin Skill resources while rebuilding per-operation builtin tools.
+
+    Builtins are injected by the application (business harness and the bound
+    browser backend); Skills remain version-pinned through ``ToolRegistry``.
+    This prevents the kernel from seeing one catalog while the model request
+    is executed against another catalog.
+    """
+
+    def __init__(self, *, tool_registry=None, business_service=None,
+                 browser=(), extra=()):
+        self.tool_registry = tool_registry
+        self.business_service = business_service
+        self.browser = tuple(browser or ())
+        self.extra = tuple(extra or ())
+
+    def resolve_for_operation(self, skill_ids=None):
+        return assemble_agent_tools(
+            tool_registry=self.tool_registry, skill_ids=skill_ids,
+            business_service=self.business_service, browser=self.browser,
+            extra=self.extra)
+
+    def resolve_pinned(self, snapshot):
+        skill_snapshot = [entry for entry in (snapshot or [])
+                          if entry.get('kind') != 'builtin']
+        tools = []
+        if self.tool_registry is not None and skill_snapshot:
+            tools.extend(self.tool_registry.resolve_pinned(skill_snapshot))
+        builtin, _ = assemble_agent_tools(
+            business_service=self.business_service, browser=self.browser,
+            extra=self.extra)
+        tools.extend(builtin)
+        names = [tool.descriptor.name for tool in tools]
+        if len(names) != len(set(names)):
+            raise ValueError('恢复时工具名冲突')
+        return tools
+
+
 def assemble_agent_tools(*, tool_registry=None, skill_ids=None,
                          business_service=None, browser=(), extra=()):
     tools = []

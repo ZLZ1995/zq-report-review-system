@@ -18,8 +18,10 @@ from .business_tools import business_tools
 from .business_tools.service import BusinessRunService
 from .flags import FEATURE_FLAG_ORDER
 from .policies.engine import RuleBasedPolicyEngine
+from .policies.file_scope import project_file_scope
 from .sessions.sqlite_repository import SQLiteSessionRepo
 from .tools.browser_tools import BrowserToolError, build_browser_tools
+from .tools.assembly import CompositeToolResolver
 
 MODE_MAP = {'request': 'request', 'risk': 'assisted', 'full': 'full'}
 
@@ -108,6 +110,33 @@ class AgentGateway:
                     tools.append(tool)
         return tuple(tools)
 
+    def _build_kernel(self):
+        """Build one kernel with the same resolver/catalog used at accept time."""
+        self._mirror_session()
+        service = BusinessRunService(
+            self._store, self._session_id,
+            provider_factory=self._provider_factory)
+        browser = ()
+        if self._enabled('browser_readonly') or self._enabled('browser_write_upload'):
+            backend = self._browser_backend or NullBrowserBackend()
+            browser = tuple(build_browser_tools(self._session_id, backend))
+        registry = self._tool_registry if any(
+            self._enabled(category) for category in _SKILL_CATEGORIES) else None
+        resolver = CompositeToolResolver(
+            tool_registry=registry,
+            business_service=service,
+            browser=browser)
+        project_id = self.repo.session_project_id(self._session_id)
+        project_root = self._store.path.parent
+        attachment_root = project_root / 'attachments' / project_id
+        scope = project_file_scope(project_root, extra_roots=(attachment_root,))
+        tools, _snapshot = resolver.resolve_for_operation()
+        return AgentKernel(
+            repo=self.repo, model=self._model_port_factory(), tools=tools,
+            tool_resolver=resolver, file_scope=scope,
+            policy=RuleBasedPolicyEngine(), approver=self._approver,
+            context_builder=ContextBuilder())
+
     # ------------------------------------------------------------ 会话
 
     def _mirror_session(self):
@@ -151,10 +180,7 @@ class AgentGateway:
                     bindings.append({'file_id': file_id,
                                      'sha256': record['sha256'],
                                      'binding_kind': kind})
-        kernel = AgentKernel(
-            repo=self.repo, model=self._model_port_factory(),
-            tools=self.active_tools(), policy=RuleBasedPolicyEngine(),
-            approver=self._approver, context_builder=ContextBuilder())
+        kernel = self._build_kernel()
         self._kernel = kernel
         error_code = []
         completed = []
