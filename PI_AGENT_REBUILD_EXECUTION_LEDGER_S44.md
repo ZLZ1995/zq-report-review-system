@@ -20,6 +20,10 @@
 - `tests/technical_platform/test_browser_window.py`: **6 passed**。
 - `tests/technical_platform/test_turn_context.py tests/technical_platform/test_offline.py`: **51 passed**。
 - 针对性回归未发现本轮新增失败；未将被中断的长时间全量运行误报为全绿。
+- S44 EXE 已构建并通过打包健康探活：`client=0.2.11`、`schema=15`、登录窗口可见、WebEngine 导入通过。
+- 普通候选包：`dist/s44/ZQ-Workspace-0.2.11-Windows.zip`，281,868,183 bytes，SHA256 `f01cd6d7984d6bebae3366690d9abf327541ac3bf91227277f2219f8fd65ed81`。
+- 托管更新候选包：`dist/s44/ZQ-Workspace-0.2.11-Managed-Windows.zip`，421,611,052 bytes，SHA256 `d55d2330245a1b01a1c1f7ef2f57235c1e89c7af6885caf23df8ca48e29b8e71`。
+- 两个 manifest 均使用 `zq-release-20260917`、sequence 6、schema [15,15]，并通过内置公钥离线验签；manifest SHA 分别为 `5702f640503b07ad348843ea10d24a21ecd2ce5a0d4e3786a0d21721c482f0f6`、`3d126c67ad121937ac993ba8b7e2b23b7ad352241c6ab79b659e2b04cad13c10`。
 
 ## Remaining external blockers
 
