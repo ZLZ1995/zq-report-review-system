@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from .generation import INPUT_ROLES, validate_roles
+from .generation import INPUT_ROLES, infer_financial_roles, validate_roles
 
 
 class GenerationDialog(QDialog):
@@ -51,6 +51,13 @@ class GenerationDialog(QDialog):
                     choice.addItem(item['name'], item['id'])
             form.addRow(title, choice)
             self.choices[role] = choice
+        if skill.id == 'financial-brief-docx':
+            try:
+                inferred = infer_financial_roles(files)
+                for role, identity in inferred.items():
+                    self.choices[role].setCurrentIndex(self.choices[role].findData(identity))
+            except (ValueError, OSError, KeyError):
+                pass
         layout.addLayout(form)
         if self.automatic:
             inventory = QLabel('\n'.join(item['name'] for item in files))

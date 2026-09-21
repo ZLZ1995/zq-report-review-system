@@ -1,0 +1,7 @@
+interface:
+  display_name: "办公工作流转技能"
+  short_description: "用中文访谈把 Word、Excel、PPT、PDF 工作流制作成可测试技能"
+  default_prompt: "使用 $office-workflow-to-skill，先通过简单中文访谈理解我的日常办公流程，再制作并试跑一个正式技能。"
+policy:
+  allow_implicit_invocation: true
+

@@ -8,10 +8,23 @@ from ..agent_contracts import (
     TaskUnderstanding,
     UnderstandingRequest,
 )
+from . import material_summary
 from .branch_understanding import PREFIX, branch_messages
 from .capability_registry import planning_candidates
 from .conversation_state import ConversationState
 from .understanding_policy import assess_understanding
+
+
+def _evidence_ref(record):
+    """Attach a bounded local summary for workbooks; metadata only otherwise."""
+    fields = {key: record[key] for key in ('id', 'name', 'sha256')}
+    from pathlib import Path
+    if Path(record['name']).suffix.lower() in material_summary.SUPPORTED_EXTENSIONS:
+        summary = material_summary.summarize_file(
+            record['path'], record['id'], record['name'])
+        fields['evidence'] = {key: value for key, value in summary.items()
+                              if key not in ('artifact_id', 'name')}
+    return EvidenceRef.model_validate(fields)
 
 
 class ClarificationContextLimit(ValueError):
@@ -27,6 +40,7 @@ class PendingUnderstanding:
     revision: int
     request: UnderstandingRequest
     files: tuple[dict, ...]
+    envelope_hash: str | None = None
 
 
 class AgentController:
@@ -39,8 +53,17 @@ class AgentController:
         self.store = store
         self.state = ConversationState(store)
 
-    def prepare(self, session_id, prompt, *, model_id, selected_ids, candidates=(), browser_enabled=False):
+    def prepare(self, session_id, prompt, *, model_id, selected_ids, candidates=(), browser_enabled=False, envelope=None):
         from ..agent_contracts import SkillCandidate
+        envelope_digest = None
+        if envelope is not None:
+            from .turn_context import TurnEnvelope, envelope_hash
+            envelope = TurnEnvelope.model_validate(envelope.model_dump())
+            if (envelope.raw_user_text != prompt or envelope.active_model_id != model_id
+                    or set(selected_ids) != {item.id for item in envelope.selected_attachment_versions}
+                    or envelope.session_id != session_id):
+                raise ValueError('本轮信封与提交内容不一致')
+            envelope_digest = envelope_hash(envelope)
         candidates = [SkillCandidate.model_validate(item) for item in candidates]
         if any(item.adapter == 'browser.task' or item.id == 'browser.task' for item in candidates):
             raise PermissionError('外部Skill不能声明或启用原生浏览器能力')
@@ -61,14 +84,21 @@ class AgentController:
                 raise ValueError('分支参考已变化，请重新确认本轮要求')
         request = UnderstandingRequest(
             request_id=uuid4().hex, model_id=model_id, message_id=uuid4().hex, prompt=prompt,
-            files=[EvidenceRef.model_validate({k: f[k] for k in ('id', 'name', 'sha256')}) for f in files],
+            files=[_evidence_ref(f) for f in files],
             skills=planning_candidates(include_browser=browser_enabled) + list(candidates), context=context,
         )
         state = (self.state.resume(session_id, state['revision']) if resuming else
                  self.state.start(session_id, expected_revision=state['revision']))
         self.store.append(session_id, 'user', prompt)
         return PendingUnderstanding(self.store.owner, session['project'], session_id,
-                                    state['task_id'], state['revision'], request, tuple(deepcopy(files)))
+                                    state['task_id'], state['revision'], request, tuple(deepcopy(files)),
+                                    envelope_digest)
+
+    @staticmethod
+    def _validate_next_exchange(pending, messages):
+        UnderstandingRequest.model_validate({**pending.request.model_dump(),
+            'message_id': uuid4().hex, 'prompt': '请补充本轮要求',
+            'context': messages})
 
     def _current(self, pending):
         if pending.owner != self.store.owner:
@@ -96,14 +126,20 @@ class AgentController:
         if result.next_action == 'ask':
             context = [m.model_dump() for m in pending.request.context] + [
                 {'id': pending.request.message_id, 'role': 'user', 'text': pending.request.prompt}]
+            question_message = {'id': uuid4().hex, 'role': 'assistant', 'text': result.reply}
             # Validate the NEXT exchange before persisting the question. Never
             # truncate a restriction or leave an unresumable oversized question.
             try:
-                UnderstandingRequest.model_validate({**pending.request.model_dump(),
-                    'message_id': uuid4().hex, 'prompt': '请补充本轮要求',
-                    'context': context + [{'id': uuid4().hex, 'role': 'assistant', 'text': result.reply}]})
-            except ValueError as exc:
-                raise ClarificationContextLimit('澄清上下文已达上限，未丢弃任何限制；请新建会话并完整描述目标、资料范围和限制。') from exc
+                self._validate_next_exchange(pending, context + [question_message])
+            except ValueError:
+                # 先压缩（摘要标记非原始证据、分支参考不动），仍超界才明确拒绝。
+                from .context_assembly import compact_clarification_context
+                compacted = compact_clarification_context(context)
+                try:
+                    self._validate_next_exchange(pending, compacted + [question_message])
+                except ValueError as exc:
+                    raise ClarificationContextLimit('澄清上下文已达上限，未丢弃任何限制；请新建会话并完整描述目标、资料范围和限制。') from exc
+                context = compacted
             self.state.ask(pending.session_id, pending.revision, result.reply, context=context)
         else:
             # Close this understanding revision, not a running business task.

@@ -122,6 +122,8 @@ def execute_task(store, run_id, cancel, progress, *, provider=None, output=None,
             return {'kind': 'cancelled'}
         if status == 'failed' and generation and store.run(run_id)['result']:
             return json.loads(store.run(run_id)['result'])
+        if status == 'waiting_user' and store.run(run_id)['result']:
+            return json.loads(store.run(run_id)['result'])
         if status != 'succeeded':
             raise RuntimeError('任务尚未完成，请核对执行状态；不要重复提交')
         return json.loads(store.run(run_id)['result'])

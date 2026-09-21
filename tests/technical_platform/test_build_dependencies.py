@@ -19,11 +19,15 @@ def test_build_includes_office_modules_used_by_bundled_scripts(monkeypatch):
     assert 'pythoncom' in imports
     for module in (
         'asset_based_agent.technical_platform.feedback_service',
+        'asset_based_agent.technical_platform.material_analysis',
+        'asset_based_agent.technical_platform.material_resume',
         'asset_based_agent.technical_platform.memory_contracts',
         'asset_based_agent.technical_platform.memory_retrieval',
         'asset_based_agent.technical_platform.memory_service',
+        'asset_based_agent.technical_platform.platform_queries',
         'asset_based_agent.technical_platform.review_issues',
         'asset_based_agent.technical_platform.skill_improvement',
+        'asset_based_agent.technical_platform.turn_router',
         'asset_based_agent.technical_platform.ui.memory_panel',
     ):
         assert module in imports

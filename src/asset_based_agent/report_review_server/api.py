@@ -11,13 +11,18 @@ from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session
 
 try:
-    from ..agent_contracts import PlanningRequest, PlanProposal, TaskUnderstanding, UnderstandingRequest
+    from ..agent_contracts import (
+        PlanningRequest,
+        PlanProposal,
+        TaskUnderstanding,
+        UnderstandingRequest,
+    )
     from ..browser_contracts import BrowserStepProposal, BrowserStepRequest
 except ModuleNotFoundError:  # pragma: no cover - legacy Zeabur build context
     import base64
@@ -32,12 +37,18 @@ except ModuleNotFoundError:  # pragma: no cover - legacy Zeabur build context
         _module.__package__ = 'asset_based_agent'
         exec(zlib.decompress(base64.b64decode(_payload)), _module.__dict__)
         sys.modules[_name] = _module
-    from ..agent_contracts import PlanningRequest, PlanProposal, TaskUnderstanding, UnderstandingRequest
+    from ..agent_contracts import (
+        PlanningRequest,
+        PlanProposal,
+        TaskUnderstanding,
+        UnderstandingRequest,
+    )
     from ..browser_contracts import BrowserStepProposal, BrowserStepRequest
 from .config import ServerSettings
 from .crypto import SecretCipher
 from .database import Base, build_engine, build_session_factory
 from .schemas import (
+    AgentCompletionStreamRequest,
     BalanceAdjustmentRequest,
     BalanceResponse,
     BillingMultiplierRequest,
@@ -63,9 +74,15 @@ from .schemas import (
     TokenResponse,
     UserResponse,
 )
+from .services.agent_completion_service import (
+    SUPPORTED_PROTOCOL_VERSIONS,
+    AgentCompletionService,
+    ReplayResult,
+    replay_events,
+)
 from .services.auth_service import AuthContext, AuthService, ServiceError
-from .services.client_release_service import ClientReleaseService
 from .services.browser_step import propose_browser_step
+from .services.client_release_service import ClientReleaseService
 from .services.material_analysis import MaterialPlan, MaterialRequest, analyze_materials
 from .services.model_admin_service import ModelAdminService
 from .services.provider_gateway import HttpProviderClient
@@ -80,6 +97,14 @@ from .services.wallet_service import WalletService, display_money
 
 _BEARER = HTTPBearer(auto_error=False)
 _LOGGER = logging.getLogger(__name__)
+
+
+def _sse_stream(events) -> Iterator[str]:
+    import json as _json
+
+    for event in events:
+        yield (f"event: {event['kind']}\n"
+               f"data: {_json.dumps(event['data'], ensure_ascii=False)}\n\n")
 
 
 def create_app(
@@ -145,7 +170,8 @@ def create_app(
     ) -> JSONResponse:
         return JSONResponse(
             status_code=exc.status_code,
-            content={"error": {"code": exc.code, "message": exc.message}},
+            content={"error": {"code": exc.code, "message": exc.message,
+                               **getattr(exc, 'details', {})}},
         )
 
     def get_db(request: Request) -> Iterator[Session]:
@@ -175,7 +201,9 @@ def create_app(
         supported = {
             'skill_routing': ('/api/v1/skill-route', 'POST'),
             'task_understanding': ('/api/v1/agent/understand', 'POST'),
+            'material_evidence': ('/api/v1/agent/understand', 'POST'),
             'task_planning': ('/api/v1/agent/plan', 'POST'),
+            'agent_completion_stream': ('/api/v1/agent/completions/stream', 'POST'),
             'browser_step': ('/api/v1/agent/browser-step', 'POST'),
             'browser_view_actions': ('/api/v1/agent/browser-step', 'POST'),
             'browser_saved_login': ('/api/v1/agent/browser-step', 'POST'),
@@ -466,6 +494,38 @@ def create_app(
     def browser_step(payload: BrowserStepRequest, request: Request,
                      context: AuthContext = Depends(get_context), db: Session = Depends(get_db)):
         return propose_browser_step(request.app.state.review_job_service.metered, db, context.user.user_id, payload)
+
+    @app.post('/api/v1/agent/completions/stream')
+    def agent_completion_stream(payload: AgentCompletionStreamRequest,
+                                request: Request,
+                                context: AuthContext = Depends(get_context),
+                                db: Session = Depends(get_db)):
+        if payload.protocol_version not in SUPPORTED_PROTOCOL_VERSIONS:
+            raise ServiceError(
+                'unsupported_protocol_version', '不支持的协议版本。', 400,
+                details={'supported_versions': list(SUPPORTED_PROTOCOL_VERSIONS)})
+        service = AgentCompletionService(
+            request.app.state.review_job_service.metered,
+            request.app.state.session_factory,
+        )
+        prepared = service.begin(
+            db,
+            user_id=context.user.user_id,
+            model_id=payload.model_id,
+            client_request_id=payload.client_request_id,
+            messages=[message.model_dump() for message in payload.messages],
+            tools=[tool.model_dump() for tool in payload.tools],
+            sampling=payload.sampling,
+        )
+        if isinstance(prepared, ReplayResult):
+            events = replay_events(prepared)
+        else:
+            events = service.stream(db, prepared)
+        return StreamingResponse(
+            _sse_stream(events),
+            media_type='text/event-stream',
+            headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
+        )
 
     @app.post('/api/v1/skill-route', response_model=RoutePlan)
     def skill_route(payload: RouteRequest, request: Request,

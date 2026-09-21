@@ -29,6 +29,9 @@ class ProjectCatalog:
                   PRIMARY KEY(owner,project));
                 CREATE TABLE IF NOT EXISTS selection(owner TEXT PRIMARY KEY, project TEXT);
             """)
+            columns = {row['name'] for row in db.execute('PRAGMA table_info(locations)')}
+            if 'pinned' not in columns:
+                db.execute('ALTER TABLE locations ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0')
 
     def index(self):
         # SQLite context transactions do not close connections; use a scoped wrapper.
@@ -66,7 +69,7 @@ class ProjectCatalog:
 
     def _register(self, store, project):
         with self.index() as db:
-            db.execute("INSERT INTO locations VALUES(?,?,?,?,NULL) ON CONFLICT(owner,project) "
+            db.execute("INSERT INTO locations(owner,project,name,path,session,pinned) VALUES(?,?,?,?,NULL,0) ON CONFLICT(owner,project) "
                        "DO UPDATE SET name=excluded.name,path=excluded.path",
                        (self.owner, project["id"], project["name"], str(store.path.resolve())))
 
@@ -100,7 +103,8 @@ class ProjectCatalog:
 
     def projects(self, archived=False):
         with self.index() as db:
-            rows = list(db.execute("SELECT * FROM locations WHERE owner=? ORDER BY rowid", (self.owner,)))
+            rows = list(db.execute(
+                "SELECT * FROM locations WHERE owner=? ORDER BY pinned DESC,rowid", (self.owner,)))
         results = []
         for row in rows:
             try:
@@ -110,10 +114,11 @@ class ProjectCatalog:
                 validate_business_directory(path.resolve().parent)
                 project = PlatformStore(path, self.owner, create=False).project(row["project"])
                 if bool(project["archived"]) == archived:
-                    results.append({**project, "unavailable": False})
+                    results.append({**project, "unavailable": False, "pinned": bool(row['pinned'])})
             except (OSError, ValueError, PermissionError, sqlite3.Error):
                 if not archived:
-                    results.append({"id": row["project"], "name": row["name"], "unavailable": True})
+                    results.append({"id": row["project"], "name": row["name"],
+                                    "unavailable": True, "pinned": bool(row['pinned'])})
         return results
 
     def archived_projects(self):
@@ -144,6 +149,34 @@ class ProjectCatalog:
     def restore(self, identity):
         self.select_project(identity)
         self.active.restore(identity)
+
+    def rename_project(self, identity: str, name: str) -> None:
+        value = name.strip()
+        if not value or len(value) > 120:
+            raise ValueError('项目名称必须为1至120个字符')
+        store = self.project_store(identity)
+        store.rename_project(identity, value)
+        with self.index() as db:
+            db.execute('UPDATE locations SET name=? WHERE owner=? AND project=?',
+                       (value, self.owner, identity))
+
+    def set_pinned(self, identity: str, pinned: bool) -> None:
+        self.project_store(identity)
+        with self.index() as db:
+            db.execute('UPDATE locations SET pinned=? WHERE owner=? AND project=?',
+                       (1 if pinned else 0, self.owner, identity))
+
+    def remove_from_sidebar(self, identity: str) -> None:
+        """Forget one catalog entry without deleting its project database/files."""
+        self.project_store(identity)
+        was_selected = self.last_project == identity
+        with self.index() as db:
+            db.execute('DELETE FROM locations WHERE owner=? AND project=?',
+                       (self.owner, identity))
+            db.execute('DELETE FROM selection WHERE owner=? AND project=?',
+                       (self.owner, identity))
+        if was_selected:
+            self.active = None
 
     def update_database_inventory(self) -> tuple[Path, ...]:
         """Return every durable SQLite file that must survive a client update."""

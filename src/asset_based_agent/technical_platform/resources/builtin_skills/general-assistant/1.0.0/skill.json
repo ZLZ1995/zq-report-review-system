@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "id": "general-assistant",
+  "version": "1.0.0",
+  "name": "通用助手",
+  "description": "随包内置的基础对话技能；不声明工具与能力，纯聊天场景默认使用。",
+  "capabilities": [],
+  "tools": [],
+  "entry": {
+    "executor": "noop",
+    "config": {}
+  }
+}

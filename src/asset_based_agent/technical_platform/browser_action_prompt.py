@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .agent_permission_modes import requires_browser_confirmation
 from .browser_action_request import BrowserActionRequest
 from .browser_observer import Control
 from .browser_policy import credential_origin
@@ -54,6 +55,8 @@ class ActionDialog(QDialog):
         buttons = QDialogButtonBox()
         self.allow_button = buttons.addButton('允许本次操作', QDialogButtonBox.ButtonRole.AcceptRole)
         self.cancel_button = buttons.addButton('取消', QDialogButtonBox.ButtonRole.RejectRole)
+        if self.allow_button is None or self.cancel_button is None:
+            raise RuntimeError('Browser confirmation buttons are unavailable')
         self.allow_button.setAutoDefault(False)
         self.allow_button.setEnabled(False)
         self.cancel_button.setDefault(True)
@@ -66,10 +69,12 @@ class ActionDialog(QDialog):
 
 class BrowserActionPrompt(QObject):
     def __init__(self, parent: QWidget | None = None, *,
-                 is_active: Callable[[BrowserActionRequest], bool]):
+                 is_active: Callable[[BrowserActionRequest], bool],
+                 permission_mode: Callable[[], str] = lambda: 'request'):
         super().__init__(parent)
         self._parent = parent
         self._is_active = is_active
+        self._permission_mode = permission_mode
         self._closed = False
         self.dialog: ActionDialog | None = None
 
@@ -83,6 +88,11 @@ class BrowserActionPrompt(QObject):
         app = QApplication.instance()
         if (app is None or QThread.currentThread() != app.thread() or self.dialog is not None
                 or request.action not in {'click', 'fill', 'select', 'navigate', 'scroll', 'download'} or not self._valid(request)):
+            return False
+        try:
+            if not requires_browser_confirmation(self._permission_mode(), request.action):
+                return self._valid(request)
+        except (ValueError, TypeError, OSError, RuntimeError):
             return False
         dialog = ActionDialog(request, control, value, self._parent)
         self.dialog = dialog

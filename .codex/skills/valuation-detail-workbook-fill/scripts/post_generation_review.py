@@ -100,26 +100,9 @@ def source_fingerprints(paths):
     return result
 
 
-def strict_journal_candidates(sheet, party, journals, pipeline):
-    roots = {'应收账款': '1122', '预付账款': '1123', '其他应收款': '1221',
-             '应付账款': '2202', '预收账款': '2203', '其他应付款': '2241'}
-    direction = 'credit' if sheet in {'应付账款', '预收账款', '其他应付款'} else 'debit'
-    accepted = []
-    for row in journals:
-        parties = {pipeline.normalize_counterparty_display(pipeline.extract_entity_from_text(pipeline.clean(row.get(k))))
-                   for k in ('vendor_name', 'counterparty_desc') if row.get(k)}
-        name = pipeline.clean(row.get('account_name')).replace('预收款项', '预收账款')
-        same_name = name == sheet or name.startswith(sheet + '_') or name.startswith(sheet + '-')
-        code = pipeline.clean(row.get('tb_code'))
-        same_code = code.startswith(roots[sheet])
-        if party not in parties or not (same_name or same_code):
-            continue
-        if (name and any(name.startswith(other) for other in roots if other != sheet)):
-            continue
-        if not numeric(row.get(direction)) or row[direction] < .005 or not row.get('gl_date'):
-            continue
-        accepted.append(row)
-    return accepted
+def strict_journal_candidates(sheet, party, journals, pipeline, row_tb_code=''):
+    """Delegate to the pipeline's shared rule so reviewer and writer agree."""
+    return pipeline.strict_journal_candidates(sheet, party, journals, row_tb_code=row_tb_code)
 
 
 def review_bank_sources(output, paths, bs_values, written_rows, pipeline):
@@ -185,6 +168,7 @@ def review_pipeline_sources(workbook, args, pipeline, written_rows, initial_hash
             verified_cells.update((x['sheet'], x['cell']) for x in bank_checks
                                   if (x['sheet'], x['cell']) not in failed_bank)
         journals = pipeline.load_journal_rows(Path(args.journal) if args.journal else None)
+        journal_entity_index = pipeline.build_journal_entity_index(journals)
         cp = pipeline.load_counterparty_balance_rows(Path(args.counterparty_balance) if args.counterparty_balance else None)
         tb = pipeline.load_trial_balance_rows(Path(args.trial_balance)) if args.trial_balance else []
         source = {'source': metadata['source'], 'source_sheet': metadata['sheet']}
@@ -231,10 +215,12 @@ def review_pipeline_sources(workbook, args, pipeline, written_rows, initial_hash
                 code = item['tb_code']
                 sheet = routes.get(code)
                 if sheet in six and not any(c.startswith(code + '.') for c in codes):
-                    key = (sheet, pipeline.normalize_counterparty_display(item['aux_name']))
+                    key = (sheet, pipeline.resolve_tb_counterparty(code, item['aux_name'], journal_entity_index))
                     expected[key] += item['credit_end'] - item['debit_end'] if sheet in payable else item['debit_end'] - item['credit_end']
                     evidence[key].append({'source': args.trial_balance, 'source_row': item.get('source_row'), 'tb_code': code})
 
+        written_tb = {(item.get('_sheet'), str(item.get('_written_row'))): pipeline.clean(item.get('tb_code', ''))
+                      for item in written_rows}
         for sheet in six:
             if sheet not in output.sheetnames:
                 continue
@@ -248,13 +234,17 @@ def review_pipeline_sources(workbook, args, pipeline, written_rows, initial_hash
                     actual[(sheet, party)] += amount
                 if not party or not numeric(amount) or abs(amount) < .005:
                     continue
-                candidates = strict_journal_candidates(sheet, party, journals, pipeline)
+                if party in pipeline.ALLOWED_EXCEPTION_COUNTERPARTIES:
+                    notices.append({'sheet': sheet, 'row': row, 'counterparty': party,
+                        'reason': '手工兜底科目，序时账无匹配要求；需以银行流水另行佐证', 'status': 'needs_materials'})
+                    continue
+                candidates = strict_journal_candidates(sheet, party, journals, pipeline, written_tb.get((sheet, str(row)), ''))
                 selected = pipeline.select_journal_entry(party, amount, 'payable' if sheet in payable else 'receivable', candidates)
                 date_col, desc_col = ('C', 'D') if sheet in payable else ('D', 'C')
                 if selected:
                     ref = {'source': args.journal, 'source_row': selected.get('row'), 'tb_code': selected.get('tb_code'), 'counterparty': party}
                     check(sheet, f'{date_col}{row}', selected.get('gl_date'), 'date', ref)
-                    check(sheet, f'{desc_col}{row}', pipeline.normalize_business_desc(pipeline.clean(selected.get('line_desc') or selected.get('summary'))), 'text', ref)
+                    check(sheet, f'{desc_col}{row}', pipeline.normalize_business_desc(pipeline.clean(selected.get('line_desc') or selected.get('summary')), pipeline.clean(selected.get('account_name', ''))), 'text', ref)
                 elif ws[f'{date_col}{row}'].value or ws[f'{desc_col}{row}'].value:
                     problems.append(issue('journal_unmatched', sheet=sheet, cell=f'{date_col}{row}', counterparty=party))
                 else:
@@ -271,11 +261,14 @@ def review_pipeline_sources(workbook, args, pipeline, written_rows, initial_hash
             for col, field in pipeline.DETAIL_WRITE_TEMPLATES.get(sheet, []):
                 if field not in {'book_value', 'counterparty', 'sub_name', 'date_value'} or col == 'age_bucket_col':
                     continue
+                _written_cell_set = set(item.get('_written_cells', []))
+                if _written_cell_set and f'{col}{row}' not in _written_cell_set:
+                    continue
                 entry = {'sheet': sheet, 'cell': f'{col}{row}', 'kind': 'amount' if field == 'book_value' else ('date' if field == 'date_value' else 'text'), 'verification_layer': 'saved_file_vs_write_record'}
                 problem = None if (sheet, f'{col}{row}') in verified_cells else compare(entry, item.get(field), output[sheet][f'{col}{row}'].value)
                 if problem:
                     problems.append(problem)
-            if sheet not in six:
+            if sheet not in six and sheet not in pipeline.SEMANTIC_EXEMPT_SHEETS:
                 for col, field in pipeline.DETAIL_WRITE_TEMPLATES.get(sheet, []):
                     if field not in {'book_value', 'counterparty', 'sub_name', 'date_value'} or item.get(field) in (None, ''):
                         continue

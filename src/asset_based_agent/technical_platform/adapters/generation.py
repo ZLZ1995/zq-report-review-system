@@ -6,7 +6,7 @@ from pathlib import Path
 from ..artifact_registry import resolve_step_inputs
 from ..generation_paths import generation_work_directory
 from ..permissions import PermissionService
-from ..skills import HISTORY, digest
+from ..skills import DETAIL, FINANCIAL_BRIEF, HISTORY, WORKFLOW_TO_SKILL, digest
 from ..step_results import StepResults
 from ..tool_dispatcher import ToolOutcome
 
@@ -29,8 +29,12 @@ class GenerationAdapter:
                     'skill_instructions', 'input_roles', 'automatic_materials'}
                     or type(config['automatic_materials']) is not bool
                     or not isinstance(config['skill_instructions'], str)
-                    or step.reference_inputs):
+                    or (step.reference_inputs and step.skill_id != DETAIL.id)):
                 raise PermissionError('Generation step configuration is invalid')
+            reference_ids = set(step.reference_inputs)
+            if reference_ids:
+                files = [dict(f, user_role='reference') if f['id'] in reference_ids else f
+                         for f in files]
             references = dict(zip(step.inputs, (f['id'] for f in files)))
             roles = config['input_roles']
             if roles is not None:
@@ -46,7 +50,8 @@ class GenerationAdapter:
         if (step.identity.task_id != self.run_id or step.skill_id != snapshot['skill_id']
                 or (not compound and (
                     step.step_id != 'execute' or step.inputs != [item['id'] for item in snapshot['files']]))
-                or step.tool not in {'detail.generate', 'history.generate'}
+                or step.tool not in {'detail.generate', 'history.generate', 'financial-brief.generate',
+                                     'workflow-skill.validate'}
                 or step.rules_sha256 != snapshot['skill_rules_sha256']
                 or snapshot['permissions'].get('generate_artifacts') is not True):
             raise PermissionError('Generation step differs from confirmed task')
@@ -65,7 +70,10 @@ class GenerationAdapter:
             raise ValueError('Generator returned an invalid result')
         artifacts = result.get('artifacts', [])
         if result['ok']:
-            primary = 'history_fragment.docx' if step.skill_id == HISTORY.id else 'detail_workbook.xlsx'
+            primary = ('history_fragment.docx' if step.skill_id == HISTORY.id else
+                       'financial_brief.docx' if step.skill_id == FINANCIAL_BRIEF.id else
+                       'office_workflow_contract_validation.json'
+                       if step.skill_id == WORKFLOW_TO_SKILL.id else 'detail_workbook.xlsx')
             if not any(item.get('name') == primary for item in artifacts):
                 raise ValueError('Generation did not produce its required artifact')
         elif any(item.get('name') != 'user_feedback.md' for item in artifacts):
@@ -75,9 +83,15 @@ class GenerationAdapter:
         for item in artifacts:
             path = Path(item['path']).resolve()
             if (not path.is_relative_to(root) or path.name != item['name']
-                    or path.suffix.lower() not in {'.docx', '.xlsx', '.md', '.json'}
+                    or path.suffix.lower() not in {'.docx', '.xlsx', '.pdf', '.png', '.md', '.json'}
                     or not path.is_file() or digest(path) != item['sha256']):
                 raise ValueError('Generated artifact location or hash is invalid')
+        if result.get('status') == 'waiting_user':
+            if artifacts:
+                raise ValueError('Waiting generation cannot publish business artifacts')
+            reference = StepResults(self.store).save(self.run_id, step.step_id, result)
+            return ToolOutcome(step_id=step.step_id, status='waiting_user',
+                               passed_gates=[], result_ref=reference)
         reference = StepResults(self.store).save(self.run_id, step.step_id, result)
         return ToolOutcome(step_id=step.step_id, status='succeeded' if result['ok'] else 'failed',
                            passed_gates=step.acceptance_gates if result['ok'] else [], result_ref=reference)

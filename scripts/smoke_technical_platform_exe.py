@@ -1,5 +1,6 @@
 """Check packaged rules and the login window; close only this test process."""
 
+import os
 import subprocess
 import tempfile
 import time
@@ -13,7 +14,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def main(root: Path | None = None):
     root = (root or ROOT).resolve()
-    folder = root / "dist/technical_platform/ZQ技术平台"
+    folder = Path(
+        os.environ.get(
+            "TP_SMOKE_DIST", root / "dist/technical_platform/ZQ技术平台"
+        )
+    )
     rules = folder / "_internal/asset_based_agent/technical_platform/review_rules.txt"
     assert (
         rules.read_bytes()
@@ -33,7 +38,11 @@ def main(root: Path | None = None):
     assert info['local_schema_version'] == SCHEMA_VERSION
     assert info['protocol_version'] == 1
     assert info['webengine_import'] is True
-    process = subprocess.Popen([str(folder / "ZQ技术平台.exe")], cwd=folder)
+    launch_root = root / 'build/packaged-health-smoke/launch-data'
+    launch_root.mkdir(parents=True, exist_ok=True)
+    launch_env = dict(os.environ, ZQ_SETTINGS_ROOT=str(launch_root))
+    process = subprocess.Popen([str(folder / "ZQ技术平台.exe")], cwd=folder,
+                               env=launch_env)
     try:
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:

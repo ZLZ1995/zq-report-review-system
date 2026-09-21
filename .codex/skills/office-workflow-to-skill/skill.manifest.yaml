@@ -1,0 +1,53 @@
+name: office-workflow-to-skill
+version: 0.1
+type: skill_generation
+status: executable
+skill_class: business
+routing_priority: 20
+description: 将中国用户以自然语言、示例文件或操作演示描述的日常办公工作流，访谈整理为可确认、可测试的工作流契约，再与 skill-creator 以及 Word、Excel、PPT、PDF 技能协同生成或更新正式 Codex skill。适用于文案、报告、表格、演示文稿、PDF/图片取文生成报告等重复办公流程；不用于只执行一次办公任务。
+use_when:
+  - 把日常办公流程做成 skill
+  - 将 Word Excel PPT PDF 工作流标准化
+  - 根据样例文件提炼可重复技能
+  - 帮助不熟悉 AI 的用户制作技能
+  - 更新已有办公流程技能
+do_not_use_when:
+  - 只执行一次 Word Excel PPT 或 PDF 任务
+  - 用户只需修改现有办公文件且未要求沉淀技能
+  - 流程仍是临时想法且没有稳定规则或确认意愿
+inputs:
+  workflow_contract:
+    type: file
+    required: true
+    description: 经访谈整理的 JSON 工作流契约。
+  validation_output:
+    type: path
+    required: false
+    default: "{task_dir}/outputs/office_workflow_contract_validation.json"
+outputs:
+  validation_report:
+    type: artifact
+    path: "{validation_output}"
+approval:
+  required: true
+  reason: 工作流确认后会在仓库中创建或更新技能文件。
+commands:
+  validate_contract:
+    script: scripts/validate_workflow_contract.py
+    run_when: always
+    timeout_seconds: 60
+    args:
+      - flag: --contract
+        input: workflow_contract
+      - flag: --output
+        input: validation_output
+verification:
+  required:
+    - validation_report exists
+    - validation_report.ok == true
+    - workflow contract confirmation.workflow_confirmed == true
+    - workflow contract confirmation.ready_to_build == true
+    - routed office skills cover every input and output artifact
+    - generated child skill passes skill-creator validation
+    - at least one representative office artifact proof run is completed
+    - every generated office artifact passes its owning skill verification

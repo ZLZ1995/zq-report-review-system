@@ -12,7 +12,7 @@ class SkillContract(Versioned):
     id: Identifier
     version: str = Field(pattern=r'^\d+\.\d+\.\d+$')
     purpose: ShortText
-    source_extensions: list[Literal['.docx', '.xlsx', '.xlsm', '.pdf', '.xls']] = Field(min_length=1)
+    source_extensions: list[Literal['.docx', '.xlsx', '.xlsm', '.pdf', '.xls', '.json']] = Field(min_length=1)
     required_roles: list[Identifier] = Field(max_length=20)
     optional_roles: list[Identifier] = Field(max_length=20)
     outputs: list[Identifier] = Field(min_length=1, max_length=20)
@@ -38,7 +38,8 @@ class SkillContract(Versioned):
 def builtin_contracts():
     root = Path(__file__).with_name('builtin_contracts')
     contracts = {}
-    for name in ('report_review', 'detail_workbook', 'company_history', 'preflight'):
+    for name in ('report_review', 'detail_workbook', 'company_history', 'preflight',
+                 'financial_brief', 'office_workflow_to_skill'):
         item = SkillContract.model_validate_json((root / (name + '.json')).read_text('utf-8'))
         if item.id in contracts:
             raise ValueError('Duplicate builtin contract')

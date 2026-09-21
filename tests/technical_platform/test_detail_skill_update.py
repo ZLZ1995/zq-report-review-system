@@ -39,3 +39,27 @@ def test_scope_is_prepared_before_template_scan(tmp_path, monkeypatch):
     assert names.index('prepare_execution_scope.py') < names.index('scan_template_structure.py')
     scan_args = next(args for name, args in calls if name == 'scan_template_structure.py')
     assert '--execution-scope' in scan_args
+
+
+def test_worker_forwards_all_financial_statements_latest_first(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(generation_worker, 'call', lambda script, args: calls.append((script.name, args)))
+    (tmp_path / 'completion_status.json').write_text(json.dumps({'status': 'complete'}))
+    (tmp_path / 'detail_workbook.xlsx').touch()
+    generation_worker.detail(tmp_path, {'balance_sheet': 'bs2026.xlsx', 'template': 'template.xlsx',
+        'financial_statements': ['bs2026.xlsx', 'bs2025.xlsx', 'bs2024.xlsx']}, tmp_path)
+    args = next(args for name, args in calls if name == 'run_detail_workbook_pipeline.py')
+    picked = [args[i + 1] for i, a in enumerate(args) if a == '--financial-statement']
+    assert picked == ['bs2026.xlsx', 'bs2025.xlsx', 'bs2024.xlsx']
+    assert args[args.index('--balance-sheet') + 1] == 'bs2026.xlsx'
+
+
+def test_worker_without_statement_list_keeps_legacy_single_flag(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(generation_worker, 'call', lambda script, args: calls.append((script.name, args)))
+    (tmp_path / 'completion_status.json').write_text(json.dumps({'status': 'complete'}))
+    (tmp_path / 'detail_workbook.xlsx').touch()
+    generation_worker.detail(tmp_path, {'balance_sheet': 'bs.xlsx', 'template': 'template.xlsx'}, tmp_path)
+    args = next(args for name, args in calls if name == 'run_detail_workbook_pipeline.py')
+    picked = [args[i + 1] for i, a in enumerate(args) if a == '--financial-statement']
+    assert picked == ['bs.xlsx']

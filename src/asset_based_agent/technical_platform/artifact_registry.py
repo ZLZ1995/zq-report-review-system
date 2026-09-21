@@ -53,10 +53,8 @@ def resolve_step_inputs(store, run_id, step):
                          'detail.generate': 'detail_workbook.xlsx'}.get(producer.tool)
         if expected_name is None or result.get('kind') != 'generation' or result.get('ok') is not True:
             raise PermissionError('Dependency does not produce a supported document artifact')
-        items = [item for item in result.get('artifacts', []) if item.get('name') == expected_name]
-        if len(items) != 1:
-            raise ValueError('Primary artifact is missing or ambiguous')
-        item = items[0]
+        from .artifact_contract import select_primary
+        _index, item = select_primary(result, expected_name)
         root = (generation_work_directory(store.path.parent, run_id,
                     producer.step_id if snapshot.get('mode') == 'compound' else None) / 'output')
         path = Path(item['path']).resolve()

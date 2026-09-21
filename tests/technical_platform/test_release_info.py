@@ -8,11 +8,14 @@ from asset_based_agent.technical_platform.release_info import (
 )
 
 
-def test_release_identity_matches_schema_11_delivery():
+def test_release_identity_tracks_schema_12_waiting_user_migration():
     from asset_based_agent.technical_platform.local_migrations import SCHEMA_VERSION
 
+    # Client version stays at the last signed release; schema advanced
+    # locally for the waiting_user step-state migration (v12) and must
+    # move together with the next release cut.
     assert CLIENT_VERSION == '0.2.10'
-    assert SCHEMA_VERSION == 11
+    assert SCHEMA_VERSION == 12
 
 
 def test_local_release_contains_actual_rule_hash():
@@ -51,16 +54,21 @@ def test_version_inspection_does_not_initialize_external_skill_tables(tmp_path):
 def test_local_release_reports_all_builtin_skills_and_verified_templates():
     from asset_based_agent.technical_platform.generation import locked_template
     from asset_based_agent.technical_platform.local_migrations import SCHEMA_VERSION
+    from asset_based_agent.technical_platform.skill_contracts import builtin_contracts
     from asset_based_agent.technical_platform.skills import BUILTINS, GENERATORS, digest
     info = local_release()
     assert info['local_schema_version'] == SCHEMA_VERSION
     assert {s['id'] for s in info['skills']} == {s.id for s in BUILTINS}
     assert info['protocol_version'] == 1
     indexed = {s['id']: s for s in info['skills']}
+    contracts = builtin_contracts()
     for skill in GENERATORS:
         item = indexed[skill.id]
         assert item['status'] == 'verified'
-        assert item['template_sha256'] == digest(locked_template(skill.id))
+        if contracts[skill.id].locked_template:
+            assert item['template_sha256'] == digest(locked_template(skill.id))
+        else:
+            assert 'template_sha256' not in item
         assert len(item['bundle_sha256']) == 64
 
 
@@ -71,8 +79,11 @@ def test_missing_template_is_reported_without_hiding_client_version(monkeypatch)
     monkeypatch.setattr(generation, 'locked_template', missing)
     info = local_release()
     assert info['client_version']
+    from asset_based_agent.technical_platform.skill_contracts import builtin_contracts
+    contracts = builtin_contracts()
     generators = [s for s in info['skills'] if s['id'] in generation.INPUT_ROLES]
-    assert all(s['status'] == 'unavailable_or_changed' for s in generators)
+    assert all(s['status'] == ('unavailable_or_changed' if contracts[s['id']].locked_template else 'verified')
+               for s in generators)
     assert 'private' not in str(info)
 
 

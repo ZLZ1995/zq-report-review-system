@@ -27,7 +27,11 @@ JWT与加密密钥必须安全备份；已有数据库必须保留旧加密密�
 不要同时启动多个执行迁移的副本。将来扩容前需将迁移改为独立发布步骤。
 
 5. 绑定HTTPS域名，访问 `/api/v1/health` 应返回status=ok；访问
-   `/api/v1/capabilities` 应返回本次完整提交SHA，并包含 `review_events: 1`。
+   `/api/v1/capabilities` 应返回本次完整提交SHA，并包含 `review_events: 1`、
+   `agent_completion_stream: 1`。新 Agent 客户端只接受该能力声明；缺少时不会
+   回退旧 Agent，也不会发起模型请求。
+   使用已登录客户端或受控探活确认 `POST /api/v1/agent/completions/stream`
+   不再返回404，并完成一次SSE、余额预检、计费回执、重复请求幂等和取消对账验收。
 6. 访问 `/admin` 登录总控，创建模型渠道、客户账号并调整余额。
 7. 客户端服务地址填 `https://域名/api/v1`，不是供应商地址。
 

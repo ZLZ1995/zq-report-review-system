@@ -324,7 +324,7 @@ ALLOWED_EXCEPTION_COUNTERPARTIES = {
 }
 
 
-SEMANTIC_EXEMPT_SHEETS = {"应交税费", "银行存款"}
+SEMANTIC_EXEMPT_SHEETS = {"应交税费", "银行存款", "职工薪酬"}
 COMPANY_LIKE_RE = re.compile(r"([A-Za-z\u4e00-\u9fff（）()·\-\s]{2,}(?:有限公司|有限责任公司|股份有限公司|合伙企业|分公司|公司|银行|支行|SARL))")
 
 PERSON_NAME_RE = re.compile(r"^[\u4e00-\u9fff]{2,4}$")
@@ -499,6 +499,9 @@ def parse_date_text(value: Any) -> datetime | None:
     match = re.search(r"(\d{4})年(\d{1,2})月(\d{1,2})日", text)
     if match:
         return datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    match = re.search(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?!\d)", text)
+    if match:
+        return datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)))
     try:
         serial = float(text)
         if 1 <= serial <= 100000:
@@ -586,6 +589,68 @@ def select_journal_entry(counterparty: str, book_value: float, account_type: str
         return None
     candidates.sort(key=lambda x: (-x[0], x[1], x[2]))
     return candidates[0][3]
+
+
+SHEET_ACCOUNT_ROOTS = {
+    "应收账款": "1122", "预付账款": "1123", "其他应收款": "1221",
+    "应付账款": "2202", "预收账款": "2203", "其他应付款": "2241",
+}
+
+PAYABLE_DETAIL_SHEETS = {"应付账款", "预收账款", "其他应付款"}
+
+
+def strict_journal_candidates(sheet: str, party: str, journal_rows: list[dict[str, Any]], row_tb_code: str = "") -> list[dict[str, Any]]:
+    """Shared writer/reviewer candidate rule for occurrence-date evidence.
+
+    A journal line qualifies when its counterparty matches and it sits on
+    the sheet's own account root, an account named after the sheet, or the
+    detail row's own (possibly reclassified) source account code.
+    """
+    party = normalize_counterparty_display(party)
+    root = SHEET_ACCOUNT_ROOTS.get(sheet)
+    if not root or not party:
+        return []
+    direction = "credit" if sheet in PAYABLE_DETAIL_SHEETS else "debit"
+    accepted = []
+    for row in journal_rows:
+        parties = {normalize_counterparty_display(extract_entity_from_text(clean(row.get(k))))
+                   for k in ("vendor_name", "counterparty_desc") if row.get(k)}
+        name = clean(row.get("account_name")).replace("预收款项", "预收账款")
+        same_name = name == sheet or name.startswith(sheet + "_") or name.startswith(sheet + "-")
+        code = clean(row.get("tb_code"))
+        same_code = code.startswith(root)
+        own_code = bool(row_tb_code) and code == clean(row_tb_code)
+        if party not in parties or not (same_name or same_code or own_code):
+            continue
+        if name and any(name.startswith(other) for other in SHEET_ACCOUNT_ROOTS if other != sheet):
+            continue
+        if not isinstance(row.get(direction), (int, float)) or row[direction] < .005 or not row.get("gl_date"):
+            continue
+        accepted.append(row)
+    return accepted
+
+
+def resolve_tb_counterparty(tb_code: str, aux_name: str, journal_entity_index: dict[str, list[dict[str, Any]]] | None = None) -> str:
+    """Shared TB-row counterparty rule for writer and reviewer.
+
+    A valid TB aux name always wins. A forbidden or empty name falls back
+    to the journal entity with the largest single movement on the same
+    account; without usable evidence the row stays unresolved ('').
+    """
+    current = clean(aux_name)
+    if current and classify_counterparty_text(current)["is_valid"]:
+        return current
+    for exception in ALLOWED_EXCEPTION_COUNTERPARTIES:
+        if exception in current:
+            return exception
+    matches = (journal_entity_index or {}).get(str(tb_code), [])
+    if not matches:
+        return ""
+    best = max(matches, key=lambda m: abs(float(m.get("debit", 0.0) or 0.0) - float(m.get("credit", 0.0) or 0.0)))
+    entity = clean(best.get("entity"))
+    if entity and classify_counterparty_text(entity)["is_valid"]:
+        return normalize_counterparty_display(entity)
+    return ""
 
 
 ENTITY_BRACKET_RE = re.compile(r"\[[^\]]+\]([^\[\]/]+)")
@@ -829,13 +894,34 @@ def parse_balance_sheet(path: Path, cover_source=None) -> dict[str, Any]:
     sheet = next((s for s in wb if '资产负债表' in s.title), wb.worksheets[0])
     values_current: dict[str, float] = {}
     values_prior: dict[str, float] = {}
+    single_sided_header = None
+    for header_row in range(1, min(sheet.max_row, 20) + 1):
+        if (clean(sheet.cell(header_row, 3).value) == "期末余额"
+                and clean(sheet.cell(header_row, 2).value) in ("年初余额", "期初余额")
+                and not clean(sheet.cell(header_row, 1).value)):
+            single_sided_header = header_row
+            break
     if sheet.max_column >= 10 and clean(sheet.cell(6, 4).value) == "期末余额":
         left_current_col, left_prior_col = 4, 5
         right_label_col, right_current_col, right_prior_col = 7, 9, 10
     else:
         left_current_col, left_prior_col = 3, 4
         right_label_col, right_current_col, right_prior_col = 5, 6, 7
-    for r in range(1, sheet.max_row + 1):
+    if single_sided_header is not None:
+        # ERP export: labels in column A, 年初余额/期末余额 in columns B/C.
+        section_headers = {"期末余额", "流动资产", "非流动资产", "流动负债", "非流动负债",
+                           "所有者权益", "所有者权益（或股东权益）"}
+        for r in range(single_sided_header + 1, sheet.max_row + 1):
+            label = clean(sheet.cell(r, 1).value).replace("帐", "账").strip()
+            if label and not label.endswith("：") and label not in section_headers:
+                values_current[label] = number(sheet.cell(r, 3).value)
+                values_prior[label] = number(sheet.cell(r, 2).value)
+        # ERP exports may carry both an explicit-zero 其他流动负债 row and a
+        # legacy 预提费用 row; they are the same statement line, so merge.
+        for values in (values_current, values_prior):
+            if "其他流动负债" in values and "预提费用" in values:
+                values["其他流动负债"] += values.pop("预提费用")
+    for r in ([] if single_sided_header is not None else range(1, sheet.max_row + 1)):
         left_label = clean(sheet.cell(r, 2).value).replace("帐", "账").strip()
         left_current = number(sheet.cell(r, left_current_col).value)
         left_prior = number(sheet.cell(r, left_prior_col).value) if sheet.max_column >= left_prior_col else left_current
@@ -1035,6 +1121,8 @@ def load_journal_rows_from_xlsx_xml(path: Path) -> list[dict[str, Any]]:
             values[col] = xlsx_cell_text(cell, shared_strings, ns)
         raw_rows[row_idx] = values
     header_row = {}
+    header_row_idx = 0
+    erp_layout = False
     for candidate_row in range(1, min(max(raw_rows), 12) + 1):
         values = raw_rows.get(candidate_row, {})
         header_values = {clean(value) for value in values.values() if clean(value)}
@@ -1043,8 +1131,19 @@ def load_journal_rows_from_xlsx_xml(path: Path) -> list[dict[str, Any]]:
             header_row_idx = candidate_row
             break
     else:
-        header_row_idx = 1
-        header_row = raw_rows.get(header_row_idx, {})
+        for candidate_row in range(1, min(max(raw_rows), 12) + 1):
+            values = raw_rows.get(candidate_row, {})
+            header_values = {clean(value) for value in values.values() if clean(value)}
+            if "会计科目代码" in header_values and (
+                "往来描述" in header_values or "供应商名称" in header_values
+            ):
+                header_row = values
+                header_row_idx = candidate_row
+                erp_layout = True
+                break
+        else:
+            header_row_idx = 1
+            header_row = raw_rows.get(header_row_idx, {})
     header = {clean(value): col for col, value in header_row.items() if clean(value)}
 
     def col_for(*names: str, default: str = "") -> str:
@@ -1053,13 +1152,24 @@ def load_journal_rows_from_xlsx_xml(path: Path) -> list[dict[str, Any]]:
                 return header[name]
         return default
 
-    date_col = col_for("业务日期", "记账日期", default="B")
-    summary_col = col_for("摘要", default="K")
-    code_col = col_for("科目编码", default="L")
-    account_col = col_for("科目名称", default="M")
-    debit_col = col_for("借方", default="P")
-    credit_col = col_for("贷方", default="Q")
-    counterparty_col = col_for("核算项目", "往来单位", "客商")
+    if erp_layout:
+        date_col = col_for("GL日期", default="C")
+        summary_col = col_for("日记帐摘要", default="L")
+        code_col = col_for("会计科目代码", default="AF")
+        account_col = col_for("会计科目描述", default="AR")
+        debit_col = col_for("本币借项发生额", default="U")
+        credit_col = col_for("本币贷项发生额", default="V")
+        counterparty_col = col_for("往来描述", "供应商名称", default="AT")
+        vendor_col = col_for("供应商名称", default="Z")
+    else:
+        date_col = col_for("业务日期", "记账日期", default="B")
+        summary_col = col_for("摘要", default="K")
+        code_col = col_for("科目编码", default="L")
+        account_col = col_for("科目名称", default="M")
+        debit_col = col_for("借方", default="P")
+        credit_col = col_for("贷方", default="Q")
+        counterparty_col = col_for("核算项目", "往来单位", "客商")
+        vendor_col = counterparty_col
     rows: list[dict[str, Any]] = []
     for row_idx in sorted(raw_rows):
         if row_idx <= header_row_idx:
@@ -1071,7 +1181,25 @@ def load_journal_rows_from_xlsx_xml(path: Path) -> list[dict[str, Any]]:
         if not tb_code and not summary:
             continue
         raw_gl_date = clean(values.get(date_col, "")) or clean(values.get("B", ""))
-        counterparty_desc = clean(values.get(counterparty_col, ""))
+        counterparty_raw = clean(values.get(counterparty_col, ""))
+        vendor_raw = clean(values.get(vendor_col, ""))
+        if erp_layout:
+            if "内部往来" in account_name:
+                primary, secondary = counterparty_raw, vendor_raw
+            else:
+                primary, secondary = vendor_raw, counterparty_raw
+            chosen_counterparty = (
+                primary
+                if primary and primary not in COUNTERPARTY_FORBIDDEN_TERMS
+                else secondary
+            )
+            if chosen_counterparty in COUNTERPARTY_FORBIDDEN_TERMS:
+                chosen_counterparty = ""
+            vendor_name = chosen_counterparty
+            counterparty_desc = chosen_counterparty
+        else:
+            counterparty_desc = counterparty_raw
+            vendor_name = vendor_raw or counterparty_desc
         rows.append(
             {
                 "row": row_idx,
@@ -1081,7 +1209,7 @@ def load_journal_rows_from_xlsx_xml(path: Path) -> list[dict[str, Any]]:
                 "account_name": account_name,
                 "debit": number(values.get(debit_col, "")),
                 "credit": number(values.get(credit_col, "")),
-                "vendor_name": counterparty_desc,
+                "vendor_name": vendor_name,
                 "counterparty_desc": counterparty_desc,
                 "line_desc": summary.replace("_x000D_", " ").strip(),
             }
@@ -1422,6 +1550,195 @@ def apply_tax_fee_presentation_openpyxl(ws, rows: list[dict[str, Any]]) -> list[
     return display_rows
 
 
+PAYROLL_ACCOUNT_ROOT = "2211"
+PAYROLL_NAME_STRIP_PREFIXES = ("应付雇员成本-", "社会保障-")
+JOURNAL_NOISE_KEYWORDS = ("冲销", "红字", "更正", "结转")
+
+
+def account_code_family_prefix(code: str) -> str:
+    """Hierarchy prefix of a zero-padded account code (trailing zeros stripped)."""
+    return clean(code).rstrip("0")
+
+
+def normalize_payroll_sub_name(source_name: Any, *, project_overrides: dict[str, str] | None = None) -> str:
+    """Strip stable payroll account-family prefixes; keep the remainder traceable.
+
+    Unknown names are returned unchanged (no silent guessing). Project-level
+    overrides must be explicit mappings supplied by the caller.
+    """
+    original = clean(source_name)
+    if project_overrides and original in project_overrides:
+        return clean(project_overrides[original])
+    name = original
+    for prefix in PAYROLL_NAME_STRIP_PREFIXES:
+        name = name.removeprefix(prefix)
+    return name or original
+
+
+def select_account_journal_date(
+    tb_code: str,
+    journal_rows: list[dict[str, Any]],
+    *,
+    direction: str = "credit",
+) -> dict[str, Any] | None:
+    """Pick the last real business journal line for one account code.
+
+    Counterparty-independent: occurrence-date evidence attaches to the
+    account itself. Reversal/red-ink/correction/carryforward noise lines are
+    filtered first; the newest qualifying line wins.
+    """
+    code = clean(tb_code)
+    if not code:
+        return None
+    best: dict[str, Any] | None = None
+    for row in journal_rows or []:
+        if clean(row.get("tb_code")) != code:
+            continue
+        text = f"{clean(row.get('summary', ''))} {clean(row.get('line_desc', ''))}"
+        if any(keyword in text for keyword in JOURNAL_NOISE_KEYWORDS):
+            continue
+        amount = row.get(direction, 0.0)
+        if not isinstance(amount, (int, float)) or amount < 0.005:
+            continue
+        gl_date = row.get("gl_date")
+        if not hasattr(gl_date, "toordinal"):
+            continue
+        if best is None or gl_date.toordinal() > best["gl_date"].toordinal():
+            best = row
+    return best
+
+
+def build_payroll_rows(
+    tb_rows: list[dict[str, Any]],
+    journal_rows: list[dict[str, Any]],
+    *,
+    bs_total: float,
+    report_date: Any = None,
+    date_policy: str = "journal_last_real_credit",
+    project_overrides: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Build source-driven 2211 leaf detail rows with lineage and reconciliation.
+
+    Returns a dict with ``status`` (``ok``/``blocked``), ``rows``,
+    ``unreconciled_reason`` and ``lineage``. A total mismatch never falls
+    back to a fake single summary row masquerading as detail.
+    """
+    codes = [
+        clean(row.get("tb_code"))
+        for row in tb_rows
+        if clean(row.get("tb_code")).startswith(PAYROLL_ACCOUNT_ROOT)
+        and abs(float(row.get("book_value", 0.0) or 0.0)) >= 0.005
+    ]
+    rows: list[dict[str, Any]] = []
+    lineage: list[dict[str, Any]] = []
+    seen_names: dict[str, str] = {}
+    collision = False
+    for row in tb_rows:
+        code = clean(row.get("tb_code"))
+        if not code.startswith(PAYROLL_ACCOUNT_ROOT):
+            continue
+        amount = round(float(row.get("book_value", 0.0) or 0.0), 2)
+        if abs(amount) < 0.005:
+            continue
+        family = account_code_family_prefix(code)
+        is_parent = bool(family) and any(
+            other != code and other.startswith(family) for other in codes
+        )
+        if is_parent:
+            continue
+        source_name = clean(row.get("sub_name") or row.get("tb_account_name", ""))
+        sub_name = normalize_payroll_sub_name(source_name, project_overrides=project_overrides)
+        if sub_name in seen_names and seen_names[sub_name] != code:
+            # Name collision between different source accounts: keep the
+            # fuller source name on both rows and raise a lineage warning.
+            collision = True
+            sub_name = source_name
+            for existing in rows:
+                if existing["source_account_code"] == seen_names.get(normalize_payroll_sub_name(existing.get("_source_name", ""), project_overrides=project_overrides)):
+                    existing["sub_name"] = existing.get("_source_name", existing["sub_name"])
+        seen_names[sub_name] = code
+        date_value = None
+        date_source = ""
+        match = select_account_journal_date(code, journal_rows, direction="credit")
+        if match is not None:
+            date_value = match.get("gl_date")
+            date_source = "journal_last_real_credit"
+        elif date_policy == "reporting_date_allowed" and report_date is not None:
+            date_value = report_date
+            date_source = "reporting_date_policy"
+        entry = {
+            "counterparty": "",
+            "sub_name": sub_name,
+            "book_value": amount,
+            "tb_code": code,
+            "date_value": date_value,
+            "date_source": date_source,
+            "fill_mode": "detail_fillable",
+            "fill_reason": "",
+            "source_account_code": code,
+            "source_row_id": f"tb:{code}",
+            "_source_name": source_name,
+        }
+        rows.append(entry)
+        lineage.append({
+            "source_row_id": f"tb:{code}",
+            "source_account_code": code,
+            "source_account_name": source_name,
+            "presented_name": sub_name,
+            "book_value": amount,
+            "date_source": date_source or "evidence_boundary_blank",
+        })
+    for entry in rows:
+        entry.pop("_source_name", None)
+    if collision:
+        lineage.append({"warning": "payroll_name_collision_full_source_name_kept"})
+    total = round(sum(item["book_value"] for item in rows), 2)
+    target = round(abs(float(bs_total or 0.0)), 2)
+    if rows and abs(total - target) >= 0.005:
+        return {
+            "status": "blocked",
+            "rows": rows,
+            "unreconciled_reason": f"payroll_leaf_total_{total}_vs_bs_{target}",
+            "lineage": lineage,
+        }
+    if not rows and target >= 0.005:
+        return {
+            "status": "blocked",
+            "rows": rows,
+            "unreconciled_reason": "payroll_no_2211_leaf_rows_vs_bs_" + str(target),
+            "lineage": lineage,
+        }
+    return {"status": "ok", "rows": rows, "unreconciled_reason": "", "lineage": lineage}
+
+
+def resolve_detail_page_state(
+    sheet_name: str,
+    bs_value: float,
+    source_rows: list[dict[str, Any]],
+    scope: dict[str, Any] | None = None,
+) -> str:
+    """Resolve the handling state of a detail page before any write.
+
+    - ``not_in_scope_hide``: page is out of scope; hide without touching body.
+    - ``detail_fillable``: source rows carry non-zero amounts.
+    - ``placeholder_only``: BS non-zero but no source detail; explicit
+      aggregate placeholder or blocked handling, never a normal empty page.
+    - ``zero_balance_cleanup``: zero balance and no rows; clear only legal
+      body input cells (including legacy row indices) and preserve headers,
+      formulas, merges and the fixed footer.
+    """
+    if scope is not None and not bool(scope.get("in_scope", True)):
+        return "not_in_scope_hide"
+    has_rows = any(
+        abs(float(row.get("book_value", 0.0) or 0.0)) >= 0.005 for row in (source_rows or [])
+    )
+    if has_rows:
+        return "detail_fillable"
+    if abs(float(bs_value or 0.0)) >= 0.005:
+        return "placeholder_only"
+    return "zero_balance_cleanup"
+
+
 def group_rows_for_y71(
     mapping: dict[str, Any],
     tb_rows: list[dict[str, Any]],
@@ -1472,7 +1789,9 @@ def group_rows_for_y71(
             amount = row["credit_end"] - row["debit_end"]
         else:
             amount = row["credit_end"]
-        if sheet in {"应付账款", "其他应付款"} and not balance_class_override:
+        if row["tb_code"] == "2241990000":
+            amount = row["credit_end"] - row["debit_end"]
+        if sheet in {"应付账款", "其他应付款"} and not balance_class_override and row["tb_code"] != "2241990000":
             amount = abs(amount)
         if sheet in source_reconciliation:
             source_reconciliation[sheet].append(
@@ -1520,13 +1839,14 @@ def group_rows_for_y71(
                     for match in matches
                 ]
             if journal_matches:
-                best = max(journal_matches, key=lambda x: abs(float(x.get("debit", 0.0) or 0.0) - float(x.get("credit", 0.0) or 0.0)))
-                entity = clean(best.get("entity"))
-                summary = clean(best.get("business_desc") or best.get("summary"))
-                if entity and classify_counterparty_text(entity)["is_valid"]:
+                current_name = clean(item.get("counterparty", ""))
+                resolved_name = resolve_tb_counterparty(tb_code, current_name, {tb_code: journal_matches})
+                if resolved_name and resolved_name != current_name:
+                    best = max(journal_matches, key=lambda x: abs(float(x.get("debit", 0.0) or 0.0) - float(x.get("credit", 0.0) or 0.0)))
+                    summary = clean(best.get("business_desc") or best.get("summary"))
                     item = {
                         **item,
-                        "counterparty": normalize_counterparty_display(entity),
+                        "counterparty": resolved_name,
                         "sub_name": normalize_business_desc(clean(best.get("line_desc") or summary or item.get("sub_name", "")), item.get("sub_name", "")),
                         "date_value": best.get("gl_date"),
                         }
@@ -1638,6 +1958,66 @@ def group_rows_for_y71(
         if clean(item.get("sub_name", "")) != "跨币种中转" and item.get("tb_code") != "BS_GAP"
     ]
 
+    for empty_sheet, bs_line in (
+        ("应收账款", "应收账款"),
+        ("预付账款", "预付账款"),
+        ("其他应收款", "其他应收款"),
+        ("预收账款", "预收账款"),
+    ):
+        if grouped.get(empty_sheet):
+            continue
+        page_state = resolve_detail_page_state(
+            empty_sheet, bs_values.get(bs_line, 0.0), grouped.get(empty_sheet, []), {"in_scope": True})
+        if page_state == "placeholder_only":
+            grouped[empty_sheet] = [
+                {
+                    "counterparty": "",
+                    "sub_name": f"{empty_sheet}账面价值站位",
+                    "book_value": round(abs(float(bs_values.get(bs_line, 0.0) or 0.0)), 2),
+                    "tb_code": "BS",
+                    "fill_mode": "placeholder_only",
+                    "fill_reason": "balance_sheet_total_placeholder",
+                }
+            ]
+
+    payroll_tb = [row for row in tb_rows if str(row.get("tb_code", "")).startswith(PAYROLL_ACCOUNT_ROOT)]
+    payroll_codes = [
+        str(row.get("tb_code", ""))
+        for row in payroll_tb
+        if abs(float(row.get("credit_end", 0.0) or 0.0) - float(row.get("debit_end", 0.0) or 0.0)) >= 0.005
+    ]
+    payroll_leaf_rows = []
+    for row in payroll_tb:
+        code = str(row.get("tb_code", ""))
+        amount = round(float(row.get("credit_end", 0.0) or 0.0) - float(row.get("debit_end", 0.0) or 0.0), 2)
+        if abs(amount) < 0.005:
+            continue
+        family = account_code_family_prefix(code)
+        if family and any(other != code and other.startswith(family) for other in payroll_codes):
+            continue
+        payroll_leaf_rows.append(
+            {
+                "counterparty": "",
+                "sub_name": clean(row.get("tb_account_name", "")),
+                "book_value": amount,
+                "tb_code": code,
+                "detail_policy": "detail_fillable",
+            }
+        )
+    payroll_bs_total = round(float(bs_values.get("应付职工薪酬", 0.0) or 0.0), 2)
+    if not payroll_leaf_rows and abs(payroll_bs_total) >= 0.005:
+        # Keep the page in scope so stage-2 can emit an explicit blocked
+        # placeholder instead of silently dropping the non-zero BS line.
+        payroll_leaf_rows.append(
+            {
+                "counterparty": "",
+                "sub_name": "应付职工薪酬",
+                "book_value": abs(payroll_bs_total),
+                "tb_code": "BS",
+                "detail_policy": "placeholder_only",
+            }
+        )
+
     group_rows_for_y71.source_reconciliation = source_reconciliation
     return [
         ("银行存款", sorted(grouped["银行存款"], key=lambda x: -abs(x["book_value"])), "cash"),
@@ -1648,6 +2028,7 @@ def group_rows_for_y71(
         ("预收账款", sorted(grouped["预收账款"], key=lambda x: -abs(x["book_value"])), "payable"),
         ("其他应付款", sorted(collapse_offsetting_rows("其他应付款", grouped["其他应付款"]), key=lambda x: -abs(x["book_value"])), "payable"),
         ("应交税费", sorted(grouped["应交税费"], key=lambda x: -abs(x["book_value"])), "tax"),
+        ("职工薪酬", payroll_leaf_rows, "payable"),
     ]
 
 
@@ -2175,7 +2556,8 @@ def write_simple_detail_sheet(ws, rows: list[dict[str, Any]], kind: str, protect
         page_rule = PAGE_RULES.get(ws.title)
         if page_rule and row_item.get("fill_mode") == "detail_fillable":
             account_type = page_rule["account_type"]
-            selected = select_journal_entry(row_item.get("counterparty", ""), float(row_item.get("book_value", 0.0) or 0.0), account_type, journal_rows)
+            row_candidates = strict_journal_candidates(ws.title, row_item.get("counterparty", ""), journal_rows, row_item.get("tb_code", ""))
+            selected = select_journal_entry(row_item.get("counterparty", ""), float(row_item.get("book_value", 0.0) or 0.0), account_type, row_candidates)
             if selected is not None:
                 row_item["date_value"] = selected.get("gl_date")
                 candidate_sub_name = normalize_business_desc(
@@ -2194,11 +2576,24 @@ def write_simple_detail_sheet(ws, rows: list[dict[str, Any]], kind: str, protect
             elif ws.title in {"其他应收款", "其他应付款"}:
                 row_item["evidence_boundary"] = "no_journal_match"
                 row_item["remark"] = "序时账及客商明细未检出发生记录"
+        if ws.title in SHEET_ACCOUNT_ROOTS and row_item.get("date_value") in (None, "") and clean(row_item.get("tb_code", "")):
+            # Account-driven occurrence-date fallback (Skill 六页日期规则):
+            # date evidence attaches to the account itself and must not depend
+            # on counterparty evidence or counterparty-based journal matching.
+            direction = "credit" if ws.title in PAYABLE_DETAIL_SHEETS else "debit"
+            account_match = select_account_journal_date(row_item.get("tb_code"), journal_rows, direction=direction)
+            if account_match is not None:
+                row_item["date_value"] = account_match.get("gl_date")
+                row_item["date_source"] = f"journal_account_last_real_{direction}"
+            elif not clean(row_item.get("remark", "")):
+                row_item["evidence_boundary"] = "no_journal_match"
+                row_item["remark"] = "序时账未检出匹配分录"
         age_bucket, age_bucket_col = derive_age_bucket(row_item.get("date_value"),
             base_date=getattr(ws, '_report_date', None))
         row_item["age_bucket"] = age_bucket
         row_item["age_bucket_col"] = age_bucket_col
         row_item["bucket_amount"] = row_item.get("book_value")
+        written_cells: set[str] = set()
         for col, field_name in template:
             if field_name == "row_index":
                 value = idx
@@ -2208,13 +2603,17 @@ def write_simple_detail_sheet(ws, rows: list[dict[str, Any]], kind: str, protect
                 bucket_col = row_item.get("age_bucket_col")
                 if bucket_col and f"{bucket_col}{r}" in writable_cells:
                     safe_set(ws, f"{bucket_col}{r}", row_item.get("bucket_amount"), protection, registry, kind="detail_body_write")
+                    written_cells.add(f"{bucket_col}{r}")
                 continue
             else:
                 value = row_item.get(field_name)
             if locked and ws[f'{col}{r}'].data_type == 'f':
                 continue  # Formula-derived field; validate its calculated value later.
+            if locked and f'{col}{r}' not in inputs:
+                continue  # Locked template: only confirmed input cells may be written.
             safe_set(ws, f"{col}{r}", value, protection, registry, kind="detail_body_write")
-        written.append({**row_item, "_written_row": r, "_sheet": ws.title})
+            written_cells.add(f"{col}{r}")
+        written.append({**row_item, "_written_row": r, "_sheet": ws.title, "_written_cells": sorted(written_cells)})
     if not locked and ws.title == "应收账款":
         gross_total = round(sum(float(item.get("book_value", 0.0) or 0.0) for item in rows_to_write), 2)
         bs_total = round(float(getattr(write_simple_detail_sheet, "_bs_values", {}).get("应收账款", 0.0) or 0.0), 2)
@@ -2375,7 +2774,7 @@ def build_semantic_validation_report(
         expected_amount = sheet_expected_amounts.get(sheet_name, 0.0)
         placeholder_count = placeholder_row_counts.get(sheet_name, 0)
         if sheet_name in mandatory_real_detail_sheets and expected_amount >= 0.005 and row_count <= 0:
-            if sheet_name == "其他应付款" and expected_amount <= 1000 and placeholder_count > 0:
+            if expected_amount <= 1000 and placeholder_count > 0:
                 continue
             failures.append({"sheet": sheet_name, "reason": "placeholder_only_not_acceptable_for_detail_sheet"})
             continue
@@ -3451,18 +3850,7 @@ def stage2_postfix_key_sheets(
     bs_values = bs["values"]
     fixed_asset_value = round(float(bs_values.get("固定资产", 0.0) or bs_values.get("固定资产净值", 0.0) or 0.0), 2)
     deferred_income = round(float(bs_values.get("递延收益", 0.0) or 0.0), 2)
-    payroll_value = round(float(bs_values.get("应付职工薪酬", 0.0) or 0.0), 2)
     long_equity_value = round(float(bs_values.get("长期股权投资", 0.0) or 0.0), 2)
-    if "职工薪酬" in wb.sheetnames and abs(payroll_value) >= 0.005:
-        ws = wb["职工薪酬"]
-        for cell_ref, value in {
-            "A6": 1,
-            "B6": "应付职工薪酬",
-            "F6": payroll_value,
-            "G6": payroll_value,
-        }.items():
-            ws[cell_ref] = value
-            writes.append({"sheet": "职工薪酬", "cell": cell_ref, "value": value})
     if "股权投资" in wb.sheetnames and abs(long_equity_value) >= 0.005:
         ws = wb["股权投资"]
         for cell_ref, value in {
@@ -3472,8 +3860,26 @@ def stage2_postfix_key_sheets(
             "I6": long_equity_value,
             "J6": long_equity_value,
         }.items():
+            if ws[cell_ref].data_type == 'f':
+                continue
             ws[cell_ref] = value
             writes.append({"sheet": "股权投资", "cell": cell_ref, "value": value})
+
+    other_current_liab = round(float(bs_values.get("其他流动负债", 0.0) or 0.0), 2)
+    if "其他流动负债" in wb.sheetnames and abs(other_current_liab) >= 0.005:
+        ws = wb["其他流动负债"]
+        for cell_ref, value in {
+            "A6": 1,
+            "B6": "预提费用",
+            "D6": "预提费用",
+            "E6": other_current_liab,
+            "G6": other_current_liab,
+            "H6": other_current_liab,
+        }.items():
+            if ws[cell_ref].data_type == 'f':
+                continue
+            ws[cell_ref] = value
+            writes.append({"sheet": "其他流动负债", "cell": cell_ref, "value": value})
 
 
 
@@ -3659,6 +4065,7 @@ def stage2_fill_detail_pages_from_trial_balance(
         )
 
     rebuilt = []
+    payroll_lineage: dict[str, Any] = {}
     for sheet_name, rows, kind in sheet_plan:
         if sheet_name == "银行存款":
             if bank_account_rows:
@@ -3706,7 +4113,16 @@ def stage2_fill_detail_pages_from_trial_balance(
             rebuilt.append((sheet_name, filtered, kind))
             continue
         if sheet_name == "职工薪酬":
-            amount = abs(float(bs["values"].get("应付职工薪酬", 0.0) or 0.0))
+            bs_total = abs(float(bs["values"].get("应付职工薪酬", 0.0) or 0.0))
+            payroll_result = build_payroll_rows(
+                rows, journal_rows, bs_total=bs_total,
+                report_date=bs.get("report_date"), date_policy="journal_last_real_credit")
+            payroll_lineage.update(payroll_result)
+            if payroll_result["status"] == "ok":
+                rebuilt.append((sheet_name, payroll_result["rows"], kind))
+                continue
+            # 叶子合计与 BS 不一致或无叶子来源：显式 placeholder 站位并保留
+            # 差异原因，绝不回退为伪装 detail_fillable 的单行汇总。
             rebuilt.append(
                 (
                     sheet_name,
@@ -3714,12 +4130,13 @@ def stage2_fill_detail_pages_from_trial_balance(
                         {
                             "counterparty": "",
                             "sub_name": "应付职工薪酬",
-                            "book_value": amount,
-                            "fill_mode": "detail_fillable",
-                            "fill_reason": "",
+                            "book_value": bs_total,
+                            "fill_mode": "placeholder_only",
+                            "fill_reason": "payroll_reconcile_blocked",
+                            "remark": payroll_result["unreconciled_reason"],
                         }
                     ]
-                    if amount >= 0.005
+                    if bs_total >= 0.005
                     else [],
                     kind,
                 )
@@ -3800,6 +4217,7 @@ def stage2_fill_detail_pages_from_trial_balance(
     return sheet_plan, completed_pages, placeholder_pages, all_written_rows, {
         "source_reconciliation": {},
         "bs_backfill_writes": [],
+        "payroll_lineage": payroll_lineage,
     }
 
 

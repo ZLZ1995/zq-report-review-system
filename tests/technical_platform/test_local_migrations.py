@@ -256,3 +256,41 @@ def test_real_legacy_store_preserves_all_existing_rows_and_attachment(tmp_path):
     with sqlite3.connect(path) as db:
         existing_inserts = [row for row in db.iterdump() if row.startswith('INSERT INTO')]
     assert existing_inserts == [row for row in before if row.startswith('INSERT INTO')]
+
+
+def test_v11_upgrade_rebuilds_step_state_check_and_preserves_rows(tmp_path):
+    from asset_based_agent.technical_platform.local_migrations import migrate_database
+    path = tmp_path / 'v11.sqlite'
+    legacy(path)
+    with sqlite3.connect(path) as db:
+        db.execute('''CREATE TABLE execution_plans (
+            run TEXT PRIMARY KEY, revision INTEGER NOT NULL CHECK(revision > 0),
+            plan_json TEXT NOT NULL, created TEXT NOT NULL)''')
+        db.execute('''CREATE TABLE execution_steps (
+            run TEXT NOT NULL REFERENCES execution_plans(run),
+            step_id TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending'
+              CHECK(state IN ('pending','running','succeeded','failed','cancelled','unknown')),
+            attempt INTEGER NOT NULL DEFAULT 0 CHECK(attempt >= 0),
+            claim_token TEXT, checkpoint_json TEXT, updated TEXT NOT NULL,
+            PRIMARY KEY(run, step_id))''')
+        db.execute('INSERT INTO execution_plans VALUES(?,?,?,?)',
+                   ('run-1', 1, '{}', '2026-09-19T00:00:00'))
+        db.execute('INSERT INTO execution_steps(run,step_id,state,attempt,updated) '
+                   "VALUES('run-1','execute','succeeded',1,'2026-09-19T00:00:01')")
+        db.commit()
+        with pytest.raises(sqlite3.IntegrityError):
+            db.execute("UPDATE execution_steps SET state='waiting_user' "
+                       "WHERE run='run-1' AND step_id='execute'")
+        db.rollback()
+        db.execute('PRAGMA user_version=11')
+    backup = migrate_database(path)
+    assert backup is not None and '-v11-' in backup.name
+    with sqlite3.connect(path) as db:
+        from asset_based_agent.technical_platform.local_migrations import SCHEMA_VERSION
+        assert db.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
+        row = db.execute('SELECT state,attempt FROM execution_steps '
+                         "WHERE run='run-1' AND step_id='execute'").fetchone()
+        assert tuple(row) == ('succeeded', 1)
+        assert db.execute('SELECT value FROM sample').fetchone()[0] == 'preserve-me'
+        db.execute("UPDATE execution_steps SET state='waiting_user' "
+                   "WHERE run='run-1' AND step_id='execute'")

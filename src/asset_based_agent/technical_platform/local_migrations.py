@@ -7,7 +7,7 @@ from contextlib import closing
 from pathlib import Path
 from uuid import uuid4
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 13
 
 
 def _version(db):
@@ -154,6 +154,176 @@ def apply_v11(db):
               FROM memories m JOIN projects p ON p.id=m.project''')
 
 
+def apply_v12(db):
+    # Rebuild execution_steps so a step may rest in 'waiting_user' while a run
+    # waits for clarification.  The migration connection runs with foreign
+    # keys disabled, so drop/rename is safe; child tables resolve the FK by
+    # name once the replacement table takes the original name.
+    # Very old/synthetic databases may legitimately lack the table; additive
+    # migration must still succeed for them.
+    if db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_steps'"
+    ).fetchone() is None:
+        return
+    db.execute('''CREATE TABLE execution_steps_v12 (
+        run TEXT NOT NULL REFERENCES execution_plans(run),
+        step_id TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending'
+          CHECK(state IN ('pending','running','succeeded','failed','cancelled',
+                          'waiting_user','unknown')),
+        attempt INTEGER NOT NULL DEFAULT 0 CHECK(attempt >= 0),
+        claim_token TEXT, checkpoint_json TEXT, updated TEXT NOT NULL,
+        PRIMARY KEY(run, step_id))''')
+    db.execute('''INSERT INTO execution_steps_v12
+        (run,step_id,state,attempt,claim_token,checkpoint_json,updated)
+        SELECT run,step_id,state,attempt,claim_token,checkpoint_json,updated
+        FROM execution_steps''')
+    db.execute('DROP TABLE execution_steps')
+    db.execute('ALTER TABLE execution_steps_v12 RENAME TO execution_steps')
+
+
+def apply_v13(db):
+    # Pi Agent Core durable session model (S03). Purely additive: ten new
+    # agent_* tables; legacy tables are never touched.
+    # Deviation from plan section 6 (recorded in the rebuild ledger): lane ids
+    # are session-scoped ('main' exists in every session), so agent_lanes uses
+    # PRIMARY KEY (session_id, id) and the open-operation partial unique index
+    # keys on (session_id, lane_id) instead of lane_id alone.
+    db.execute('''CREATE TABLE IF NOT EXISTS agent_sessions (
+        id TEXT PRIMARY KEY,
+        legacy_session_id TEXT UNIQUE,
+        project_id TEXT NOT NULL,
+        owner_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        schema_version INTEGER NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('active','archived','damaged')),
+        default_lane_id TEXT,
+        default_model_id TEXT,
+        permission_mode TEXT NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        last_activity_at TEXT NOT NULL)''')
+    db.execute('''CREATE TABLE IF NOT EXISTS agent_lanes (
+        id TEXT NOT NULL,
+        session_id TEXT NOT NULL REFERENCES agent_sessions(id),
+        name TEXT NOT NULL,
+        parent_lane_id TEXT,
+        anchor_entry_id TEXT,
+        leaf_entry_id TEXT,
+        state TEXT NOT NULL CHECK(state IN ('idle','running','suspended','recovering')),
+        revision INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (session_id, id),
+        UNIQUE(session_id, name))''')
+    db.execute('''CREATE TABLE IF NOT EXISTS conversation_entries (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES agent_sessions(id),
+        lane_id TEXT NOT NULL,
+        parent_id TEXT REFERENCES conversation_entries(id),
+        sequence INTEGER NOT NULL,
+        entry_type TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        operation_id TEXT,
+        turn_id TEXT,
+        schema_version INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(session_id, sequence),
+        FOREIGN KEY(session_id, lane_id) REFERENCES agent_lanes(session_id, id))''')
+    db.execute('''CREATE TABLE IF NOT EXISTS agent_operations (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES agent_sessions(id),
+        lane_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        status TEXT NOT NULL,
+        request_id TEXT NOT NULL UNIQUE,
+        source_entry_id TEXT NOT NULL REFERENCES conversation_entries(id),
+        accepted_context_sha256 TEXT NOT NULL,
+        model_id TEXT,
+        permission_snapshot_json TEXT NOT NULL,
+        file_scope_snapshot_json TEXT NOT NULL,
+        resource_snapshot_json TEXT NOT NULL,
+        current_turn_id TEXT,
+        error_code TEXT,
+        error_summary TEXT,
+        recovery_policy TEXT NOT NULL,
+        accepted_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT,
+        schema_version INTEGER NOT NULL,
+        FOREIGN KEY(session_id, lane_id) REFERENCES agent_lanes(session_id, id))''')
+    db.execute('''CREATE UNIQUE INDEX IF NOT EXISTS one_open_operation_per_lane
+        ON agent_operations(session_id, lane_id)
+        WHERE status IN ('accepted','running','waiting_input','waiting_approval',
+                         'deferred','suspended','aborting')''')
+    db.execute('''CREATE TABLE IF NOT EXISTS agent_turns (
+        id TEXT PRIMARY KEY,
+        operation_id TEXT NOT NULL REFERENCES agent_operations(id),
+        ordinal INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        model_request_id TEXT,
+        input_context_sha256 TEXT NOT NULL,
+        assistant_entry_id TEXT REFERENCES conversation_entries(id),
+        started_at TEXT NOT NULL,
+        finished_at TEXT,
+        error_code TEXT,
+        usage_json TEXT,
+        UNIQUE(operation_id, ordinal))''')
+    db.execute('''CREATE TABLE IF NOT EXISTS agent_tool_calls (
+        id TEXT PRIMARY KEY,
+        operation_id TEXT NOT NULL REFERENCES agent_operations(id),
+        turn_id TEXT NOT NULL REFERENCES agent_turns(id),
+        tool_name TEXT NOT NULL,
+        arguments_json TEXT NOT NULL,
+        arguments_sha256 TEXT NOT NULL,
+        risk_level TEXT NOT NULL,
+        authorization_id TEXT,
+        status TEXT NOT NULL,
+        result_entry_id TEXT REFERENCES conversation_entries(id),
+        idempotency_key TEXT NOT NULL UNIQUE,
+        started_at TEXT,
+        finished_at TEXT,
+        error_code TEXT)''')
+    db.execute('''CREATE TABLE IF NOT EXISTS agent_operation_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        lane_id TEXT NOT NULL,
+        operation_id TEXT,
+        turn_id TEXT,
+        tool_call_id TEXT,
+        event_type TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL)''')
+    db.execute('''CREATE TABLE IF NOT EXISTS turn_file_bindings (
+        operation_id TEXT NOT NULL REFERENCES agent_operations(id),
+        file_id TEXT NOT NULL,
+        binding_kind TEXT NOT NULL,
+        source_entry_id TEXT,
+        role TEXT,
+        sha256 TEXT NOT NULL,
+        PRIMARY KEY(operation_id, file_id, binding_kind))''')
+    db.execute('''CREATE TABLE IF NOT EXISTS project_facts (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        scope TEXT NOT NULL,
+        fact_key TEXT NOT NULL,
+        value_json TEXT NOT NULL,
+        source_entry_id TEXT,
+        confidence REAL,
+        status TEXT NOT NULL CHECK(status IN ('proposed','confirmed','rejected','superseded')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL)''')
+    db.execute('''CREATE TABLE IF NOT EXISTS context_compactions (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        lane_id TEXT NOT NULL,
+        source_start_entry_id TEXT NOT NULL,
+        source_end_entry_id TEXT NOT NULL,
+        source_sha256 TEXT NOT NULL,
+        summary_entry_id TEXT NOT NULL,
+        created_at TEXT NOT NULL)''')
+
+
 def migrate_database(path: Path) -> Path | None:
     path = path.resolve()
     if not path.is_file():
@@ -213,6 +383,10 @@ def migrate_database(path: Path) -> Path | None:
                 apply_v10(db)
             if previous_version < 11:
                 apply_v11(db)
+            if previous_version < 12:
+                apply_v12(db)
+            if previous_version < 13:
+                apply_v13(db)
             db.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
             db.commit()
             return backup

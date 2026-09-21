@@ -13,7 +13,15 @@ from .file_scope import freeze_scope
 from .generation import bundle_fingerprint
 from .planner import compile_proposal
 from .release_info import local_release
-from .skills import BUILTINS, DETAIL, GENERATORS, HISTORY, REVIEW
+from .skills import (
+    BUILTINS,
+    DETAIL,
+    FINANCIAL_BRIEF,
+    GENERATORS,
+    HISTORY,
+    REVIEW,
+    WORKFLOW_TO_SKILL,
+)
 from .task_spec import TaskSpec, snapshot_identity
 
 
@@ -30,7 +38,8 @@ def _fields(store, session_id, payload, proposal, files, identity, revision):
             or any(available.get(key) != value for key, value in by_id.items())):
         raise PermissionError('Planning files changed or are outside the project')
     for file in request.request.files:
-        if file.model_dump() != {key: by_id[file.id][key] for key in ('id', 'name', 'sha256')}:
+        if (file.model_dump(include={'id', 'name', 'sha256'}) !=
+                {key: by_id[file.id][key] for key in ('id', 'name', 'sha256')}):
             raise PermissionError('Planning file version changed')
     understanding = request.understanding
     builtin = {s.id: s for s in BUILTINS}
@@ -68,13 +77,20 @@ def _fields(store, session_id, payload, proposal, files, identity, revision):
     selected_skills = {s.step_id: s.skill_id for s in proposal.steps}
     for step in plan.steps:
         skill = builtin[step.skill_id]
-        if skill in GENERATORS and step.reference_inputs:
+        if skill in GENERATORS and step.reference_inputs and skill != DETAIL:
             raise ValueError('Generator reference roles are not supported by its input contract')
         roles = None
         if skill == HISTORY:
             if len(step.inputs) != 1:
                 raise ValueError('工商生成步骤需要唯一的工商变更Excel来源')
             roles = {'source_excel': step.inputs[0]}
+        if skill == FINANCIAL_BRIEF:
+            from .generation import infer_financial_roles
+            roles = infer_financial_roles([by_id[identity] for identity in step.inputs])
+        if skill == WORKFLOW_TO_SKILL:
+            if len(step.inputs) != 1:
+                raise ValueError('办公工作流契约校验需要唯一 JSON 文件')
+            roles = {'workflow_contract': step.inputs[0]}
         if skill == DETAIL and len(step.inputs) > 20:
             raise ValueError('单步资料识别最多20个文件')
         selected_skill = selected_skills[step.step_id]
@@ -153,6 +169,8 @@ def execute_compound_claimed(store, run_id, snapshot, cancel, progress, *, clien
                                    ToolDispatcher({s.tool: dispatch for s in plan.steps}), cancel, raise_errors=True)
     if status == 'cancelled':
         return {'kind': 'cancelled'}
+    if status == 'waiting_user':
+        return {'kind': 'waiting_user'}
     if status != 'succeeded':
         raise RuntimeError('组合任务未完成，请核对步骤状态；不要重复提交')
     return json.loads(store.run(run_id)['result'])

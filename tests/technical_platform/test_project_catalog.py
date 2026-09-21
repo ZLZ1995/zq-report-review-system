@@ -88,3 +88,25 @@ def test_update_database_inventory_blocks_when_historical_project_is_offline(tmp
     root.rename(tmp_path / 'offline')
     with pytest.raises(OSError, match='不可用'):
         catalog.update_database_inventory()
+
+
+def test_project_catalog_rename_pin_and_remove_only_changes_index(tmp_path):
+    root = tmp_path / 'business'
+    root.mkdir()
+    catalog = ProjectCatalog(tmp_path / 'index.sqlite', 'alice')
+    identity = catalog.create_project('old', root)
+    database = root / '.zq/platform.sqlite'
+    original = database.read_bytes()
+
+    catalog.rename_project(identity, 'new')
+    catalog.set_pinned(identity, True)
+    assert catalog.projects()[0]['name'] == 'new'
+    assert catalog.projects()[0]['pinned'] is True
+
+    renamed = database.read_bytes()
+    catalog.remove_from_sidebar(identity)
+    assert catalog.projects() == []
+    assert database.read_bytes() == renamed
+    assert database.read_bytes() != original
+    assert catalog.open_directory(root) == [identity]
+    assert catalog.projects()[0]['name'] == 'new'

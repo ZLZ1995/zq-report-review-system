@@ -1,5 +1,8 @@
+import hashlib
+import json
 import os
 import time
+import zipfile
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
@@ -88,4 +91,63 @@ def test_consultation_without_files_reaches_understanding_and_reply(tmp_path):
         assert messages[-1]['text'] == '审核不会修改原文件。'
     finally:
         window.client = None
+        window.close()
+
+
+def test_explicit_current_turn_skill_zip_installs_locally_without_model(tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    from asset_based_agent.technical_platform.skill_installation import (
+        SkillInstallation,
+    )
+
+    assert QApplication.instance() or QApplication([])
+    store = PlatformStore(tmp_path / 'state.db', 'test')
+    project = store.create_project('install')
+    store.create_session(project)
+    package = tmp_path / 'example.zip'
+    instructions = b'review only the selected files'
+    manifest = {'schema_version': 1, 'id': 'example.review', 'version': '1.0.0',
+                'name': 'Example review', 'adapter': 'report.review',
+                'capabilities': ['read_selected_files'], 'dependencies': {},
+                'files': {'SKILL.md': hashlib.sha256(instructions).hexdigest()}}
+    with zipfile.ZipFile(package, 'w') as archive:
+        archive.writestr('manifest.json', json.dumps(manifest))
+        archive.writestr('SKILL.md', instructions)
+    window = PlatformWindow(store)
+    window.reload_projects(project)
+    monkeypatch.setattr(QMessageBox, 'question',
+                        lambda *a, **k: QMessageBox.StandardButton.Yes)
+    try:
+        window.import_files([package])
+        window.composer.setPlainText('请安装这个 Skill 并注册到平台')
+        window.submit()
+        versions = SkillInstallation(store).list_versions()
+        assert [(row['skill_id'], row['enabled']) for row in versions] == [('example.review', 1)]
+        assert store.messages(window.session_id)[-1]['role'] == 'assistant'
+    finally:
+        window.close()
+
+
+def test_new_builtin_skills_route_locally_without_cloud_schema_change(tmp_path):
+    from asset_based_agent.technical_platform.skills import (
+        FINANCIAL_BRIEF,
+        WORKFLOW_TO_SKILL,
+    )
+
+    assert QApplication.instance() or QApplication([])
+    store = PlatformStore(tmp_path / 'state.db', 'test')
+    project = store.create_project('local skills')
+    store.create_session(project)
+    window = PlatformWindow(store)
+    window.reload_projects(project)
+    calls = []
+    window.execute_plan = lambda prompt, spec, **kwargs: calls.append(spec.id)
+    try:
+        window.composer.setPlainText('根据三期报表生成财务状况简表')
+        window.submit()
+        window.composer.setPlainText('校验这个办公工作流并制作 Skill')
+        window.submit()
+        assert calls == [FINANCIAL_BRIEF.id, WORKFLOW_TO_SKILL.id]
+    finally:
         window.close()

@@ -6,6 +6,7 @@ import argparse
 import html
 import json
 import os
+import shutil
 import sqlite3
 import sys
 import threading
@@ -58,6 +59,31 @@ from .task_spec import build_task_spec
 SERVER_URL = "https://zq-report-review.zeabur.app/api/v1"
 
 
+def installation_root() -> Path:
+    if os.environ.get('ZQ_INSTALLATION_ROOT'):
+        return Path(os.environ['ZQ_INSTALLATION_ROOT']).resolve()
+    if getattr(sys, 'frozen', False):
+        return Path(sys.executable).parent.resolve()
+    # Developer/test runs are not an installed product and must not dirty the repo.
+    return (Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation))
+            / 'ZQPlatform-development').resolve()
+
+
+def platform_settings_root() -> Path:
+    # 冒烟/验收可用 ZQ_SETTINGS_ROOT 把设置引出冻结目录；默认行为不变（便携安装不落 C 盘）。
+    override = os.environ.get('ZQ_SETTINGS_ROOT')
+    base = Path(override).resolve() if override else installation_root()
+    root = base / 'data' / 'settings'
+    root.mkdir(parents=True, exist_ok=True)
+    legacy = (Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation))
+              / 'ZQPlatform')
+    for name in ('client-instance.json', 'storage-locations.sqlite', 'project-locations.sqlite'):
+        source, target = legacy / name, root / name
+        if not target.exists() and source.is_file():
+            shutil.copy2(source, target)
+    return root
+
+
 def authenticate(parent=None):
     """Login before workspace construction; users never configure an API endpoint."""
     from ..report_review_app.services.remote_auth_service import (
@@ -68,7 +94,7 @@ def authenticate(parent=None):
     from .login import PlatformLogin
     from .session import PlatformSession
 
-    state_dir = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)) / "ZQPlatform"
+    state_dir = platform_settings_root()
     client = RemoteSessionClient(
         SERVER_URL,
         client_instance_id=load_or_create_client_instance_id(state_dir / "client-instance.json"),
@@ -128,11 +154,16 @@ class TaskWorker(QThread):
 
 
 class PlatformWindow(QMainWindow):
+    # S15 接线子集：Worker 线程 → GUI 线程的批准请求桥（queued，跨线程安全）
+    _approval_requested = Signal(str, str, str, object)
+
     def __init__(self, store: PlatformStore, *, client=None, models=None, storage_preferences=None):
         super().__init__()
         configure_fonts()
         self.store = store
         self.storage_preferences = storage_preferences
+        self._permission_mode_memory = 'risk'
+        self.last_turn_envelope = None
         self.browser_panel = None
         self.client, self.models = client, models or []
         self.registry = SkillRegistry()
@@ -147,6 +178,10 @@ class PlatformWindow(QMainWindow):
         self.update_worker = None
         self.available_update = None
         self._close_after_update = False
+        self._local_chain = None
+        self._agent_worker = None  # S15：新 Agent 路径轮次 Worker（不占用 task_manager）
+        self._feature_flags_cache = None
+        self._approval_requested.connect(self._handle_approval_request)
         self.network_state = "connected"
         self.setWindowTitle(
             "ZQ 技术平台" + (" · 本地交互预览" if client is None else "")
@@ -173,6 +208,207 @@ class PlatformWindow(QMainWindow):
         button.clicked.connect(callback)
         layout.addWidget(button)
         return button
+
+    def agent_permission_mode(self) -> str:
+        if self.storage_preferences is None:
+            return self._permission_mode_memory
+        try:
+            return self.storage_preferences.permission_mode(self.store.owner)
+        except (ValueError, OSError, sqlite3.Error):
+            return 'risk'
+
+    def refresh_permission_menu(self) -> None:
+        from .agent_permission_modes import permission_mode_options
+
+        mode = self.agent_permission_mode()
+        selected = next(item for item in permission_mode_options() if item.id == mode)
+        self.permission_button.setText(selected.title)
+        self.permission_button.setToolTip(selected.description)
+        menu = self.permission_button.menu()
+        menu.clear()
+        for item in permission_mode_options():
+            action = menu.addAction(f'{item.title}  —  {item.description}')
+            action.setCheckable(True)
+            action.setChecked(item.id == mode)
+            action.triggered.connect(
+                lambda _checked=False, value=item.id: self.set_agent_permission_mode(value)
+            )
+
+    def set_agent_permission_mode(self, mode: str) -> None:
+        from .agent_permission_modes import validate_permission_mode
+
+        mode = validate_permission_mode(mode)
+        if self.storage_preferences is None:
+            self._permission_mode_memory = mode
+        else:
+            try:
+                self.storage_preferences.set_permission_mode(self.store.owner, mode)
+            except (ValueError, OSError, sqlite3.Error):
+                self.status.setText('权限模式保存失败，已保留原设置。')
+                return
+        stopped = self.task_manager.cancel_all()
+        revoked = (self.browser_panel.task_leases.revoke_all()
+                   if self.browser_panel is not None else 0)
+        self.refresh_permission_menu()
+        suffix = (f'；已停止 {stopped} 个任务并撤销 {revoked} 个浏览器接管'
+                  if stopped or revoked else '')
+        self.status.setText(f'已切换为“{self.permission_button.text()}”{suffix}。')
+
+    def agent_operation_allowed(self, operation: str, title: str, text: str) -> bool:
+        from .agent_permission_modes import requires_confirmation
+
+        if not requires_confirmation(self.agent_permission_mode(), operation):
+            return True
+        return QMessageBox.question(
+            self, title, text,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) == QMessageBox.StandardButton.Yes
+
+    def generation_consent_required(self) -> bool:
+        from .agent_permission_modes import requires_confirmation
+
+        return requires_confirmation(self.agent_permission_mode(), 'generate_file')
+
+    # ------------------------------------------------------------ 新 Agent 接线
+    # 正式客户端只允许新 Agent；旧路由仅保留在源码中供迁移审计，不作为运行时回退。
+
+    def _feature_flags(self):
+        from .agent_switch import flags_store_for
+        from .flags import FeatureFlagStore
+
+        cache = self._feature_flags_cache
+        if cache is not None and cache.path is not None:
+            return cache
+        try:
+            resolved = flags_store_for(self.store)
+        except ValueError:
+            # ProjectCatalog 未激活（尚未创建/打开项目）：退回内存开关，
+            # 项目激活后下一次访问自动重新绑定持久化文件
+            if cache is None:
+                cache = FeatureFlagStore()
+                self._feature_flags_cache = cache
+            return cache
+        if cache is not None:  # 内存期勾选迁移进项目持久化文件
+            for category, on in cache.snapshot().items():
+                if on:
+                    resolved.set_enabled(category, True)
+        self._feature_flags_cache = resolved
+        return resolved
+
+    def refresh_grayscale_menu(self) -> None:
+        from .agent_switch import FLAG_LABELS, enabled_count
+        from .flags import FEATURE_FLAG_ORDER
+
+        flags = self._feature_flags()
+        menu = self.grayscale_button.menu()
+        menu.clear()
+        for category in FEATURE_FLAG_ORDER:
+            action = menu.addAction(FLAG_LABELS[category])
+            action.setCheckable(True)
+            action.setChecked(flags.enabled(category))
+            action.triggered.connect(
+                lambda _checked=False, key=category, item=action:
+                    self.set_grayscale_flag(key, item.isChecked())
+            )
+        total = len(FEATURE_FLAG_ORDER)
+        self.grayscale_button.setText(f'灰度：新路径 {enabled_count(flags)}/{total}')
+        self.grayscale_button.setToolTip(
+            '逐类切换到新 Agent 内核；默认全部关闭（旧路径），可随时退回。')
+
+    def set_grayscale_flag(self, category: str, enabled: bool) -> None:
+        from .agent_switch import FLAG_LABELS
+
+        self._feature_flags().set_enabled(category, enabled)
+        self.refresh_grayscale_menu()
+        target = '新路径' if enabled else '旧路径'
+        self.status.setText(f'灰度开关：{FLAG_LABELS[category]} → {target}。')
+
+    def _make_agent_gateway(self):
+        """装配新 Agent 网关；未连接服务端时返回 None，由调用方展示可行动失败。"""
+        from .agent_gateway import AgentGateway
+        from .agent_switch import ApproverBridge, client_model_port_factory
+
+        try:
+            model_factory = client_model_port_factory(
+                self.client, client_version=CLIENT_VERSION)
+        except ValueError:
+            self.status.setText('新 Agent 需要先连接服务端；本轮未发送。')
+            return None
+        model_id = self.model_combo.currentData()
+        provider_factory = None
+        if model_id:
+            from .model_port.provider_factory import production_provider_factory
+
+            provider_factory = production_provider_factory(self.client, model_id)
+        return AgentGateway(
+            self.store, self.session_id,
+            flags=self._feature_flags(),
+            model_port_factory=model_factory,
+            permission_mode_getter=self.agent_permission_mode,
+            provider_factory=provider_factory,
+            approver=ApproverBridge(self._ask_approval_gui),
+            force_all_tools=True)
+
+    def _try_agent_submit(self, prompt: str) -> bool:
+        """生产客户端只使用新 Agent；连接不完整时阻止旧路径接管。"""
+        if self._agent_worker is not None:
+            return True  # 上一轮未结束，吞掉重复提交（与旧 worker 语义一致）
+        gateway = self._make_agent_gateway()
+        if gateway is None:
+            self.status.setText('新 Agent 尚未连接服务端，本轮未发送；请先连接并重试。')
+            return True
+        from .agent_switch import AgentTurnWorker
+
+        self.store.append(self.session_id, 'user', prompt)  # 灰期双写：供 UI 显示
+        self.render_messages()
+        worker = AgentTurnWorker(gateway, prompt, parent=self)
+        worker.delta.connect(self._on_agent_delta)
+        worker.done.connect(self._on_agent_done)
+        worker.finished.connect(self._on_agent_worker_finished)
+        self._agent_worker = worker
+        self.composer.clear()
+        self.set_busy(True)
+        self.status.setText('新 Agent 路径：正在生成…')
+        worker.start()
+        return True
+
+    def _on_agent_delta(self, text: str) -> None:
+        if text:
+            self.status.setText(f'新 Agent 路径：{text}')
+
+    def _on_agent_done(self, result: dict) -> None:
+        reply = (result.get('reply') or '').strip()
+        if not reply:
+            reason = (result.get('error_message') or result.get('error_code')
+                      or result.get('status') or '未知原因')
+            reply = f'本轮未完成：{reason}。'
+        self.store.append(self.session_id, 'assistant', reply)  # 灰期双写
+        self.render_messages()
+        self.status.setText(reply)
+
+    def _on_agent_worker_finished(self) -> None:
+        self._agent_worker = None
+        self.set_busy(False)
+
+    def _ask_approval_gui(self, operation: str, title: str, reason: str) -> bool:
+        """ApproverBridge 在 Worker 线程内调用；转到 GUI 线程弹旧批准框。"""
+        if QThread.currentThread() is self.thread():
+            return self.agent_operation_allowed(operation, title, reason)
+        verdict = {}
+        ready = threading.Event()
+
+        def callback(ok) -> None:
+            verdict['ok'] = bool(ok)
+            ready.set()
+
+        self._approval_requested.emit(operation, title, reason, callback)
+        ready.wait()
+        return verdict.get('ok', False)
+
+    def _handle_approval_request(self, operation: str, title: str, reason: str,
+                                 callback) -> None:
+        callback(self.agent_operation_allowed(operation, title, reason))
 
     def _build(self):
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -215,17 +451,15 @@ class PlatformWindow(QMainWindow):
         from .project_tree import ProjectTree
         self.project_tree = ProjectTree(self)
         self.project_tree.currentItemChanged.connect(self.choose_tree_item)
+        self.project_tree.itemClicked.connect(self.project_tree_action)
         self.project_tree.customContextMenuRequested.connect(self.tree_menu)
         left.addWidget(self.project_tree, 3)
         self.button("恢复已归档会话", self.restore_session, left).setObjectName("mutedButton")
-        self.button("归档项目", self.archive, left).setObjectName("mutedButton")
         self.button("恢复已归档项目", self.restore_project, left).setObjectName(
             "mutedButton"
         )
         self.button("认领旧共享项目", self.claim_legacy_project, left).setObjectName("mutedButton")
-        self.button("外部 Skill 管理", self.manage_skills, left).setObjectName("mutedButton")
-        if self.storage_preferences is not None:
-            self.button('平台数据目录', self.configure_storage, left).setObjectName('mutedButton')
+        self.button("能力与 Skill", self.manage_skills, left).setObjectName("mutedButton")
         left.addSpacing(12)
         account = QLabel(
             "●  本地预览 <span style='color:#a5a7ae'> / 只读模式</span>"
@@ -288,6 +522,17 @@ class PlatformWindow(QMainWindow):
             self.model_combo.addItem(model["display_name"], model["model_id"])
         self.model_combo.setVisible(self.client is not None)
         actions.addWidget(self.model_combo)
+        self.permission_button = QPushButton(self)
+        self.permission_button.setAccessibleName('选择 Agent 权限模式')
+        self.permission_button.setMenu(QMenu(self.permission_button))
+        actions.addWidget(self.permission_button)
+        self.refresh_permission_menu()
+        self.grayscale_button = QPushButton(self)
+        self.grayscale_button.setAccessibleName('新 Agent 灰度开关')
+        self.grayscale_button.setMenu(QMenu(self.grayscale_button))
+        actions.addWidget(self.grayscale_button)
+        self.refresh_grayscale_menu()
+        self.grayscale_button.hide()
         self.stop = self.button("停止", self.cancel_run, actions)
         self.stop.setEnabled(False)
         self.send = self.button("执行 ↑", self.submit, actions)
@@ -422,14 +667,82 @@ class PlatformWindow(QMainWindow):
             return
         project, session = item.data(0, Qt.ItemDataRole.UserRole)
         self.project_tree.setCurrentItem(item)
-        if self.project_id != project:
-            return
         menu = QMenu(self)
-        menu.addAction('新建会话', self.new_session)
-        if session is not None and self.session_id == session:
+        if session is None:
+            menu.addAction('重命名项目', lambda: self.rename_project(project))
+            if isinstance(self.store, ProjectCatalog):
+                record = next((row for row in self.store.projects() if row['id'] == project), None)
+                pinned = bool(record and record.get('pinned'))
+                menu.addAction('取消置顶' if pinned else '置顶',
+                               lambda: self.pin_project(project, not pinned))
+            menu.addAction('归档项目', lambda: self.archive_project(project))
+            if isinstance(self.store, ProjectCatalog):
+                menu.addAction('从侧栏移除', lambda: self.remove_project(project))
+        elif self.project_id == project:
+            menu.addAction('新建会话', self.new_session)
+        if session is not None and self.project_id == project and self.session_id == session:
             menu.addAction('重命名会话', self.rename_session)
             menu.addAction('归档会话', self.archive_session)
         menu.exec(self.project_tree.viewport().mapToGlobal(position))
+
+    def project_tree_action(self, item, column):
+        project, session = item.data(0, Qt.ItemDataRole.UserRole)
+        if session is not None:
+            return
+        if column == 1:
+            self.rename_project(project)
+        elif column == 2:
+            self.tree_menu(self.project_tree.visualItemRect(item).center())
+
+    def rename_project(self, project):
+        current = next((row for row in self.store.projects() if row['id'] == project), None)
+        if current is None:
+            return
+        name, accepted = QInputDialog.getText(self, '重命名项目', '项目名称', text=current['name'])
+        if not accepted:
+            return
+        try:
+            self.store.rename_project(project, name)
+            self.reload_projects(project if self.project_id == project else self.project_id)
+        except (ValueError, PermissionError, OSError, sqlite3.Error) as exc:
+            self.status.setText(str(exc))
+
+    def pin_project(self, project, pinned):
+        try:
+            self.store.set_pinned(project, pinned)
+            self.reload_projects(self.project_id)
+        except (ValueError, PermissionError, OSError, sqlite3.Error) as exc:
+            self.status.setText(str(exc))
+
+    def archive_project(self, project):
+        if self.task_manager.active():
+            self.status.setText('仍有任务运行，暂不能归档项目。')
+            return
+        try:
+            target = self.store.project_store(project) if isinstance(self.store, ProjectCatalog) else self.store
+            target.archive(project)
+            self.reload_projects()
+        except (ValueError, PermissionError, OSError, sqlite3.Error) as exc:
+            self.status.setText(str(exc))
+
+    def remove_project(self, project):
+        if self.task_manager.active():
+            self.status.setText('仍有任务运行，暂不能移除项目。')
+            return
+        if QMessageBox.question(
+            self, '从侧栏移除项目', '仅移除本机侧栏登记，不删除项目目录、资料、会话或成果。确认继续？',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.store.remove_from_sidebar(project)
+            if self.project_id == project:
+                self.project_id = self.session_id = self.run_id = None
+            self.reload_projects()
+            self.status.setText('已从侧栏移除；可通过“打开已有项目”重新登记，项目文件未删除。')
+        except (ValueError, PermissionError, OSError, sqlite3.Error) as exc:
+            self.status.setText(str(exc))
 
     def new_project(self):
         name, ok = QInputDialog.getText(self, "新建项目", "项目名称")
@@ -729,9 +1042,6 @@ class PlatformWindow(QMainWindow):
                     ' <span style="font-size:10px;color:#a0a6b1"> / ASSISTANT</span></p>'
                     f'<p style="font-size:14px;line-height:170%;margin-bottom:28px">{text}</p>'
                 )
-            if message['role'] in {'user', 'assistant'}:
-                content.append(f'<p><a href="zq-branch:{self.session_id}/{message["id"]}">'
-                               '从此消息创建分支…</a></p>')
         if self.session_id:
             for run in self.store.runs(self.session_id):
                 result = json.loads(run['result'] or '{}')
@@ -747,6 +1057,7 @@ class PlatformWindow(QMainWindow):
                     except (ValueError, OSError, sqlite3.Error):
                         content.append('<p>下载成果记录暂不可用，请核对本地项目数据。</p>')
                 if result.get('kind') == 'plan' and run['state'] == 'succeeded':
+                    from .artifact_contract import display_name_of, user_artifacts
                     from .plan_results import completed_step_results
                     try:
                         records = completed_step_results(self.store, self.session_id, run['id'])
@@ -766,15 +1077,36 @@ class PlatformWindow(QMainWindow):
                                 if review.get('exported_report'):
                                     content.append(f'<p>📄 {html.escape(Path(review["exported_report"]).name)} '
                                         f'<a href="zq-step-report:{link}">打开审核报告</a></p>')
-                            for index, artifact in enumerate(record['result'].get('artifacts', [])):
-                                content.append(f'<p>📄 {html.escape(artifact["name"])}　'
+                            for index, artifact in user_artifacts(record['result']):
+                                content.append(f'<p>📄 {html.escape(display_name_of(artifact))}　'
                                     f'<a href="zq-step-artifact:{run["id"]}/{ordinal}/{index}">打开步骤成果</a></p>')
-                    except (ValueError, PermissionError, KeyError, OSError):
+                    except (ValueError, PermissionError, KeyError, OSError, TypeError):
                         content.append('<p>组合成果记录校验失败，请核对任务状态。</p>')
                 if result.get('kind') == 'generation':
-                    for index, artifact in enumerate(result.get('artifacts', [])):
-                        name = html.escape(artifact['name'])
-                        content.append(f'<p>📄 {name}　<a href="zq-artifact:{run["id"]}/{index}">打开文件</a></p>')
+                    try:
+                        from .artifact_contract import (
+                            deliverable_label,
+                            display_name_of,
+                            user_artifacts,
+                        )
+                        visible_artifacts = user_artifacts(result)
+                    except (ValueError, KeyError, TypeError):
+                        content.append('<p>生成成果记录校验失败，请核对任务状态。</p>')
+                        visible_artifacts = []
+                    if (len(visible_artifacts) == 1 and run['state'] == 'succeeded'
+                            and result.get('ok') is True):
+                        index, artifact = visible_artifacts[0]
+                        label = deliverable_label(artifact)
+                        shown = html.escape(display_name_of(artifact))
+                        if label:
+                            content.append(f'<p>{html.escape(label)}已生成并通过校验。</p>')
+                        content.append(f'<p>最终文件：{shown}　'
+                            f'<a href="zq-artifact:{run["id"]}/{index}">打开文件</a>　'
+                            f'<a href="zq-artifact-folder:{run["id"]}/{index}">打开所在文件夹</a></p>')
+                    else:
+                        for index, artifact in visible_artifacts:
+                            shown = html.escape(display_name_of(artifact))
+                            content.append(f'<p>📄 {shown}　<a href="zq-artifact:{run["id"]}/{index}">打开文件</a></p>')
                 if run['state'] == 'succeeded' and result.get('kind') == 'review':
                     identity = run['id']
                     content.append(f'<p>审核任务 {html.escape(identity)}：<a href="zq-export:{identity}">生成标准Word审核报告…</a></p>')
@@ -927,12 +1259,13 @@ class PlatformWindow(QMainWindow):
         if action == 'zq-annotate':
             self.offer_annotations(url.path(), explicit=True)
             return
-        if action == 'zq-artifact':
+        if action in {'zq-artifact', 'zq-artifact-folder'}:
             try:
                 from .generation import artifact_path
                 run_id, index = url.path().split('/')
                 path = artifact_path(self.store, self.session_id, run_id, int(index))
-                if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+                target = path.parent if action == 'zq-artifact-folder' else path
+                if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(target))):
                     raise ValueError('无法打开文件，请检查默认应用')
             except (ValueError, OSError, KeyError, PermissionError) as exc:
                 QMessageBox.warning(self, '生成成果', str(exc))
@@ -975,6 +1308,12 @@ class PlatformWindow(QMainWindow):
             if self.files.item(i).checkState() == Qt.CheckState.Checked
         }
 
+    def scope_summary_text(self):
+        if self.last_turn_envelope is None:
+            return ''
+        from .turn_scope_policy import format_scope_summary
+        return format_scope_summary(self.last_turn_envelope)
+
     def refresh_details(self, selected_ids=None):
         blocker = QSignalBlocker(self.files)
         if selected_ids is None:
@@ -1013,7 +1352,7 @@ class PlatformWindow(QMainWindow):
         if not self.project_id or not self.attach.isEnabled():
             return
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "添加项目资料", "", "资料 (*.docx *.xlsx *.xlsm *.pdf)"
+            self, "添加项目资料", "", "资料 (*.docx *.xlsx *.xls *.xlsm *.pdf *.json *.zip)"
         )
         self.import_files(paths)
 
@@ -1050,7 +1389,7 @@ class PlatformWindow(QMainWindow):
                 if path.is_dir():
                     errors.append(f"{path.name}：不支持文件夹")
                     continue
-                if path.suffix.lower() not in {".docx", ".xlsx", ".xlsm", ".pdf"}:
+                if path.suffix.lower() not in {".docx", ".xlsx", ".xls", ".xlsm", ".pdf", ".json", ".zip"}:
                     errors.append(f"{path.name}：不支持的文件类型")
                     continue
                 hashed = digest(path)
@@ -1075,51 +1414,156 @@ class PlatformWindow(QMainWindow):
             message += "\n" + "；".join(errors)
         self.status.setText(message)
 
+    def try_resume_waiting_run(self, prompt):
+        """Resume a generation run paused for material clarification.
+
+        The reply is matched deterministically against the persisted
+        candidates; a successful match resumes from the disambiguation node
+        without any new model call, while a mismatch re-asks the question.
+        """
+        store = self.store.active if isinstance(self.store, ProjectCatalog) else self.store
+        if store is None or self.session_id is None:
+            return False
+        waiting = next((r for r in reversed(store.runs(self.session_id))
+                        if r['state'] == 'waiting_user'), None)
+        if waiting is None:
+            return False
+        run_id = waiting['id']
+        try:
+            result = json.loads(waiting['result'] or '{}')
+        except ValueError:
+            result = {}
+        pending = result.get('pending')
+        if not isinstance(pending, dict):
+            return False
+        if any(word in prompt for word in ('取消', '放弃')):
+            store.transition(run_id, 'cancelled', '用户在澄清阶段取消任务')
+            store.append(self.session_id, 'assistant', '已取消等待澄清的任务；没有生成文件。')
+            self.status.setText('任务已取消。')
+            self.render_messages()
+            return True
+        from .material_resume import match_clarification
+        override = match_clarification(pending, store.files(store.session(self.session_id)['project']),
+                                       prompt)
+        if override is None:
+            questions = '；'.join(result.get('questions') or [])
+            store.append(self.session_id, 'assistant',
+                         '仍无法唯一确定本轮主体或期间，请回复明确的主体名称、期间或文件名。' + questions)
+            self.status.setText('等待补充信息：请明确主体、期间或文件名。')
+            self.render_messages()
+            return True
+        try:
+            store.set_material_resolution_override(run_id, override)
+        except (ValueError, PermissionError) as exc:
+            store.append(self.session_id, 'assistant', f'澄清未能应用：{exc}')
+            self.status.setText('澄清未能应用，请重新提交任务。')
+            self.render_messages()
+            return True
+        provider = None
+        snapshot = json.loads(store.run(run_id)['snapshot'])
+        if snapshot.get('automatic_materials') is True:
+            if self.client is None:
+                self.status.setText('请先连接服务端，才能继续已澄清的任务')
+                return True
+            from .generation import bundle_fingerprint
+            from .material_analysis import MaterialAnalysisProvider
+            provider = MaterialAnalysisProvider(
+                self.client, snapshot.get('model') or self.model_combo.currentData(),
+                bundle_fingerprint(snapshot['skill_id']))
+        store.append(self.session_id, 'event',
+                     '已按澄清恢复任务；沿用已完成的识别结果，不重复调用模型。')
+        self.composer.clear()
+        self.render_messages()
+        worker = self.register_task_worker(TaskWorker(store, run_id, self, provider=provider))
+        self.set_busy(True)
+        worker.start()
+        return True
+
     def submit(self):
-        if not self.session_id or self.worker:
+        if not self.session_id or self.worker or self._agent_worker is not None:
             return
         prompt = self.composer.toPlainText().strip()
         if not prompt:
             return
-        if (self.client is None or self.network_state != 'connected') and not self.connect_service():
+        if self.try_local_skill_install(prompt):
             return
-        if not self.session_id:
-            self.status.setText("账号已切换，请选择当前账号的项目后重新输入任务。")
-            return
-        model_id = self.model_combo.currentData()
-        if not model_id:
-            self.status.setText('请先连接模型服务；自动判断任务需要联网验证。')
-            return
-        from .agent_controller import AgentController
-        from .routing import UnderstandingWorker
+        # 正式客户端只允许新 Agent；旧 TurnRouter 链路不再作为回退入口。
+        self._try_agent_submit(prompt)
+        return
+
+    def try_local_builtin(self, prompt: str) -> bool:
+        """Route new local-only built-ins without requiring a cloud schema change."""
+        from .skills import DETAIL, FINANCIAL_BRIEF, HISTORY, WORKFLOW_TO_SKILL
+
+        normalized = ''.join(prompt.casefold().split())
+        financial = any(token in normalized for token in
+                        ('财务简报', '财务状况简表', 'financialbrief'))
+        workflow = (('skill' in normalized or '技能' in normalized)
+                    and '工作流' in normalized
+                    and any(token in normalized for token in ('创建', '制作', '生成', '更新', '校验')))
+        if not financial and not workflow:
+            return False
+        chain = []
+        if financial:
+            if '明细表' in normalized:
+                chain.append(self.registry.get(DETAIL.id))
+            if '历史沿革' in normalized or '工商沿革' in normalized:
+                chain.append(self.registry.get(HISTORY.id))
+        chain.append(self.registry.get(FINANCIAL_BRIEF.id if financial else WORKFLOW_TO_SKILL.id))
+        files = [item for item in self.store.files(self.project_id)
+                 if item['id'] in self.selected_file_ids()]
+        if len(chain) > 1:
+            self.store.append(self.session_id, 'event',
+                              '本轮将依次执行：' + ' → '.join(spec.name for spec in chain))
+        previous_run = self.run_id
+        self.execute_plan(prompt, chain[0], selected_files=files or None)
+        if len(chain) > 1 and self.run_id != previous_run:
+            self._local_chain = {'prompt': prompt, 'files': files,
+                                 'specs': chain[1:], 'run': self.run_id}
+        else:
+            self._local_chain = None
+        return True
+
+    def try_local_skill_install(self, prompt: str) -> bool:
+        """Handle an explicit current-turn data-only Skill install without a model call."""
+        normalized = ''.join(prompt.casefold().split())
+        if not (('skill' in normalized or '技能' in normalized)
+                and any(word in normalized for word in ('安装', 'install', '加入平台', '注册'))):
+            return False
+        selected = self.selected_file_ids()
+        files = [item for item in self.store.files(self.project_id) if item['id'] in selected]
+        packages = [item for item in files if Path(item['name']).suffix.lower() == '.zip']
+        if len(packages) != 1 or len(files) != 1:
+            self.status.setText('安装 Skill 需要本轮只选择一个 ZIP 包；历史附件不会自动采用。')
+            return True
         from .skill_installation import SkillInstallation
-        manager = SkillInstallation(self.store)
-        self._routing_packages = {}
-        candidates = []
-        for version in manager.list_versions():
-            if not version['enabled'] or version['skill_id'] in {s.id for s in BUILTINS}:
-                continue
-            package = manager.load(version['skill_id'], version['version'])
-            if package.ready:
-                self._routing_packages[version['skill_id']] = package
-                candidates.append({'id': version['skill_id'], 'name': package.manifest['name'],
-                                   'adapter': package.manifest['adapter'], 'description': package.instructions[:1000]})
-        controller = AgentController(self.store)
+        from .skill_manager import SkillManagerDialog
+        from .skill_package import inspect_package
         try:
-            pending = controller.prepare(self.session_id, prompt, model_id=model_id,
-                                         selected_ids=list(self.selected_file_ids()), candidates=candidates,
-                                         browser_enabled=callable(getattr(self.client, 'propose_browser_step', None)))
-        except (ValueError, PermissionError):
-            self.status.setText('本轮要求或文件范围无效，请检查后重试。')
-            return
-        worker = UnderstandingWorker(self.client, pending, self)
-        worker.controller = controller
-        self.register_understanding_worker(worker)
-        self.composer.clear()
-        self.render_messages()
-        self.set_busy(True)
-        self.status.setText('Agent 正在理解本轮要求并选择执行能力…')
-        worker.start()
+            package = inspect_package(Path(packages[0]['path']))
+            summary = SkillManagerDialog.describe(package)
+            if not self.agent_operation_allowed(
+                'install_skill', '确认安装并启用 Skill',
+                summary + '\n\n确认安装、注册并启用此版本？',
+            ):
+                self.status.setText('已取消安装；没有写入 Skill 注册表。')
+                return True
+            manager = SkillInstallation(self.store)
+            manager.install(Path(packages[0]['path']), confirmed=True,
+                            expected_sha256=package.sha256)
+            manager.activate(package.manifest['id'], package.manifest['version'], confirmed=True)
+            self.store.append(self.session_id, 'user', prompt)
+            self.store.append(self.session_id, 'assistant',
+                              f"已安装并启用 {package.manifest['name']} {package.manifest['version']}。"
+                              '后续由 Agent 根据自然语言自动选择；未执行包内脚本，也未授予修改原件权限。')
+            self._scope_submitted = True
+            self.composer.clear()
+            self.refresh_details(selected_ids=set())
+            self.render_messages()
+            self.status.setText('Skill 已完成完整性检查、安装、注册和启用。')
+        except (ValueError, PermissionError, OSError) as exc:
+            self.status.setText(str(exc))
+        return True
 
     def routing_finished(self, worker, destination):
         if not self.release_worker(worker, destination):
@@ -1180,7 +1624,59 @@ class PlatformWindow(QMainWindow):
                 m.text for m in pending.request.context if m.role == 'user') + '\n' + prompt)
         self.execute_plan(prompt, spec, package=package, selected_files=files, record_user=False)
 
+    def consult_finished(self, worker, destination):
+        if not self.release_worker(worker, destination):
+            return
+        outcome, error = worker.outcome, worker.error
+        prompt = worker.prompt
+        worker.deleteLater()
+        if error or outcome is None:
+            # The router persisted nothing on this path; restore the prompt so no
+            # user input is lost and nothing half-written pollutes the session.
+            if destination.visible(self):
+                self.composer.setPlainText(prompt)
+                self.status.setText(error or '本轮消息已取消。')
+            return
+        if outcome.kind == 'execution':
+            if not destination.visible(self):
+                from .agent_controller import AgentController
+                try:
+                    AgentController(destination.store).cancel(outcome.pending)
+                    destination.store.append(worker.session_id, 'assistant',
+                        '任务理解已取消；当前已切换会话，未自动执行。请返回本会话重新发起。')
+                except (ValueError, PermissionError):
+                    pass
+                return
+            from .agent_controller import AgentController
+            from .routing import UnderstandingWorker
+            controller = AgentController(self.store)
+            understanding = UnderstandingWorker(self.client, outcome.pending, self)
+            understanding.controller = controller
+            self.register_understanding_worker(understanding)
+            self.render_messages()
+            self.set_busy(True)
+            self.status.setText('Agent 正在理解本轮要求并选择执行能力…')
+            understanding.start()
+            return
+        if destination.visible(self):
+            self.status.setText('已回复')
+            self.render_messages()
+
     def confirm_compound_plan(self, snapshot):
+        from .agent_permission_modes import (
+            requires_browser_confirmation,
+            requires_confirmation,
+        )
+
+        mode = self.agent_permission_mode()
+        if snapshot.get('mode') == 'browser_task':
+            actions = snapshot.get('browser_scope', {}).get('actions', [])
+            if not any(requires_browser_confirmation(mode, action) for action in actions):
+                return True
+        elif not requires_confirmation(
+            mode, 'network' if snapshot.get('permissions', {}).get('call_model') else 'generate_file'
+        ):
+            return True
         from .plan_confirmation import PlanConfirmationDialog
         return PlanConfirmationDialog(snapshot, self.store.path.parent, self).exec() == QDialog.DialogCode.Accepted
 
@@ -1204,6 +1700,7 @@ class PlatformWindow(QMainWindow):
             snapshot = build_compound_task_spec(task_store, pending.session_id,
                 {'request': pending.request.model_dump(), 'understanding': understanding.model_dump()},
                 proposal, list(pending.files), revision=pending.revision).to_snapshot()
+            snapshot['permission_mode'] = self.agent_permission_mode()
             if not self.confirm_compound_plan(snapshot):
                 self.status.setText('已取消计划，未启动业务步骤。')
                 return
@@ -1243,7 +1740,10 @@ class PlatformWindow(QMainWindow):
             self.render_messages()
             return
         selected_name = package.manifest['name'] if package else spec.name
-        self.store.append(self.session_id, 'event', f'Agent 选择：{selected_name}。文件范围及写入权限仍需独立校验。')
+        note = ('文件范围及写入权限仍需独立校验。'
+                if spec not in GENERATORS or self.generation_consent_required()
+                else '已按当前权限模式直接执行；只生成副本，不修改原件。')
+        self.store.append(self.session_id, 'event', f'Agent 选择：{selected_name}。{note}')
         if spec.id == REVIEW.id:
             names = '\n'.join(f"• {item['name']}" for item in files)
             answer = QMessageBox.question(
@@ -1263,20 +1763,31 @@ class PlatformWindow(QMainWindow):
         if spec in GENERATORS:
             from .generation import locked_template
             try:
-                locked_template(spec.id)
+                if spec.id != 'office-workflow-to-skill':
+                    locked_template(spec.id)
             except (ValueError, OSError, PermissionError) as exc:
                 self.composer.setPlainText(prompt)
                 self.status.setText(str(exc))
                 self.store.append(self.session_id, 'assistant', str(exc))
                 self.render_messages()
                 return
-            from .generation_dialog import GenerationDialog
-            dialog = GenerationDialog(spec, files, self.store.path.parent, self)
-            if dialog.exec() != QDialog.DialogCode.Accepted:
-                self.composer.setPlainText(prompt)
-                self.render_messages()
-                return
-            generation_roles = dialog.roles
+            if self.generation_consent_required():
+                from .generation_dialog import GenerationDialog
+                dialog = GenerationDialog(spec, files, self.store.path.parent, self)
+                if dialog.exec() != QDialog.DialogCode.Accepted:
+                    self.composer.setPlainText(prompt)
+                    self.render_messages()
+                    return
+                generation_roles = dialog.roles
+            else:
+                from .generation import auto_generation_roles
+                try:
+                    generation_roles, files = auto_generation_roles(spec.id, files)
+                except ValueError as exc:
+                    self.composer.setPlainText(prompt)
+                    self.store.append(self.session_id, 'assistant', str(exc))
+                    self.render_messages()
+                    return
             generation_confirmed = True
         provider = None
         if spec.id == 'valuation-detail-workbook-fill':
@@ -1312,6 +1823,7 @@ class PlatformWindow(QMainWindow):
                 instructions=provider.skill_instructions if provider else "",
                 input_roles=generation_roles, generation_confirmed=generation_confirmed,
             ).to_snapshot()
+            snapshot['permission_mode'] = self.agent_permission_mode()
             if package:
                 snapshot['external_skill'] = {'id': package.manifest['id'], 'version': package.manifest['version'], 'sha256': package.sha256}
         except (ValueError, PermissionError) as exc:
@@ -1320,6 +1832,15 @@ class PlatformWindow(QMainWindow):
             self.render_messages()
             return
         from .permissions import PermissionService
+
+        operation = 'network' if provider else ('generate_file' if spec in GENERATORS else None)
+        if operation is not None and not self.agent_operation_allowed(
+            operation, '确认 Agent 执行',
+            f'确认允许 Agent 按本轮选中的 {len(files)} 个文件和用户要求执行？',
+        ):
+            self.composer.setPlainText(prompt)
+            self.status.setText('已取消执行，未启动任务。')
+            return
 
         # Reached only after explicit review scope / generation consent above;
         # read-only preflight is authorized by the user's execution request.
@@ -1375,6 +1896,14 @@ class PlatformWindow(QMainWindow):
             pending.session_id, f'understanding:{pending.task_id}:{pending.revision}'))
         worker.routing_packages = dict(getattr(self, '_routing_packages', {}))
         return self.register_completion_worker(worker, destination, 'understanding')
+
+    def register_consult_worker(self, worker):
+        from uuid import uuid4
+        store = worker.store
+        session = store.session(worker.session_id)
+        destination = TaskDestination(store, TaskBinding(store.owner, session['project'],
+            worker.session_id, f'consult:{uuid4().hex}'))
+        return self.register_completion_worker(worker, destination, 'consult')
 
     def register_annotation_worker(self, worker):
         return self.register_completion_worker(worker,
@@ -1440,7 +1969,9 @@ class PlatformWindow(QMainWindow):
             summary = ('任务已取消，未发布正式成果。' if state == 'cancelled' else result['feedback'])
             store.append(session_id, 'assistant', summary)
             if target.visible(self):
-                self.status.setText('生成校验通过' if result.get('ok') else '生成未完成，详见对话反馈')
+                self.status.setText('等待补充信息，请在对话中回复主体、期间或文件名'
+                                    if state == 'waiting_user'
+                                    else '生成校验通过' if result.get('ok') else '生成未完成，详见对话反馈')
                 self.render_messages()
             return
         summary = (
@@ -1627,7 +2158,7 @@ class PlatformWindow(QMainWindow):
         target.store.append(
             target.binding.session_id,
             "assistant",
-            failure_message(target.store, target.binding.task_id),
+            failure_message(target.store, target.binding.task_id, worker_message=message),
         )
         if target.visible(self):
             self.status.setText("任务状态及处理建议已记录在对话中。")
@@ -1638,11 +2169,34 @@ class PlatformWindow(QMainWindow):
             return
         worker.deleteLater()
         self.refresh_balance()
+        self.continue_local_chain(destination)
         if destination.visible(self) and self.worker is None:
             self.offer_annotations(destination.binding.task_id)
         else:
             from .annotation_followup import ensure_questions
             ensure_questions(destination.store, destination.binding.task_id)
+
+    def continue_local_chain(self, destination):
+        """Follow a locally routed multi-skill request with its next step."""
+        chain = self._local_chain
+        if chain is None or destination.binding.task_id != chain['run']:
+            return
+        state = destination.store.run(destination.binding.task_id)['state']
+        if state == 'waiting_user':
+            # Keep the chain parked; the clarified resume finishes this run
+            # first and only then advances to the next skill.
+            return
+        self._local_chain = None
+        if state == 'cancelled' or not destination.visible(self) or self.worker is not None:
+            return
+        if state != 'succeeded':
+            destination.store.append(destination.binding.session_id, 'assistant',
+                                     '上一技能未成功（原因见上方反馈）；后续技能相互独立，继续执行后续技能。')
+        previous_run = self.run_id
+        self.execute_plan(chain['prompt'], chain['specs'][0],
+                          selected_files=chain['files'], record_user=False)
+        if len(chain['specs']) > 1 and self.run_id != previous_run:
+            self._local_chain = {**chain, 'specs': chain['specs'][1:], 'run': self.run_id}
 
     def balance_updated(self, amount):
         self.account_label.setText(f"余额：{amount} 元")
@@ -1669,16 +2223,9 @@ class PlatformWindow(QMainWindow):
             self.status.setText('当前启动模式未配置平台数据目录管理。')
             return None
         try:
-            layout = self.storage_preferences.load(self.store.owner)
-            if layout is None:
-                directory = QFileDialog.getExistingDirectory(
-                    self, '选择非系统盘平台数据目录（缓存、浏览器及更新包；项目资料仍在项目目录）')
-                if not directory:
-                    return None
-                layout = self.storage_preferences.select(self.store.owner, Path(directory))
-            return layout
+            return self.storage_preferences.ensure_default(self.store.owner)
         except (ValueError, OSError, sqlite3.Error):
-            self.status.setText('平台数据目录不可用或位置不合规，请恢复原目录；不会回落系统盘或创建替代目录。')
+            self.status.setText('安装目录下的平台数据目录不可用或不可写；不会改用其他目录。')
             return None
 
     def toggle_browser(self):
@@ -1759,6 +2306,7 @@ class PlatformWindow(QMainWindow):
         if previous_client is not None and previous_client is not client:
             previous_client.http_client.close()
         self.models = payload["models"]
+        self.refresh_permission_menu()
         self.model_combo.clear()
         for model in self.models:
             self.model_combo.addItem(model["display_name"], model["model_id"])
@@ -1775,6 +2323,11 @@ class PlatformWindow(QMainWindow):
                 # Compatibility for independently supplied preview workers.
                 self.worker.cancel.set()
             self.status.setText("正在停止；已提交的模型调用可能仍需结束并结算，本地不再继续生成。")
+            self.stop.setEnabled(False)
+        elif self._agent_worker is not None:
+            # S15：停止新 Agent 路径轮次（abort 内核开放操作，Worker 随后自行结束）
+            self._agent_worker.gateway.stop()
+            self.status.setText("正在停止新 Agent 轮次；已提交的模型调用可能仍需结束并结算。")
             self.stop.setEnabled(False)
 
     def check_versions(self):
@@ -1832,14 +2385,11 @@ class PlatformWindow(QMainWindow):
         except (OSError, ValueError, sqlite3.Error) as exc:
             self.status.setText(str(exc))
             return
-        if QMessageBox.question(
-            self,
-            '安装客户端更新',
+        if not self.agent_operation_allowed(
+            'software_update', '安装客户端更新',
             f"确认下载并安装客户端 {self.available_update['version']}？\n"
             '程序将在完成验签、备份和候选健康检查后关闭；业务原件不会修改。',
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        ) != QMessageBox.StandardButton.Yes:
+        ):
             return
         from ..report_review_app.workers.function_worker import FunctionWorker
         from .client_update import stage_update_request
@@ -2041,8 +2591,8 @@ def main():
         return 0
     client, payload = result
     from .storage_preferences import StoragePreferences
-    settings = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)) / "ZQPlatform"
-    program_root = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).resolve().parents[3]
+    settings = platform_settings_root()
+    program_root = installation_root()
     storage_preferences = StoragePreferences(settings / 'storage-locations.sqlite', program_root)
     if args.data_dir is None:
         store = ProjectCatalog(settings / "project-locations.sqlite", payload["owner"])

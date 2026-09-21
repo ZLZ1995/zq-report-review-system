@@ -75,7 +75,10 @@ class ExecutionStore:
             states = {r['step_id']: r['state'] for r in db.execute(
                 'SELECT step_id,state FROM execution_steps WHERE run=?', (run_id,))}
             completed = {key for key, state in states.items() if state == 'succeeded'}
-            if states.get(step_id) != 'pending' or step_id not in plan.ready_steps(completed):
+            # A 'waiting_user' step may be re-claimed after clarification; its
+            # persisted plan/results keep the already-paid work replay-safe.
+            if (states.get(step_id) not in ('pending', 'waiting_user')
+                    or step_id not in plan.ready_steps(completed)):
                 raise ValueError('Step is not ready or already claimed')
             token = uuid4().hex
             db.execute("UPDATE execution_steps SET state='running',attempt=attempt+1,"

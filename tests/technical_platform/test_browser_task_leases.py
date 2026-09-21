@@ -64,3 +64,16 @@ def test_wrong_owner_unregistered_worker_and_finished_task_reject():
         leases.acquire(page, binding, SimpleNamespace(cancel=Event(), isRunning=lambda: True), confirmed=True)
     worker.isRunning = lambda: False
     with pytest.raises(PermissionError): leases.acquire(page, binding, worker, confirmed=True)
+
+
+def test_revoke_all_invalidates_every_active_tab_lease():
+    leases, page, other, binding, worker, manager = setup()
+    first = leases.acquire(page, binding, worker, confirmed=True)
+    second_worker = SimpleNamespace(cancel=Event(), isRunning=lambda: True)
+    second_binding = TaskBinding('alice', 'p', 's2', 't2')
+    manager.register(second_binding, second_worker)
+    second = leases.acquire(other, second_binding, second_worker, confirmed=True)
+
+    assert leases.revoke_all() == 2
+    assert not leases.valid(first)
+    assert not leases.valid(second)

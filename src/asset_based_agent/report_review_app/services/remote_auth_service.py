@@ -15,7 +15,27 @@ import httpx
 
 
 class RemoteAuthenticationError(ValueError):
-    pass
+    """Safe remote failure; error_code is a non-secret tracking label."""
+
+    def __init__(self, message='', *, error_code=None, http_status=None):
+        super().__init__(message)
+        self.error_code = error_code
+        self.http_status = http_status
+
+
+class RequestSchemaError(RemoteAuthenticationError):
+    """The request failed schema validation locally or was rejected as unknown
+    structure by the server (HTTP 422); nothing was executed."""
+
+    def __init__(self, message='', *, error_code='request_schema_invalid', http_status=None):
+        super().__init__(message, error_code=error_code, http_status=http_status)
+
+
+class ResponseSchemaError(RemoteAuthenticationError):
+    """The server reply failed response schema validation."""
+
+    def __init__(self, message=''):
+        super().__init__(message, error_code='response_schema_invalid')
 
 
 class CredentialStorageError(RemoteAuthenticationError):
@@ -23,19 +43,36 @@ class CredentialStorageError(RemoteAuthenticationError):
 
 
 class NetworkUnavailable(RemoteAuthenticationError):
-    pass
+    def __init__(self, message=''):
+        super().__init__(message, error_code='network_unavailable')
 
 
 class ServerCapabilityUnavailable(RemoteAuthenticationError):
-    pass
+    def __init__(self, message=''):
+        super().__init__(message, error_code='server_capability_unavailable')
 
 
 class SessionRevoked(RemoteAuthenticationError):
-    pass
+    def __init__(self, message=''):
+        super().__init__(message, error_code='session_revoked')
 
 
 class InsufficientBalance(RemoteAuthenticationError):
-    pass
+    def __init__(self, message=''):
+        super().__init__(message, error_code='insufficient_balance')
+
+
+class ModelProviderError(RemoteAuthenticationError):
+    """The upstream model provider failed; retry later, nothing was executed."""
+
+    def __init__(self, message='', *, error_code='model_provider_error'):
+        super().__init__(message, error_code=error_code)
+
+
+MODEL_PROVIDER_CODES = frozenset({
+    'all_providers_failed', 'provider_unavailable', 'model_unavailable',
+    'provider_rate_limited', 'provider_timeout', 'provider_http_error',
+})
 
 
 BILLING_RECONCILIATION_MESSAGE = (
@@ -44,7 +81,8 @@ BILLING_RECONCILIATION_MESSAGE = (
 
 
 class BillingReconciliationRequired(RemoteAuthenticationError):
-    pass
+    def __init__(self, message=''):
+        super().__init__(message, error_code='billing_reconciliation_required')
 
 
 class CredentialStore(Protocol):
@@ -225,7 +263,10 @@ class RemoteSessionClient:
             validate_understanding,
         )
         from .task_cancellation import TaskCancelled
-        request = UnderstandingRequest.model_validate(payload)
+        try:
+            request = UnderstandingRequest.model_validate(payload)
+        except (TypeError, ValueError) as exc:
+            raise RequestSchemaError('本轮理解请求未通过本地Schema校验，未发送。') from exc
         if cancel is not None and cancel.is_set():
             raise TaskCancelled()
         self.require_capability('task_understanding', '/agent/understand')
@@ -242,13 +283,21 @@ class RemoteSessionClient:
                     'skills': [skill for skill in request.skills if skill.id != 'browser.task']})
             if cancel is not None and cancel.is_set():
                 raise TaskCancelled()
+        if any(item.evidence is not None for item in request.files):
+            try:
+                self.require_capability('material_evidence', '/agent/understand')
+            except ServerCapabilityUnavailable:
+                # Older servers reject the unknown field; fall back to file names.
+                request = request.model_copy(update={
+                    'files': [item.model_copy(update={'evidence': None})
+                              for item in request.files]})
         result = self._model_json('/agent/understand', request.model_dump(), cancel=cancel)
         if cancel is not None and cancel.is_set():
             raise TaskCancelled()
         try:
             return validate_understanding(request, TaskUnderstanding.model_validate(result)).model_dump()
         except (TypeError, ValueError) as exc:
-            raise RemoteAuthenticationError('任务理解结果无效，未开始业务执行。') from exc
+            raise ResponseSchemaError('服务端任务理解响应未通过Schema校验，未开始业务执行。') from exc
 
     def propose_browser_step(self, payload: dict[str, object], *, cancel=None) -> dict[str, object]:
         from ...browser_contracts import (
@@ -302,6 +351,24 @@ class RemoteSessionClient:
             return validate_proposal(request, PlanProposal.model_validate(result)).model_dump()
         except (TypeError, ValueError) as exc:
             raise RemoteAuthenticationError('任务计划无效，未开始业务执行。') from exc
+
+    def server_build_info(self) -> dict[str, object]:
+        """Read-only server build snapshot for platform status queries."""
+        if not self.access_token:
+            raise SessionRevoked('当前没有有效登录会话。')
+        try:
+            response = self.http_client.get(self.base_url + '/capabilities')
+            response.raise_for_status()
+            data = response.json()
+        except httpx.RequestError as exc:
+            raise NetworkUnavailable('无法连接服务端查询版本信息。') from exc
+        except (ValueError, httpx.HTTPStatusError) as exc:
+            raise ServerCapabilityUnavailable('服务端版本信息不可用。') from exc
+        if not isinstance(data, dict):
+            raise ServerCapabilityUnavailable('服务端版本信息不可用。')
+        return {'build_sha': str(data.get('build_sha') or ''),
+                'schema_version': data.get('schema_version'),
+                'protocol_version': data.get('protocol_version')}
 
     def require_capability(self, capability: str, endpoint: str, *, allow_legacy: bool = True) -> None:
         """Read-only preflight; legacy support is verified, never guessed."""
@@ -483,9 +550,22 @@ class RemoteSessionClient:
             raise SessionRevoked(message or "当前会话已失效。")
         if code == "insufficient_balance":
             raise InsufficientBalance(message or "余额不足，无法开始本轮审核。")
+        if code in MODEL_PROVIDER_CODES:
+            raise ModelProviderError(message or "模型服务暂时不可用，请稍后重试。")
         if response.status_code == 401:
             raise RemoteAuthenticationError("用户名或密码错误，或登录已失效。")
-        raise RemoteAuthenticationError(message or "远程服务请求失败。")
+        if response.status_code == 422:
+            detail = f'{message}；' if message else ''
+            raise RequestSchemaError(
+                f'{detail}服务端拒绝了本轮请求结构；客户端与服务端版本不兼容，'
+                '请更新客户端或服务端。',
+                error_code='http_422', http_status=422)
+        if response.status_code == 409 or response.status_code >= 500:
+            raise RemoteAuthenticationError(message or "远程服务请求失败。",
+                                            error_code=f'http_{response.status_code}',
+                                            http_status=response.status_code)
+        raise RemoteAuthenticationError(message or "远程服务请求失败。",
+                                        http_status=response.status_code)
 
 
 class RemoteAuthService:

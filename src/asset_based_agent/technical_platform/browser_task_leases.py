@@ -91,6 +91,12 @@ class BrowserTaskLeases:
         if key is not None:
             del self._pages[key]
 
+    def revoke_all(self) -> int:
+        count = len(self._leases)
+        for page in tuple(self._pages.values()):
+            self.takeover(page)
+        return count
+
     def close(self) -> None:
         self._closed = True
         self._leases.clear()

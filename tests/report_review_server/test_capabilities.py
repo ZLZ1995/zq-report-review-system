@@ -10,6 +10,7 @@ def test_capabilities_are_public_versioned_and_only_advertise_present_routes(cli
     assert data['build_sha'] is None
     assert data['capabilities']['skill_routing'] == 1
     assert data['capabilities']['review_events'] == 1
+    assert data['capabilities']['agent_completion_stream'] == 1
     assert 'browser_automation' not in data['capabilities']
     assert 'agent_understanding' not in data['capabilities']
     assert set(data) == {'schema_version', 'protocol_version', 'build_sha', 'capabilities'}

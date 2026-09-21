@@ -26,12 +26,13 @@ def test_install_cancel_confirm_and_version_controls(tmp_path, monkeypatch):
     monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **k: (str(path), ""))
     monkeypatch.setattr(dialog, "confirm", lambda text: False)
     dialog.install_package()
-    assert dialog.versions.count() == 0
+    initial_count = dialog.versions.count()
+    assert dialog.manager.list_versions() == []
     monkeypatch.setattr(dialog, "confirm", lambda text: True)
     dialog.install_package()
-    assert dialog.versions.count() == 1
+    assert dialog.versions.count() == initial_count + 1
     assert not dialog.manager.list_versions()[0]["enabled"]
-    dialog.versions.setCurrentRow(0)
+    dialog.versions.setCurrentRow(dialog.versions.count() - 1)
     assert "受支持的适配器" in dialog.details.toPlainText()
     assert "尚未接入任务执行" not in dialog.details.toPlainText()
     dialog.activate_selected()
@@ -53,4 +54,16 @@ def test_confirmation_defaults_to_no_and_plain_text(tmp_path, monkeypatch):
         return QMessageBox.StandardButton.No
     monkeypatch.setattr(QMessageBox, "exec", inspect)
     assert not dialog.confirm("<b>package</b>")
+    dialog.close()
+
+
+def test_unified_catalog_lists_builtins_native_and_external(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    assert app is not None
+    dialog = SkillManagerDialog(PlatformStore(tmp_path / 'db.sqlite', 'alice'))
+    labels = [dialog.versions.item(i).text() for i in range(dialog.versions.count())]
+    assert any('财务状况简表' in label for label in labels)
+    assert any('办公工作流' in label for label in labels)
+    assert any('浏览器' in label for label in labels)
+    assert any('评估报告审核' in label for label in labels)
     dialog.close()

@@ -17,14 +17,17 @@ UPDATER_VERSION = "0.2.10"
 
 def local_release(*, store=None) -> dict:
     from .generation import bundle_fingerprint, locked_template
+    from .skill_contracts import builtin_contracts
+    contracts = builtin_contracts()
     skills = []
     for spec in BUILTINS:
         item = {'id': spec.id, 'version': spec.version, 'status': 'builtin'}
         if spec in GENERATORS:
             try:
-                template = locked_template(spec.id)
-                item.update(status='verified', template_sha256=digest(template),
-                            bundle_sha256=bundle_fingerprint(spec.id))
+                item.update(status='verified', bundle_sha256=bundle_fingerprint(spec.id))
+                if contracts[spec.id].locked_template:
+                    template = locked_template(spec.id)
+                    item['template_sha256'] = digest(template)
             except (OSError, ValueError, KeyError, TypeError):
                 item['status'] = 'unavailable_or_changed'
         skills.append(item)

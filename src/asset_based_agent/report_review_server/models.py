@@ -142,6 +142,10 @@ class AuthSession(Base):
     )
     client_instance_id: Mapped[str] = mapped_column(String(128))
     refresh_token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    previous_refresh_token_hash: Mapped[str | None] = mapped_column(
+        String(64), nullable=True)
+    refresh_rotated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     last_heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)

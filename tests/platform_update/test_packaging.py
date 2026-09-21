@@ -44,7 +44,8 @@ def test_packaging_emits_managed_transition_bundle_without_user_data(tmp_path):
     helper = client / '_internal/PySide6/QtWebEngineProcess.exe'
     helper.parent.mkdir(parents=True)
     helper.write_bytes(b'webengine-helper')
-    for skill in ('valuation-detail-workbook-fill', 'gongshang-change-history-docx'):
+    for skill in ('valuation-detail-workbook-fill', 'gongshang-change-history-docx',
+                  'financial-brief-docx'):
         source = tmp_path / 'assets/builtin_templates' / skill
         source.mkdir(parents=True)
         (source / 'template.xlsx').write_bytes(b'template')

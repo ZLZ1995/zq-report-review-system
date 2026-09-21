@@ -1,0 +1,12 @@
+{
+  "schema_version": 1, "id": "office-workflow-to-skill", "version": "0.1.0",
+  "purpose": "校验经用户确认的办公工作流契约并生成可继续制作 Skill 的本地验收报告",
+  "source_extensions": [".json"],
+  "required_roles": ["workflow_contract"], "optional_roles": [],
+  "outputs": ["workflow_validation_json"],
+  "acceptance_gates": ["source_evidence", "output_validation", "original_hash_unchanged"],
+  "followups": ["representative_proof_run", "child_skill_install_confirmation"],
+  "environment": ["本地 Python"],
+  "limitations": ["只校验已确认契约", "验证通过不等于自动安装子 Skill", "不执行契约中的任意命令"],
+  "requires_model": false, "creates_copy": true, "locked_template": false, "modify_originals": false
+}
