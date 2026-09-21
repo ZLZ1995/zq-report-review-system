@@ -195,6 +195,7 @@ class PlatformWindow(QMainWindow):
         self.status_controller = ConversationStatusController()
         self._agent_operation_id = None
         self._agent_user_message_id = None
+        self._agent_user_text = ''
         self._approval_requested.connect(self._handle_approval_request)
         self.network_state = "connected"
         self.setWindowTitle(
@@ -355,7 +356,7 @@ class PlatformWindow(QMainWindow):
             from .model_port.provider_factory import production_provider_factory
 
             provider_factory = production_provider_factory(self.client, model_id)
-        return AgentGateway(
+        gateway = AgentGateway(
             self.store, self.session_id,
             flags=self._feature_flags(), model_id=model_id or '',
             model_port_factory=model_factory,
@@ -363,6 +364,8 @@ class PlatformWindow(QMainWindow):
             provider_factory=provider_factory,
             approver=ApproverBridge(self._ask_approval_gui),
             force_all_tools=True)
+        self._agent_gateway = gateway
+        return gateway
 
     def _try_agent_submit(self, prompt: str, file_ids=(), upload_ids=()) -> bool:
         """生产客户端只使用新 Agent；连接不完整时阻止旧路径接管。"""
@@ -372,12 +375,22 @@ class PlatformWindow(QMainWindow):
         if gateway is None:
             self.status.setText('新 Agent 尚未连接服务端，本轮未发送；请先连接并重试。')
             return True
+        self._agent_gateway = gateway
         from uuid import uuid4
 
         from .agent_switch import AgentTurnWorker
 
-        self._agent_user_message_id = self.store.append(
-            self.session_id, 'user', prompt)  # 灰期双写：供 UI 显示
+        # 新 Agent 的 begin_operation 原子地写入 user_message。不要再向
+        # legacy store.messages 灰期双写，否则同一轮会在 UI 出现两次。
+        self._agent_user_message_id = None
+        self._agent_user_text = prompt
+        # Test doubles and third-party gateway adapters may not expose the
+        # durable Agent repository. Keep their legacy fallback visible; the
+        # production gateway persists the same entry atomically and therefore
+        # must not receive this second write.
+        if not hasattr(gateway, 'repo'):
+            self._agent_user_message_id = self.store.append(
+                self.session_id, 'user', prompt)
         self._agent_operation_id = uuid4().hex
         self.status_controller.set_turn_phase(
             self.session_id, self._agent_operation_id, '新 Agent 路径：正在生成…')
@@ -423,8 +436,10 @@ class PlatformWindow(QMainWindow):
                       or result.get('status') or '未知原因')
             reply = f'本轮未完成：{reason}。'
         target_session = self._agent_session_id or self.session_id
-        if target_session:
-            self.store.append(target_session, 'assistant', reply)  # 灰期双写
+        # assistant_message/error_message 已由 AgentKernel 持久化；这里仅
+        # 更新状态控制器，不能再次写入 legacy store.messages。
+        if (target_session and not hasattr(getattr(self, '_agent_gateway', None), 'repo')):
+            self.store.append(target_session, 'assistant', reply)
         # S16：终态只进轮次控制器与消息表；禁止把完整回复写进状态控件
         if self._agent_operation_id and target_session:
             if result.get('status') == 'completed':
@@ -446,6 +461,7 @@ class PlatformWindow(QMainWindow):
         self._agent_session_id = None
         self._agent_operation_id = None
         self._agent_user_message_id = None
+        self._agent_user_text = ''
         self.set_busy(False)
 
     def _ask_approval_gui(self, operation: str, title: str, reason: str) -> bool:
@@ -1073,6 +1089,14 @@ class PlatformWindow(QMainWindow):
                 f'<p style="line-height:160%;font-size:14px">{text}</p>'
                 '</td></tr></table><p style="font-size:8px">&nbsp;</p>'
             )]
+        if item.kind == 'live_user':
+            return [(
+                '<table width="100%" cellspacing="0" cellpadding="16">'
+                '<tr><td width="12%"></td><td bgcolor="#f3f4f7">'
+                '<span style="color:#9399a6;font-size:11px">你 · 发送中</span>'
+                f'<p style="line-height:160%;font-size:14px">{text}</p>'
+                '</td></tr></table><p style="font-size:8px">&nbsp;</p>'
+            )]
         if item.kind == 'event':
             return [(
                 '<table width="100%" cellpadding="12"><tr>'
@@ -1196,10 +1220,22 @@ class PlatformWindow(QMainWindow):
                 and self._agent_operation_id):
             live = {'after_message_id': self._agent_user_message_id,
                     'operation_id': self._agent_operation_id,
+                    'user_text': self._agent_user_text,
                     'text': self._live_agent_text or '新 Agent 路径：正在生成…'}
+        agent_entries = []
+        if self.session_id:
+            try:
+                from .sessions.sqlite_repository import SQLiteSessionRepo
+                agent_entries = SQLiteSessionRepo(
+                    self.store.path, self.store.owner
+                ).entries(self.session_id, 'main')
+            except (OSError, KeyError, sqlite3.Error):
+                # Legacy-only sessions remain renderable during migration.
+                agent_entries = []
         from .conversation_timeline import project_timeline
 
-        items = project_timeline(rows, links, runs, live_status=live)
+        items = project_timeline(rows, links, runs, live_status=live,
+                                 agent_entries=agent_entries)
         content = []
         if self.session_id:
             from .session_service import SessionService
