@@ -4,10 +4,11 @@ from __future__ import annotations
 import os
 import sqlite3
 from contextlib import closing
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 
 def _version(db):
@@ -324,6 +325,68 @@ def apply_v13(db):
         created_at TEXT NOT NULL)''')
 
 
+def apply_v14(db):
+    """S16：run ↔ message 归属关联表 + 历史回填（诚实标注，不伪造精确归属）。"""
+    db.execute('''CREATE TABLE IF NOT EXISTS run_message_links (
+        run_id TEXT PRIMARY KEY REFERENCES runs(id),
+        session_id TEXT NOT NULL REFERENCES sessions(id),
+        source_message_id INTEGER REFERENCES messages(id),
+        assistant_message_id INTEGER REFERENCES messages(id),
+        relation TEXT NOT NULL CHECK(relation IN ('exact','legacy_inferred','legacy_unlinked')),
+        created_at TEXT NOT NULL)''')
+    db.execute('''CREATE INDEX IF NOT EXISTS run_message_links_by_assistant
+        ON run_message_links(session_id, assistant_message_id)''')
+    tables = {row[0] for row in db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    if not {'runs', 'messages', 'events'} <= tables:
+        return  # 纯旧版库没有业务表：只建空表，回填留给数据存在时
+    _backfill_run_message_links(db)
+
+
+def _backfill_run_message_links(db):
+    """历史 run 归属回填：顺序 + 唯一性同时成立才标 legacy_inferred。
+
+    - 候选 = run 终态（events 末条 created，无事件用 runs.created）之后
+      同会话最近的一条 assistant 消息；
+    - 同一候选被多个待回填 run 指向 → 全部 legacy_unlinked（不伪造归属）；
+    - 幂等：已有关联的 run 跳过，重放迁移不产生重复或改写；
+    - 审计数量经 relation 标签永久可查（exact/inferred/unlinked）。
+    """
+    linked = {row[0] for row in db.execute('SELECT run_id FROM run_message_links')}
+    runs = db.execute(
+        'SELECT id, session, created FROM runs ORDER BY created, id').fetchall()
+    pending = [row for row in runs if row[0] not in linked]
+    candidates = {}
+    for run_id, session, created in pending:
+        terminal = db.execute(
+            'SELECT MAX(created) FROM events WHERE run=?', (run_id,)).fetchone()[0]
+        terminal = terminal or created
+        candidate = db.execute(
+            "SELECT id FROM messages WHERE session=? AND role='assistant' "
+            'AND created>=? ORDER BY created, id LIMIT 1',
+            (session, terminal)).fetchone()
+        candidates[run_id] = (session, created, candidate[0] if candidate else None)
+    shares = {}
+    for _session, _created, candidate in candidates.values():
+        if candidate is not None:
+            shares[candidate] = shares.get(candidate, 0) + 1
+    stamp = datetime.now(timezone.utc).isoformat()
+    for run_id, (session, created, candidate) in candidates.items():
+        if candidate is None or shares.get(candidate, 0) > 1:
+            relation, assistant_id, source_id = 'legacy_unlinked', None, None
+        else:
+            relation, assistant_id = 'legacy_inferred', candidate
+            source = db.execute(
+                "SELECT id FROM messages WHERE session=? AND role='user' "
+                'AND created<=? ORDER BY created DESC, id DESC LIMIT 1',
+                (session, created)).fetchone()
+            source_id = source[0] if source else None
+        db.execute(
+            'INSERT INTO run_message_links(run_id, session_id, source_message_id,'
+            ' assistant_message_id, relation, created_at) VALUES(?,?,?,?,?,?)',
+            (run_id, session, source_id, assistant_id, relation, stamp))
+
+
 def migrate_database(path: Path) -> Path | None:
     path = path.resolve()
     if not path.is_file():
@@ -387,6 +450,8 @@ def migrate_database(path: Path) -> Path | None:
                 apply_v12(db)
             if previous_version < 13:
                 apply_v13(db)
+            if previous_version < 14:
+                apply_v14(db)
             db.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
             db.commit()
             return backup

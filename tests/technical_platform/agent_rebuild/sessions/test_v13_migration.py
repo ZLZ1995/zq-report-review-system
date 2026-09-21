@@ -35,10 +35,11 @@ def test_fresh_store_is_v13_with_agent_tables(tmp_path):
     from asset_based_agent.technical_platform.store import PlatformStore
     store = PlatformStore(tmp_path / 'db.sqlite', 'alice')
     with sqlite3.connect(store.path) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 13
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 14
         tables = {row[0] for row in db.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
     assert AGENT_TABLES <= tables
+    assert 'run_message_links' in tables, 'S16：新库必须带 v14 归属表'
 
 
 def test_v12_database_migrates_with_verified_backup_and_preserves_rows(tmp_path):
@@ -49,11 +50,12 @@ def test_v12_database_migrates_with_verified_backup_and_preserves_rows(tmp_path)
     backup = migrate_database(path)
     assert backup is not None and backup.is_file(), '迁移必须返回一致性备份'
     with sqlite3.connect(path) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 13
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 14
         assert db.execute('PRAGMA quick_check').fetchone()[0] == 'ok'
         tables = {row[0] for row in db.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
         assert AGENT_TABLES <= tables
+        assert 'run_message_links' in tables, 'S16：v12 库迁移后必须带 v14 归属表'
         texts = [row[0] for row in db.execute('SELECT text FROM messages ORDER BY id')]
     assert texts == ['历史消息一', '历史回复一'], '迁移不得改写旧消息'
     # 备份内容与迁移前一致

@@ -34,6 +34,7 @@ class PlatformStore:
             apply_v11,
             apply_v12,
             apply_v13,
+            apply_v14,
             migrate_database,
         )
 
@@ -95,6 +96,7 @@ class PlatformStore:
                 apply_v11(db)
                 apply_v12(db)
                 apply_v13(db)
+                apply_v14(db)
                 db.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
         # Creation is allowed only during explicit initialization. Later requests
         # must fail closed if a disk disappears or the database is moved.
@@ -214,15 +216,96 @@ class PlatformStore:
         from .session_service import SessionService
         return SessionService(self).list(project_id)
 
-    def append(self, session_id: str, role: str, text: str) -> None:
+    def append(self, session_id: str, role: str, text: str) -> int:
         self.session(session_id)
         if role not in {"user", "assistant", "event"}:
             raise ValueError("invalid message role")
         with self.connect() as db:
-            db.execute(
+            cursor = db.execute(
                 "INSERT INTO messages(session,role,text,created) VALUES(?,?,?,?)",
                 (session_id, role, text, now()),
             )
+            return int(cursor.lastrowid)
+
+    # ------------------------------------------------------------ run ↔ message 归属（v14）
+
+    def link_run_messages(self, run_id: str, source_message_id=None,
+                          assistant_message_id=None, relation: str = 'exact') -> None:
+        """建立 run 与同会话消息的归属关联；幂等，冲突换绑拒绝。"""
+        if relation not in {'exact', 'legacy_inferred', 'legacy_unlinked'}:
+            raise ValueError(f'未知关联类型 relation: {relation}')
+        run = self.run(run_id)  # owner 校验；不存在 → PermissionError
+        session_id = run['session']
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            for message_id in (source_message_id, assistant_message_id):
+                if message_id is None:
+                    continue
+                row = db.execute('SELECT session FROM messages WHERE id=?',
+                                 (message_id,)).fetchone()
+                if row is None:
+                    raise ValueError(f'消息不存在: {message_id}')
+                if row[0] != session_id:
+                    raise ValueError('不允许跨会话关联 run 与消息')
+            existing = db.execute(
+                'SELECT source_message_id, assistant_message_id FROM '
+                'run_message_links WHERE run_id=?', (run_id,)).fetchone()
+            if existing is not None:
+                if (existing['source_message_id'], existing['assistant_message_id']) == \
+                        (source_message_id, assistant_message_id):
+                    return  # 幂等：相同关联重复提交不产生变化
+                raise ValueError('该 run 已关联其他消息，禁止换绑')
+            db.execute(
+                'INSERT INTO run_message_links(run_id, session_id,'
+                ' source_message_id, assistant_message_id, relation, created_at)'
+                ' VALUES(?,?,?,?,?,?)',
+                (run_id, session_id, source_message_id, assistant_message_id,
+                 relation, now()))
+
+    def append_and_link(self, session_id: str, role: str, text: str, run_id: str,
+                        source_message_id=None) -> int:
+        """完成消息与 run 关联原子提交：任何一步失败都不留半截数据。"""
+        self.session(session_id)
+        if role not in {"user", "assistant", "event"}:
+            raise ValueError("invalid message role")
+        run = self.run(run_id)
+        if run['session'] != session_id:
+            raise PermissionError('任务归属与当前会话不一致')
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if source_message_id is not None:
+                row = db.execute('SELECT session FROM messages WHERE id=?',
+                                 (source_message_id,)).fetchone()
+                if row is None:
+                    raise ValueError(f'消息不存在: {source_message_id}')
+                if row[0] != session_id:
+                    raise ValueError('不允许跨会话关联 run 与消息')
+            cursor = db.execute(
+                "INSERT INTO messages(session,role,text,created) VALUES(?,?,?,?)",
+                (session_id, role, text, now()))
+            message_id = int(cursor.lastrowid)
+            existing = db.execute(
+                'SELECT assistant_message_id FROM run_message_links WHERE run_id=?',
+                (run_id,)).fetchone()
+            if existing is None:
+                db.execute(
+                    'INSERT INTO run_message_links(run_id, session_id,'
+                    ' source_message_id, assistant_message_id, relation, created_at)'
+                    " VALUES(?,?,?,?,'exact',?)",
+                    (run_id, session_id, source_message_id, message_id, now()))
+            elif existing['assistant_message_id'] != message_id:
+                raise ValueError('该 run 已关联其他消息，禁止换绑')
+            return message_id
+
+    def run_links(self, session_id: str) -> list[dict]:
+        self.session(session_id)
+        with self.connect() as db:
+            return [
+                dict(r)
+                for r in db.execute(
+                    'SELECT * FROM run_message_links WHERE session_id=?'
+                    ' ORDER BY created_at, run_id', (session_id,))
+            ]
 
     def messages(self, session_id: str) -> list[dict]:
         self.session(session_id)

@@ -112,10 +112,13 @@ def _build_worker_class():
         delta = Signal(str)
         done = Signal(dict)
 
-        def __init__(self, gateway, text, parent=None) -> None:
+        def __init__(self, gateway, text, parent=None, file_ids=(),
+                     upload_ids=()) -> None:
             super().__init__(parent)
             self.gateway = gateway  # 供 cancel_run 调用 gateway.stop()
             self._text = text
+            self._file_ids = tuple(file_ids)
+            self._upload_ids = tuple(upload_ids)
 
         def run(self) -> None:
             delta_buffer = []
@@ -141,7 +144,12 @@ def _build_worker_class():
                         flush_delta()
 
             try:
-                result = self.gateway.submit(self._text, on_event=forward)
+                kwargs = {'on_event': forward}
+                if self._file_ids:
+                    kwargs['file_ids'] = self._file_ids
+                if self._upload_ids:
+                    kwargs['upload_ids'] = self._upload_ids
+                result = self.gateway.submit(self._text, **kwargs)
             except Exception as exc:  # noqa: BLE001 - 边界不泄露堆栈
                 result = {'status': 'failed', 'reply': '',
                           'error_code': type(exc).__name__}

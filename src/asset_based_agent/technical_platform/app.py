@@ -189,6 +189,12 @@ class PlatformWindow(QMainWindow):
         self._live_render_timer.setInterval(80)
         self._live_render_timer.timeout.connect(self._flush_live_agent_render)
         self._feature_flags_cache = None
+        # S16：会话/轮次状态控制器 + 当前轮次锚点（替代固定状态栏）
+        from .conversation_status import ConversationStatusController
+
+        self.status_controller = ConversationStatusController()
+        self._agent_operation_id = None
+        self._agent_user_message_id = None
         self._approval_requested.connect(self._handle_approval_request)
         self.network_state = "connected"
         self.setWindowTitle(
@@ -358,7 +364,7 @@ class PlatformWindow(QMainWindow):
             approver=ApproverBridge(self._ask_approval_gui),
             force_all_tools=True)
 
-    def _try_agent_submit(self, prompt: str) -> bool:
+    def _try_agent_submit(self, prompt: str, file_ids=(), upload_ids=()) -> bool:
         """生产客户端只使用新 Agent；连接不完整时阻止旧路径接管。"""
         if self._agent_worker is not None:
             return True  # 上一轮未结束，吞掉重复提交（与旧 worker 语义一致）
@@ -366,11 +372,18 @@ class PlatformWindow(QMainWindow):
         if gateway is None:
             self.status.setText('新 Agent 尚未连接服务端，本轮未发送；请先连接并重试。')
             return True
+        from uuid import uuid4
+
         from .agent_switch import AgentTurnWorker
 
-        self.store.append(self.session_id, 'user', prompt)  # 灰期双写：供 UI 显示
-        self.render_messages()
-        worker = AgentTurnWorker(gateway, prompt, parent=self)
+        self._agent_user_message_id = self.store.append(
+            self.session_id, 'user', prompt)  # 灰期双写：供 UI 显示
+        self._agent_operation_id = uuid4().hex
+        self.status_controller.set_turn_phase(
+            self.session_id, self._agent_operation_id, '新 Agent 路径：正在生成…')
+        worker = AgentTurnWorker(gateway, prompt, parent=self,
+                                 file_ids=tuple(file_ids),
+                                 upload_ids=tuple(upload_ids))
         worker.delta.connect(self._on_agent_delta)
         worker.done.connect(self._on_agent_done)
         worker.finished.connect(self._on_agent_worker_finished)
@@ -380,7 +393,9 @@ class PlatformWindow(QMainWindow):
         self.composer.clear()
         self.set_busy(True)
         self.status.setText('新 Agent 路径：正在生成…')
+        self.render_messages()  # 用户消息 + live 状态卡立即进入时间线
         worker.start()
+        self._pending_upload_ids = set()  # 本轮上传已随消息冻结进 operation
         return True
 
     def _on_agent_delta(self, text: str) -> None:
@@ -410,13 +425,27 @@ class PlatformWindow(QMainWindow):
         target_session = self._agent_session_id or self.session_id
         if target_session:
             self.store.append(target_session, 'assistant', reply)  # 灰期双写
+        # S16：终态只进轮次控制器与消息表；禁止把完整回复写进状态控件
+        if self._agent_operation_id and target_session:
+            if result.get('status') == 'completed':
+                self.status_controller.complete_turn(
+                    target_session, self._agent_operation_id, reply)
+            elif result.get('status') == 'aborted':
+                self.status_controller.cancel_turn(
+                    target_session, self._agent_operation_id, reply)
+            else:
+                self.status_controller.fail_turn(
+                    target_session, self._agent_operation_id,
+                    result.get('error_code') or 'failed', reply)
+        self._agent_operation_id = None  # 终态已定：live 状态卡退出时间线
         if self.session_id == target_session:
             self.render_messages()
-            self.status.setText(reply)
 
     def _on_agent_worker_finished(self) -> None:
         self._agent_worker = None
         self._agent_session_id = None
+        self._agent_operation_id = None
+        self._agent_user_message_id = None
         self.set_busy(False)
 
     def _ask_approval_gui(self, operation: str, title: str, reason: str) -> bool:
@@ -523,10 +552,12 @@ class PlatformWindow(QMainWindow):
         self.transcript.setOpenLinks(False)
         self.transcript.anchorClicked.connect(self.handle_report_link)
         middle.addWidget(self.transcript, 1)
-        self.status = QLabel("请选择项目。此入口用于本地交互和只读资料预检。")
+        self.status = QLabel("")
         self.status.setObjectName("status")
         self.status.setWordWrap(True)
-        middle.addWidget(self.status)
+        # S16：固定状态栏退出布局。status 仅作不可见适配器保留，
+        # 旧调用点（setText）不再向用户展示；轮次状态由时间线承载。
+        self.status.setVisible(False)
         composer_card = QWidget()
         composer_card.setObjectName("composerCard")
         composer_layout = QVBoxLayout(composer_card)
@@ -829,7 +860,7 @@ class PlatformWindow(QMainWindow):
                 self.render_messages()
                 return
         self.title.setText(self.store.project(self.project_id)["name"])
-        self.status.setText("添加本轮资料，用自然语言描述任务。原始文件只读。")
+        # S16：空会话说明由 transcript 空状态承载（render_messages），不再占用状态控件
         for session in self.store.sessions(self.project_id):
             row = QListWidgetItem(session["title"])
             row.setData(Qt.ItemDataRole.UserRole, session["id"])
@@ -961,6 +992,7 @@ class PlatformWindow(QMainWindow):
         self.run_id = getattr(self.worker, 'run_id', None)
         self.set_busy(self.worker is not None)
         self._scope_submitted = False
+        self._pending_upload_ids = set()
         self.composer.clear()
         selected = set()
         if self.session_id:
@@ -1027,11 +1059,144 @@ class PlatformWindow(QMainWindow):
                 return False
         return True
 
+    def _render_timeline_item(self, item) -> list:
+        """把 TimelineItem 渲染成 HTML 片段（S16：渲染只认 ViewModel）。"""
+        text = html.escape(item.payload.get('text', '')).replace("\n", "<br>")
+        if item.kind == 'user':
+            return [(
+                '<table width="100%" cellspacing="0" cellpadding="16">'
+                '<tr><td width="12%"></td><td bgcolor="#f3f4f7">'
+                '<span style="color:#9399a6;font-size:11px">你</span>'
+                f'<p style="line-height:160%;font-size:14px">{text}</p>'
+                '</td></tr></table><p style="font-size:8px">&nbsp;</p>'
+            )]
+        if item.kind == 'event':
+            return [(
+                '<table width="100%" cellpadding="12"><tr>'
+                '<td bgcolor="#fafbfc"><span style="color:#758399;font-size:11px">'
+                "●  执行记录</span>"
+                f'<p style="color:#858d9b;font-size:12px;line-height:150%">{text}</p>'
+                '</td></tr></table><p style="font-size:8px">&nbsp;</p>'
+            )]
+        if item.kind == 'assistant':
+            return [(
+                '<p style="font-size:13px;color:#3e4c66"><b>ZQ</b>'
+                ' <span style="font-size:10px;color:#a0a6b1"> / ASSISTANT</span></p>'
+                f'<p style="font-size:14px;line-height:170%;margin-bottom:28px">{text}</p>'
+            )]
+        if item.kind == 'live_status':
+            return [(
+                '<p style="font-size:13px;color:#3e4c66"><b>ZQ</b>'
+                ' <span style="font-size:10px;color:#a0a6b1"> / ASSISTANT · 生成中</span></p>'
+                f'<p style="font-size:14px;line-height:170%;margin-bottom:28px">{text}</p>'
+            )]
+        if item.kind == 'artifacts':
+            return self._run_artifacts_html(item.payload['run'])
+        if item.kind == 'legacy_artifacts':
+            blocks = ['<p style="color:#758399;font-size:12px">历史成果（旧版本）：</p>']
+            for run in item.payload['runs']:
+                blocks.extend(self._run_artifacts_html(run))
+            return blocks
+        return []
+
+    def _run_artifacts_html(self, run) -> list:
+        """单个 run 的用户可见成果 HTML（沿用原 render_messages 逐 run 逻辑）。"""
+        content = []
+        result = json.loads(run['result'] or '{}')
+        from .browser_upload_history import upload_history_html
+        try:
+            content.append(upload_history_html(self.store, run['id']))
+        except (ValueError, OSError, sqlite3.Error):
+            content.append('<p>上传尝试记录暂不可用；请核对网站状态，不要重复上传。</p>')
+        if result.get('kind') == 'browser':
+            from .browser_download_delivery import download_links
+            try:
+                content.append(download_links(self.store, run['id']))
+            except (ValueError, OSError, sqlite3.Error):
+                content.append('<p>下载成果记录暂不可用，请核对本地项目数据。</p>')
+        if result.get('kind') == 'plan' and run['state'] == 'succeeded':
+            from .artifact_contract import display_name_of, user_artifacts
+            from .plan_results import completed_step_results
+            try:
+                records = completed_step_results(self.store, self.session_id, run['id'])
+                for ordinal, record in enumerate(records):
+                    if record['result'].get('kind') == 'review':
+                        from .review_delivery import step_review_store
+                        scoped = step_review_store(self.store, self.session_id, run['id'], ordinal)
+                        review = json.loads(scoped.run(run['id'])['result'])
+                        link = f'{run["id"]}/{ordinal}'
+                        content.append(f'<p>审核步骤：{html.escape(record["goal"])} '
+                            f'<a href="zq-step-export:{link}">生成标准Word审核报告…</a></p>')
+                        if review.get('issues'):
+                            content.append(f'<p><a href="zq-step-annotate:{link}">生成本步骤问题批注副本…</a>（不修改原件）</p>')
+                        for index, path in enumerate(p for batch in review.get('annotations', []) for p in batch['files']):
+                            content.append(f'<p>📄 {html.escape(Path(path).name)} '
+                                f'<a href="zq-step-comment:{link}/{index}">打开批注副本</a></p>')
+                        if review.get('exported_report'):
+                            content.append(f'<p>📄 {html.escape(Path(review["exported_report"]).name)} '
+                                f'<a href="zq-step-report:{link}">打开审核报告</a></p>')
+                    for index, artifact in user_artifacts(record['result']):
+                        content.append(f'<p>📄 {html.escape(display_name_of(artifact))}　'
+                            f'<a href="zq-step-artifact:{run["id"]}/{ordinal}/{index}">打开步骤成果</a></p>')
+            except (ValueError, PermissionError, KeyError, OSError, TypeError):
+                content.append('<p>组合成果记录校验失败，请核对任务状态。</p>')
+        if result.get('kind') == 'generation':
+            try:
+                from .artifact_contract import (
+                    deliverable_label,
+                    display_name_of,
+                    user_artifacts,
+                )
+                visible_artifacts = user_artifacts(result)
+            except (ValueError, KeyError, TypeError):
+                content.append('<p>生成成果记录校验失败，请核对任务状态。</p>')
+                visible_artifacts = []
+            if (len(visible_artifacts) == 1 and run['state'] == 'succeeded'
+                    and result.get('ok') is True):
+                index, artifact = visible_artifacts[0]
+                label = deliverable_label(artifact)
+                shown = html.escape(display_name_of(artifact))
+                if label:
+                    content.append(f'<p>{html.escape(label)}已生成并通过校验。</p>')
+                content.append(f'<p>最终文件：{shown}　'
+                    f'<a href="zq-artifact:{run["id"]}/{index}">打开文件</a>　'
+                    f'<a href="zq-artifact-folder:{run["id"]}/{index}">打开所在文件夹</a></p>')
+            else:
+                for index, artifact in visible_artifacts:
+                    shown = html.escape(display_name_of(artifact))
+                    content.append(f'<p>📄 {shown}　<a href="zq-artifact:{run["id"]}/{index}">打开文件</a></p>')
+        if run['state'] == 'succeeded' and result.get('kind') == 'review':
+            identity = run['id']
+            content.append(f'<p>审核任务 {html.escape(identity)}：<a href="zq-export:{identity}">生成标准Word审核报告…</a></p>')
+            if result.get('issues'):
+                content.append(f'<p><a href="zq-annotate:{identity}">生成问题标记和批注副本…</a>（不修改原件）</p>')
+            annotation_files = [p for b in result.get('annotations', []) for p in b['files']]
+            for index, path in enumerate(annotation_files):
+                content.append(f'<p>📄 {html.escape(Path(path).name)} <a href="zq-comment:{identity}/{index}">打开批注副本</a></p>')
+            if result.get('exported_report'):
+                name = html.escape(Path(result['exported_report']).name)
+                content.append(f'<p>📄 {name}　<a href="zq-report:{identity}">打开文件</a>　<a href="zq-folder:{identity}">打开所在文件夹</a></p>')
+        return content
+
     def render_messages(self):
         scroll = self.transcript.verticalScrollBar()
         previous_position = scroll.value()
         follow_output = previous_position >= scroll.maximum() - 24
         rows = self.store.messages(self.session_id) if self.session_id else []
+        links, runs = [], []
+        if self.session_id:
+            links = self.store.run_links(self.session_id)
+            runs = self.store.runs(self.session_id)
+        live = None
+        if (self._agent_worker is not None and self.session_id
+                and self.session_id == self._agent_session_id
+                and self._agent_operation_id):
+            live = {'after_message_id': self._agent_user_message_id,
+                    'operation_id': self._agent_operation_id,
+                    'text': self._live_agent_text or '新 Agent 路径：正在生成…'}
+        from .conversation_timeline import project_timeline
+
+        items = project_timeline(rows, links, runs, live_status=live)
         content = []
         if self.session_id:
             from .session_service import SessionService
@@ -1048,113 +1213,12 @@ class PlatformWindow(QMainWindow):
                             '<br>'.join(html.escape(ref['run_id']) for ref in references) + '</p>')
                 except (OSError, ValueError, PermissionError, sqlite3.Error):
                     content.append('<p>来源结果已变化或无法校验，未采用该分支引用；请返回来源核对。</p>')
-        for message in rows:
-            text = html.escape(message["text"]).replace("\n", "<br>")
-            if message["role"] == "user":
-                content.append(
-                    '<table width="100%" cellspacing="0" cellpadding="16">'
-                    '<tr><td width="12%"></td><td bgcolor="#f3f4f7">'
-                    '<span style="color:#9399a6;font-size:11px">你</span>'
-                    f'<p style="line-height:160%;font-size:14px">{text}</p>'
-                    '</td></tr></table><p style="font-size:8px">&nbsp;</p>'
-                )
-            elif message["role"] == "event":
-                content.append(
-                    '<table width="100%" cellpadding="12"><tr>'
-                    '<td bgcolor="#fafbfc"><span style="color:#758399;font-size:11px">'
-                    "●  执行记录</span>"
-                    f'<p style="color:#858d9b;font-size:12px;line-height:150%">{text}</p>'
-                    '</td></tr></table><p style="font-size:8px">&nbsp;</p>'
-                )
-            else:
-                content.append(
-                    '<p style="font-size:13px;color:#3e4c66"><b>ZQ</b>'
-                    ' <span style="font-size:10px;color:#a0a6b1"> / ASSISTANT</span></p>'
-                    f'<p style="font-size:14px;line-height:170%;margin-bottom:28px">{text}</p>'
-                )
-        if self.session_id:
-            for run in self.store.runs(self.session_id):
-                result = json.loads(run['result'] or '{}')
-                from .browser_upload_history import upload_history_html
-                try:
-                    content.append(upload_history_html(self.store, run['id']))
-                except (ValueError, OSError, sqlite3.Error):
-                    content.append('<p>上传尝试记录暂不可用；请核对网站状态，不要重复上传。</p>')
-                if result.get('kind') == 'browser':
-                    from .browser_download_delivery import download_links
-                    try:
-                        content.append(download_links(self.store, run['id']))
-                    except (ValueError, OSError, sqlite3.Error):
-                        content.append('<p>下载成果记录暂不可用，请核对本地项目数据。</p>')
-                if result.get('kind') == 'plan' and run['state'] == 'succeeded':
-                    from .artifact_contract import display_name_of, user_artifacts
-                    from .plan_results import completed_step_results
-                    try:
-                        records = completed_step_results(self.store, self.session_id, run['id'])
-                        for ordinal, record in enumerate(records):
-                            if record['result'].get('kind') == 'review':
-                                from .review_delivery import step_review_store
-                                scoped = step_review_store(self.store, self.session_id, run['id'], ordinal)
-                                review = json.loads(scoped.run(run['id'])['result'])
-                                link = f'{run["id"]}/{ordinal}'
-                                content.append(f'<p>审核步骤：{html.escape(record["goal"])} '
-                                    f'<a href="zq-step-export:{link}">生成标准Word审核报告…</a></p>')
-                                if review.get('issues'):
-                                    content.append(f'<p><a href="zq-step-annotate:{link}">生成本步骤问题批注副本…</a>（不修改原件）</p>')
-                                for index, path in enumerate(p for batch in review.get('annotations', []) for p in batch['files']):
-                                    content.append(f'<p>📄 {html.escape(Path(path).name)} '
-                                        f'<a href="zq-step-comment:{link}/{index}">打开批注副本</a></p>')
-                                if review.get('exported_report'):
-                                    content.append(f'<p>📄 {html.escape(Path(review["exported_report"]).name)} '
-                                        f'<a href="zq-step-report:{link}">打开审核报告</a></p>')
-                            for index, artifact in user_artifacts(record['result']):
-                                content.append(f'<p>📄 {html.escape(display_name_of(artifact))}　'
-                                    f'<a href="zq-step-artifact:{run["id"]}/{ordinal}/{index}">打开步骤成果</a></p>')
-                    except (ValueError, PermissionError, KeyError, OSError, TypeError):
-                        content.append('<p>组合成果记录校验失败，请核对任务状态。</p>')
-                if result.get('kind') == 'generation':
-                    try:
-                        from .artifact_contract import (
-                            deliverable_label,
-                            display_name_of,
-                            user_artifacts,
-                        )
-                        visible_artifacts = user_artifacts(result)
-                    except (ValueError, KeyError, TypeError):
-                        content.append('<p>生成成果记录校验失败，请核对任务状态。</p>')
-                        visible_artifacts = []
-                    if (len(visible_artifacts) == 1 and run['state'] == 'succeeded'
-                            and result.get('ok') is True):
-                        index, artifact = visible_artifacts[0]
-                        label = deliverable_label(artifact)
-                        shown = html.escape(display_name_of(artifact))
-                        if label:
-                            content.append(f'<p>{html.escape(label)}已生成并通过校验。</p>')
-                        content.append(f'<p>最终文件：{shown}　'
-                            f'<a href="zq-artifact:{run["id"]}/{index}">打开文件</a>　'
-                            f'<a href="zq-artifact-folder:{run["id"]}/{index}">打开所在文件夹</a></p>')
-                    else:
-                        for index, artifact in visible_artifacts:
-                            shown = html.escape(display_name_of(artifact))
-                            content.append(f'<p>📄 {shown}　<a href="zq-artifact:{run["id"]}/{index}">打开文件</a></p>')
-                if run['state'] == 'succeeded' and result.get('kind') == 'review':
-                    identity = run['id']
-                    content.append(f'<p>审核任务 {html.escape(identity)}：<a href="zq-export:{identity}">生成标准Word审核报告…</a></p>')
-                    if result.get('issues'):
-                        content.append(f'<p><a href="zq-annotate:{identity}">生成问题标记和批注副本…</a>（不修改原件）</p>')
-                    annotation_files = [p for b in result.get('annotations', []) for p in b['files']]
-                    for index, path in enumerate(annotation_files):
-                        content.append(f'<p>📄 {html.escape(Path(path).name)} <a href="zq-comment:{identity}/{index}">打开批注副本</a></p>')
-                    if result.get('exported_report'):
-                        name = html.escape(Path(result['exported_report']).name)
-                        content.append(f'<p>📄 {name}　<a href="zq-report:{identity}">打开文件</a>　<a href="zq-folder:{identity}">打开所在文件夹</a></p>')
-        if self._live_agent_text:
-            live = html.escape(self._live_agent_text).replace("\n", "<br>")
+        if self.session_id and not rows and live is None:
             content.append(
-                '<p style="font-size:13px;color:#3e4c66"><b>ZQ</b>'
-                ' <span style="font-size:10px;color:#a0a6b1"> / ASSISTANT · 生成中</span></p>'
-                f'<p style="font-size:14px;line-height:170%;margin-bottom:28px">{live}</p>'
-            )
+                '<p style="color:#858d9b;font-size:14px;line-height:180%">'
+                '添加本轮资料，用自然语言描述任务。原始文件只读。</p>')
+        for item in items:
+            content.extend(self._render_timeline_item(item))
         self.transcript.setHtml(
             "".join(content)
             or (
@@ -1445,11 +1509,16 @@ class PlatformWindow(QMainWindow):
         if imported:
             selected -= {f['id'] for f in existing if f['name'] in imported}
             selected.update(imported.values())
+            pending = getattr(self, '_pending_upload_ids', set())
+            pending.update(imported.values())  # 本轮上传必须进入上下文，与勾选无关
+            self._pending_upload_ids = pending
             self._scope_submitted = False
             self.refresh_details(selected_ids=selected)
             self.details.show()
             self.details.setCurrentIndex(0)
-        message = f"已添加 {added} 个文件，复用 {skipped} 个重复文件。本轮选中 {len(self.selected_file_ids())} 个文件，历史资料不会自动加入。"
+        message = (f"已添加 {added} 个文件，复用 {skipped} 个重复文件。"
+                   f"本轮选中 {len(self.selected_file_ids())} 个文件；"
+                   "本轮上传的文件会自动带入上下文，历史资料可由 Agent 按需读取。")
         if errors:
             message += "\n" + "；".join(errors)
         self.status.setText(message)
@@ -1528,7 +1597,12 @@ class PlatformWindow(QMainWindow):
         if self.try_local_skill_install(prompt):
             return
         # 正式客户端只允许新 Agent；旧 TurnRouter 链路不再作为回退入口。
-        self._try_agent_submit(prompt)
+        # 本轮上传的文件必须进上下文（与勾选无关）；其余勾选文件按显式选择
+        # 随消息一起冻结进 operation 绑定，模型才看得到文件。
+        checked = self.selected_file_ids()
+        uploads = set(getattr(self, '_pending_upload_ids', set()))
+        self._try_agent_submit(prompt, file_ids=sorted(checked - uploads),
+                               upload_ids=sorted(uploads))
         return
 
     def try_local_builtin(self, prompt: str) -> bool:
@@ -1991,7 +2065,10 @@ class PlatformWindow(QMainWindow):
             from .plan_results import completed_step_results
             try:
                 records = completed_step_results(store, session_id, run_id)
-                store.append(session_id, 'assistant', f'组合任务完成，共 {len(records)} 个步骤；原文件未变化。')
+                store.append_and_link(
+                    session_id, 'assistant',
+                    f'组合任务完成，共 {len(records)} 个步骤；原文件未变化。',
+                    run_id)
                 for record in records:
                     self.append_output('步骤：' + record['goal'], destination=target)
                     if record['result'].get('kind') == 'generation':
@@ -2007,7 +2084,7 @@ class PlatformWindow(QMainWindow):
             return
         if result.get('kind') == 'generation':
             summary = ('任务已取消，未发布正式成果。' if state == 'cancelled' else result['feedback'])
-            store.append(session_id, 'assistant', summary)
+            store.append_and_link(session_id, 'assistant', summary, run_id)
             if target.visible(self):
                 self.status.setText('等待补充信息，请在对话中回复主体、期间或文件名'
                                     if state == 'waiting_user'
@@ -2021,7 +2098,7 @@ class PlatformWindow(QMainWindow):
             if result.get("kind") == "review"
             else "资料预检完成，原文件未变化；尚未执行模型审核。"
         )
-        store.append(session_id, "assistant", summary)
+        store.append_and_link(session_id, "assistant", summary, run_id)
         if state == 'succeeded' and result.get('kind') == 'review' and not result.get('issues'):
             store.append(session_id, 'assistant', '本轮没有审核问题，无需生成批注副本。')
         self.show_result(result, destination=target)
@@ -2166,7 +2243,13 @@ class PlatformWindow(QMainWindow):
             summary += '\n\n' + result['summary']
         if isinstance(result.get('evidence'), str) and result['evidence']:
             summary += '\n\n网页依据（未经独立信任）：\n' + result['evidence']
-        self.append_output(summary, destination=target)
+        message_id = self.append_output(summary, destination=target)
+        if message_id is not None:
+            try:
+                target.store.link_run_messages(target.binding.task_id,
+                                               assistant_message_id=message_id)
+            except ValueError:
+                pass  # 已关联（去重重放路径）：保持原绑定
         return summary
 
     def append_output(self, text, run_id=None, *, destination=None):
@@ -2175,7 +2258,8 @@ class PlatformWindow(QMainWindow):
         text = f"任务 {identity}\n\n{text}"
         session_id = target.binding.session_id
         if text not in {m["text"] for m in target.store.messages(session_id)}:
-            target.store.append(session_id, "assistant", text)
+            return target.store.append(session_id, "assistant", text)
+        return None
 
     def receive_output(self, issues, run_id=None, *, destination=None):
         target = destination or TaskDestination.resolve(self.store, run_id or self.run_id)
