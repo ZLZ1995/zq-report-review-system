@@ -34,3 +34,24 @@ def test_gateway_recovers_open_operation_before_new_submit(tmp_path):
     entries = gateway.repo.entries(session, 'main')
     assert any(entry.entry_type == 'error_message'
                and entry.operation_id == interrupted.id for entry in entries)
+
+
+def test_gateway_mirrors_legacy_messages_once_for_new_agent_context(tmp_path):
+    store = PlatformStore(tmp_path / 'db.sqlite', 'alice')
+    project = store.create_project('one')
+    session = store.create_session(project)
+    store.append(session, 'user', '历史问题')
+    store.append(session, 'assistant', '历史回答')
+    flags = FeatureFlagStore(tmp_path / 'flags.json')
+    gateway = AgentGateway(
+        store, session, flags=flags, model_port_factory=lambda: None,
+        permission_mode_getter=lambda: 'risk', force_all_tools=True)
+
+    gateway._mirror_session()
+    first = gateway.repo.entries(session, 'main')
+    gateway._mirror_session()
+    second = gateway.repo.entries(session, 'main')
+
+    assert [(entry.entry_type, entry.payload['text']) for entry in first] == [
+        ('user_message', '历史问题'), ('assistant_message', '历史回答')]
+    assert len(second) == len(first)

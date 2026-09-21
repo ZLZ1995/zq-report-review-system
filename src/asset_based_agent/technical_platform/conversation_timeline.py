@@ -112,11 +112,12 @@ def project_timeline(messages: list[dict], links: list[dict],
             if item.kind in {'user', 'assistant', 'event'}
             and (item.kind, item.payload.get('text', '')) in agent_texts
         }
-        # Remove the grey-period legacy copy and artifacts anchored to it.
+        # Remove only the grey-period message copy. Keep its artifact block:
+        # historical files remain visible, but are no longer attached to the
+        # newly projected Agent reply.
         legacy_items = [item for item in legacy_items if not (
-            item.message_id in duplicate_message_ids
-            or (item.kind == 'artifacts'
-                and item.message_id in duplicate_message_ids))]
+            item.kind in {'user', 'assistant', 'event'}
+            and item.message_id in duplicate_message_ids)]
         return legacy_items + agent_items
 
     runs_by_id = {run['id']: run for run in runs}

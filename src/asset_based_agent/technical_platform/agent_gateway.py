@@ -157,6 +157,29 @@ class AgentGateway:
                 permission_mode=mode)
         else:
             self.repo.set_permission_mode(self._session_id, mode)
+        # Legacy Qt messages lived outside the Agent tree. Mirror them once so
+        # the new ContextBuilder can answer follow-up questions in old
+        # sessions; the marker makes the migration idempotent and does not
+        # duplicate new Agent entries created later.
+        legacy_rows = self._store.messages(self._session_id)
+        current = self.repo.entries(self._session_id, 'main')
+        mirrored = {
+            str(entry.payload.get('_legacy_message_id'))
+            for entry in current if entry.payload.get('_legacy_message_id')
+        }
+        role_map = {'user': 'user_message', 'assistant': 'assistant_message',
+                    'event': 'event'}
+        for row in legacy_rows:
+            legacy_id = str(row.get('id'))
+            entry_type = role_map.get(row.get('role'))
+            if not entry_type or legacy_id in mirrored:
+                continue
+            self.repo.append_entry(
+                self._session_id, 'main', entry_type,
+                {'text': str(row.get('text', '')),
+                 '_legacy_message_id': legacy_id},
+            )
+            mirrored.add(legacy_id)
 
     # ------------------------------------------------------------ 运行
 
