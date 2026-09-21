@@ -4,7 +4,7 @@ import asyncio
 import shutil
 
 import pytest
-from skill_fixtures import (
+from .skill_fixtures import (
     echo_executor,
     make_registry,
     make_tool_registry,
