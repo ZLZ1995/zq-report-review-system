@@ -182,6 +182,7 @@ class PlatformWindow(QMainWindow):
         self._agent_worker = None  # S15：新 Agent 路径轮次 Worker（不占用 task_manager）
         # S30：新 Agent worker 按会话隔离；_agent_worker 仅保留为当前会话兼容别名。
         self._agent_jobs = {}
+        self._close_after_agent_jobs = False
         self._agent_session_id = None
         # 新 Agent 的增量文本先在内存中合并，再以低频刷新到对话面板。
         # 逐 token 调用 setHtml 会把 GUI 事件队列塞满，长回复看起来就像“卡死”。
@@ -264,6 +265,12 @@ class PlatformWindow(QMainWindow):
                 self.status.setText('权限模式保存失败，已保留原设置。')
                 return
         stopped = self.task_manager.cancel_all()
+        for job in list(self._agent_jobs.values()):
+            try:
+                job['gateway'].stop()
+                stopped += 1
+            except Exception:
+                continue
         revoked = (self.browser_panel.task_leases.revoke_all()
                    if self.browser_panel is not None else 0)
         self.refresh_permission_menu()
@@ -493,6 +500,9 @@ class PlatformWindow(QMainWindow):
     def _on_agent_worker_finished_for(self, session_id: str | None) -> None:
         self._agent_jobs.pop(session_id, None)
         if session_id != self.session_id:
+            if self._close_after_agent_jobs and not self._agent_jobs:
+                self._close_after_agent_jobs = False
+                QTimer.singleShot(0, self.close)
             return
         self._agent_worker = None
         self._agent_session_id = None
@@ -500,6 +510,9 @@ class PlatformWindow(QMainWindow):
         self._agent_user_message_id = None
         self._agent_user_text = ''
         self.set_busy(False)
+        if self._close_after_agent_jobs and not self._agent_jobs:
+            self._close_after_agent_jobs = False
+            QTimer.singleShot(0, self.close)
 
     def _ask_approval_gui(self, operation: str, title: str, reason: str) -> bool:
         """ApproverBridge 在 Worker 线程内调用；转到 GUI 线程弹旧批准框。"""
@@ -2762,6 +2775,16 @@ class PlatformWindow(QMainWindow):
             return
         if self.update_worker is not None:
             self.status.setText('更新包仍在验签或暂存，请稍后关闭。')
+            event.ignore()
+            return
+        if self._agent_jobs:
+            for job in list(self._agent_jobs.values()):
+                try:
+                    job['gateway'].stop()
+                except Exception:
+                    continue
+            self._close_after_agent_jobs = True
+            self.status.setText("正在停止所有会话中的 Agent 任务；等待线程结束后才能关闭。")
             event.ignore()
             return
         if self.task_manager.active():
