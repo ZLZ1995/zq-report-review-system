@@ -117,10 +117,11 @@ class ContextBuilder:
             records = lookup(project_id)
         except Exception:  # noqa: BLE001 - 清单只是提示，不得拖垮上下文装配
             return None
-        names = [r['name'] for r in records
-                 if r.get('name') and r.get('id') not in bound_ids]
-        if not names:
+        candidates = [r for r in records
+                      if r.get('name') and r.get('id') not in bound_ids]
+        if not candidates:
             return None
+        names = [f"{r.get('name')}[id={r.get('id')}]" for r in candidates]
         shown = '；'.join(names[:limit])
         count = (f' 等共 {len(names)} 个' if len(names) > limit
                  else f'（共 {len(names)} 个）')
