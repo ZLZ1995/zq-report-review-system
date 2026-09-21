@@ -2,7 +2,9 @@
 import sqlite3
 from typing import cast
 
-from PySide6.QtCore import QTimer, QUrl
+import threading
+
+from PySide6.QtCore import QThread, QTimer, QUrl, Qt, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWebEngineCore import QWebEngineNewWindowRequest
 from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -32,10 +34,15 @@ from .browser_task_leases import BrowserTaskLeases
 
 class BrowserPanel(QWidget):
     LOAD_TIMEOUT_MS = 20_000
+    _agent_call = Signal(object)
 
     def __init__(self, session, parent=None, *, task_manager=None):
         super().__init__(parent)
         self.session = session
+        from .browser_agent_backend import QtBrowserAgentBackend
+        self._agent_call.connect(self._handle_agent_call,
+                                 Qt.ConnectionType.QueuedConnection)
+        self.agent_backend = QtBrowserAgentBackend(self)
         self.task_leases = BrowserTaskLeases(session, task_manager)
         self.credentials_dialog = None
         self.login_captures: dict[QWebEngineView, LoginCapture] = {}
@@ -118,6 +125,69 @@ class BrowserPanel(QWidget):
         layout.addLayout(footer)
         self.new_tab()
         self.takeover_filter = BrowserTakeover(self)
+
+    def dispatch_agent_call(self, callback, *, timeout=20.0):
+        """Run a browser callback on the panel's GUI thread."""
+        if QThread.currentThread() is self.thread():
+            return callback()
+        done = threading.Event()
+        box = {}
+        self._agent_call.emit((callback, done, box))
+        if not done.wait(timeout):
+            raise RuntimeError('浏览器 GUI 线程响应超时')
+        if 'error' in box:
+            raise box['error']
+        return box.get('result')
+
+    def _handle_agent_call(self, call):
+        callback, done, box = call
+        try:
+            box['result'] = callback()
+        except Exception as exc:  # noqa: BLE001 - bridge boundary
+            box['error'] = exc
+        finally:
+            done.set()
+
+    def dispatch_agent_javascript(self, script, *, timeout=20.0):
+        result = {}
+        done = threading.Event()
+
+        def run():
+            view = self.current_view()
+            if view is None:
+                raise RuntimeError('浏览器没有活动标签页')
+            view.page().runJavaScript(
+                script, lambda value: (result.update(value or {}), done.set()))
+            return True
+
+        self.dispatch_agent_call(run, timeout=timeout)
+        if not done.wait(timeout):
+            raise RuntimeError('网页脚本执行超时')
+        if not result.get('ok', False):
+            raise RuntimeError(result.get('error', '网页操作未完成'))
+        return result
+
+    def dispatch_agent_observe(self, *, timeout=20.0):
+        box = {}
+        done = threading.Event()
+
+        def run():
+            view = self.current_view()
+            if view is None:
+                raise RuntimeError('浏览器没有活动标签页')
+            box.update({'url': view.url().toString(), 'title': view.title()})
+            view.page().toPlainText(
+                lambda text: (box.update({'content': text or ''}), done.set()))
+            return True
+
+        self.dispatch_agent_call(run, timeout=timeout)
+        if not done.wait(timeout):
+            raise RuntimeError('网页内容读取超时')
+        return box
+
+    def dispatch_agent_takeover(self):
+        self.dispatch_agent_call(
+            lambda: self.notice(self.current_view(), '请在浏览器面板中完成接管操作。'))
 
     def open_credentials(self):
         from .browser_credential_manager import CredentialManager
