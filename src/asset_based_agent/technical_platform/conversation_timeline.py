@@ -73,7 +73,10 @@ def project_agent_timeline(entries, *, live_status=None) -> list[TimelineItem]:
         items.append(TimelineItem(
             kind='live_status',
             operation_id=live_status.get('operation_id'),
-            payload={'text': live_status.get('text', '')},
+            payload={'text': live_status.get('text', ''),
+                     # S9：状态卡视图透传（不改变既有 kind/锚点语义）
+                     **({'view': live_status['view']}
+                        if live_status.get('view') is not None else {})},
         ))
     return items
 

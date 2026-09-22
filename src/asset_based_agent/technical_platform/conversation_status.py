@@ -8,19 +8,23 @@
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 
 TERMINAL_PHASES = frozenset({'completed', 'failed', 'cancelled', 'waiting'})
-ACTIVE_PHASES = frozenset({'running'})
+ACTIVE_PHASES = frozenset({'running', 'stopping', 'waiting_user'})
 
 
 @dataclass(frozen=True)
 class TurnStatus:
     session_id: str
     operation_id: str
-    phase: str  # 'running' | 'completed' | 'failed' | 'cancelled' | 'waiting'
+    phase: str  # 'running' | 'stopping' | 'waiting_user' |
+    #             'completed' | 'failed' | 'cancelled' | 'waiting'
     text: str
     payload: dict = field(default_factory=dict)
+    started_at: float = 0.0
+    last_activity_at: float = 0.0
 
 
 class ConversationStatusController:
@@ -50,6 +54,16 @@ class ConversationStatusController:
                     ) -> None:
         self._put(session_id, operation_id, 'cancelled', summary)
 
+    def stopping_turn(self, session_id: str, operation_id: str, summary: str
+                      ) -> None:
+        """S9：停止请求已发出但任务未收束——stopping 是活动态而非终态。"""
+        self._put(session_id, operation_id, 'stopping', summary)
+
+    def waiting_user_turn(self, session_id: str, operation_id: str, text: str
+                          ) -> None:
+        """S9：任务等待用户确认/输入——来自 durable operation 等待态。"""
+        self._put(session_id, operation_id, 'waiting_user', text)
+
     def clear_turn_phase(self, session_id: str, operation_id: str) -> None:
         key = (session_id, operation_id)
         self._turns.pop(key, None)
@@ -68,12 +82,15 @@ class ConversationStatusController:
         if not session_id or not operation_id:
             raise ValueError('会话状态必须携带 session_id 与 operation_id')
         key = (session_id, operation_id)
-        if key not in self._turns:
+        now = time.time()
+        previous = self._turns.get(key)
+        if previous is None:
             self._order.append(key)
-        self._turns[key] = TurnStatus(session_id=session_id,
-                                      operation_id=operation_id,
-                                      phase=phase, text=text,
-                                      payload=payload or {})
+        self._turns[key] = TurnStatus(
+            session_id=session_id, operation_id=operation_id,
+            phase=phase, text=text, payload=payload or {},
+            started_at=previous.started_at if previous is not None else now,
+            last_activity_at=now)
 
     # ------------------------------------------------------------ 全局通知
 

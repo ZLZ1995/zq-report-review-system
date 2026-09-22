@@ -200,6 +200,11 @@ class PlatformWindow(QMainWindow):
         self._live_render_timer.setSingleShot(True)
         self._live_render_timer.setInterval(80)
         self._live_render_timer.timeout.connect(self._flush_live_agent_render)
+        # S9：运行状态卡 elapsed/last-activity 每秒刷新；
+        # 仅在有活跃任务时走表，不用 polling 伪造进度。
+        self._status_timer = QTimer(self)
+        self._status_timer.setInterval(1000)
+        self._status_timer.timeout.connect(self._tick_run_status)
         self._feature_flags_cache = None
         # S16：会话/轮次状态控制器 + 当前轮次锚点（替代固定状态栏）
         from .conversation_status import ConversationStatusController
@@ -424,10 +429,14 @@ class PlatformWindow(QMainWindow):
                             self._on_agent_done_for(sid, result))
         worker.finished.connect(lambda sid=session_id:
                                 self._on_agent_worker_finished_for(sid))
+        now = time.monotonic()
         self._agent_jobs[session_id] = {
             'worker': worker, 'gateway': gateway,
             'operation_id': None, 'user_text': prompt,
             'live_text': '',
+            # S9：真实计时锚点（单调时钟）与停止标记
+            'started_at': now, 'last_activity_at': now,
+            'stop_requested': False,
         }
         self._agent_worker = worker
         self._agent_session_id = session_id
@@ -448,11 +457,14 @@ class PlatformWindow(QMainWindow):
         job = self._agent_jobs.get(session_id)
         if job is not None:
             job['operation_id'] = operation_id
+            job['last_activity_at'] = time.monotonic()
         if session_id == self.session_id:
             self._agent_operation_id = operation_id
         self.status_controller.set_turn_phase(
             session_id, operation_id, '新 Agent 路径：正在生成…')
         if session_id == self.session_id:
+            if not self._status_timer.isActive():
+                self._status_timer.start()
             self.render_messages()
 
     def _on_agent_delta(self, text: str) -> None:
@@ -464,6 +476,7 @@ class PlatformWindow(QMainWindow):
             if job is None:
                 return
             job['live_text'] += text
+            job['last_activity_at'] = time.monotonic()
             self._live_render_pending.add(session_id)
             if session_id == self.session_id:
                 self._live_agent_text = job['live_text']
@@ -560,6 +573,8 @@ class PlatformWindow(QMainWindow):
 
     def _on_agent_worker_finished_for(self, session_id: str | None) -> None:
         self._agent_jobs.pop(session_id, None)
+        if not self._agent_jobs and self._status_timer.isActive():
+            self._status_timer.stop()
         if session_id != self.session_id:
             if self._close_after_agent_jobs and not self._agent_jobs:
                 self._close_after_agent_jobs = False
@@ -1233,6 +1248,15 @@ class PlatformWindow(QMainWindow):
                 f'<p style="font-size:14px;line-height:170%;margin-bottom:28px">{text}</p>'
             )]
         if item.kind == 'live_status':
+            view = item.payload.get('view')
+            if view is not None:
+                # S9：实时运行状态卡（真实状态/计时/步骤）
+                import dataclasses
+
+                from .run_status import status_card_html
+                view = dataclasses.replace(
+                    view, text=item.payload.get('text', ''))
+                return [status_card_html(view)]
             return [(
                 '<p style="font-size:13px;color:#3e4c66"><b>ZQ</b>'
                 ' <span style="font-size:10px;color:#a0a6b1"> / ASSISTANT · 生成中</span></p>'
@@ -1326,6 +1350,62 @@ class PlatformWindow(QMainWindow):
                 content.append(f'<p>📄 {name}　<a href="zq-report:{identity}">打开文件</a>　<a href="zq-folder:{identity}">打开所在文件夹</a></p>')
         return content
 
+    # ------------------------------------------------------- S9 运行状态卡
+
+    def _live_status_view(self, job):
+        """从真实 job 记账 + durable operation 推导状态卡视图。"""
+        from .run_status import RunStatusView, derive_run_state, derive_step
+        now = time.monotonic()
+        operation_id = job.get('operation_id') or ''
+        operation_status = None
+        tools_running = 0
+        gateway = job.get('gateway')
+        repo = getattr(gateway, 'repo', None)
+        if repo is not None and operation_id:
+            try:
+                record = repo.get_operation(operation_id)
+                operation_status = record.status
+                tools_running = sum(
+                    1 for call in repo.tool_calls(operation_id)
+                    if call.status in ('proposed', 'running'))
+            except (KeyError, ValueError, sqlite3.Error):
+                operation_status = None
+        state = derive_run_state(
+            'running', operation_status=operation_status,
+            stop_requested=bool(job.get('stop_requested')))
+        step = derive_step(accepted=bool(operation_id),
+                           has_output=bool(job.get('live_text')),
+                           tools_running=tools_running)
+        return RunStatusView(
+            state=state, operation_id=operation_id or 'pending',
+            elapsed_seconds=int(now - job.get('started_at', now)),
+            last_activity_seconds=int(now - job.get('last_activity_at', now)),
+            step_index=step, text='')
+
+    def _terminal_status_line(self):
+        """最近一轮的终态摘要行；无终态记录时返回 None。"""
+        from .conversation_status import TERMINAL_PHASES
+        from .run_status import RunStatusView, terminal_line_html
+        status = self.status_controller.turn_phase(self.session_id)
+        if status is None or status.phase not in TERMINAL_PHASES - {'waiting'}:
+            return None
+        elapsed = 0
+        if status.started_at and status.last_activity_at:
+            elapsed = int(status.last_activity_at - status.started_at)
+        view = RunStatusView(
+            state=status.phase, operation_id=status.operation_id,
+            elapsed_seconds=elapsed, last_activity_seconds=None,
+            step_index=3, text='')
+        return terminal_line_html(view)
+
+    def _tick_run_status(self) -> None:
+        """每秒刷新当前会话状态卡的计时；无活跃任务即停表。"""
+        job = self._agent_jobs.get(self.session_id)
+        if job is None or job.get('done'):
+            self._status_timer.stop()
+            return
+        self.render_messages()
+
     def render_messages(self):
         scroll = self.transcript.verticalScrollBar()
         previous_position = scroll.value()
@@ -1343,7 +1423,9 @@ class PlatformWindow(QMainWindow):
             live = {'after_message_id': None,
                     'operation_id': current_job['operation_id'],
                     'user_text': current_job['user_text'],
-                    'text': current_job['live_text'] or '新 Agent 路径：正在生成…'}
+                    'text': current_job['live_text'] or '新 Agent 路径：正在生成…',
+                    # S9：实时状态卡视图（真实状态 + 真实计时）
+                    'view': self._live_status_view(current_job)}
         agent_entries = []
         if self.session_id:
             try:
@@ -1380,6 +1462,11 @@ class PlatformWindow(QMainWindow):
                 '添加本轮资料，用自然语言描述任务。原始文件只读。</p>')
         for item in items:
             content.extend(self._render_timeline_item(item))
+        if live is None and self.session_id:
+            # S9：临时状态卡被终态摘要行替换（内存态，重开会话不残留）
+            terminal_html = self._terminal_status_line()
+            if terminal_html:
+                content.append(terminal_html)
         self.transcript.setHtml(
             "".join(content)
             or (
@@ -2321,6 +2408,17 @@ class PlatformWindow(QMainWindow):
         ):
             widget.setEnabled(not busy)
         self.stop.setEnabled(busy)
+        # S9：按钮禁用必须带原因（tooltip 说明）
+        if busy:
+            self.send.setToolTip('任务运行中：请先等待本轮结束，或停止后再发送')
+            self.attach.setToolTip('任务运行中，暂不能添加文件')
+            self.model_combo.setToolTip('任务运行中，暂不能切换模型')
+            self.stop.setToolTip('停止当前任务；已提交的模型调用仍会结算')
+        else:
+            self.send.setToolTip('发送消息（Enter）；输入框内 Alt+Enter 换行')
+            self.attach.setToolTip('添加项目文件')
+            self.model_combo.setToolTip('')
+            self.stop.setToolTip('当前没有正在运行的任务')
 
     def completed(self, result, *, destination=None):
         target = destination or TaskDestination.resolve(self.store, self.run_id)
@@ -2725,8 +2823,21 @@ class PlatformWindow(QMainWindow):
         elif self._agent_worker is not None:
             # S15：停止新 Agent 路径轮次（abort 内核开放操作，Worker 随后自行结束）
             self._agent_worker.gateway.stop()
+            # S9：进入 stopping 活动态——任务未收束前不得显示为终态
+            session_id = self._agent_session_id or self.session_id
+            job = self._agent_jobs.get(session_id)
+            if job is not None:
+                job['stop_requested'] = True
+                job['last_activity_at'] = time.monotonic()
+            operation_id = self._agent_operation_id
+            if session_id and operation_id:
+                self.status_controller.stopping_turn(
+                    session_id, operation_id,
+                    '正在停止；已提交的模型调用仍会结算。')
             self.status.setText("正在停止新 Agent 轮次；已提交的模型调用可能仍需结束并结算。")
             self.stop.setEnabled(False)
+            self.stop.setToolTip('停止请求已发出，等待本轮安全收束')
+            self.render_messages()
 
     def check_versions(self):
         if self.version_worker is not None:
