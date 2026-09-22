@@ -387,8 +387,6 @@ class PlatformWindow(QMainWindow):
             self.status.setText('新 Agent 尚未连接服务端，本轮未发送；请先连接并重试。')
             return True
         self._agent_gateway = gateway
-        from uuid import uuid4
-
         from .agent_switch import AgentTurnWorker
 
         # 新 Agent 的 begin_operation 原子地写入 user_message。不要再向
@@ -402,14 +400,15 @@ class PlatformWindow(QMainWindow):
         if not hasattr(gateway, 'repo'):
             self._agent_user_message_id = self.store.append(
                 self.session_id, 'user', prompt)
-        operation_id = uuid4().hex
-        self._agent_operation_id = operation_id
-        self.status_controller.set_turn_phase(
-            self.session_id, self._agent_operation_id, '新 Agent 路径：正在生成…')
+        # S1-03：UI 不再自造假 operation id；真实 durable id 由 worker 的
+        # accepted 信号带回（operation_accepted 事件）后再登记状态控制器。
+        self._agent_operation_id = None
         worker = AgentTurnWorker(gateway, prompt, parent=self,
                                  file_ids=tuple(file_ids),
                                  upload_ids=tuple(upload_ids))
         session_id = self.session_id
+        worker.accepted.connect(lambda op_id, sid=session_id:
+                                self._on_agent_accepted_for(sid, op_id))
         worker.delta.connect(lambda text, sid=session_id:
                              self._on_agent_delta_for(sid, text))
         worker.done.connect(lambda result, sid=session_id:
@@ -418,7 +417,7 @@ class PlatformWindow(QMainWindow):
                                 self._on_agent_worker_finished_for(sid))
         self._agent_jobs[session_id] = {
             'worker': worker, 'gateway': gateway,
-            'operation_id': operation_id, 'user_text': prompt,
+            'operation_id': None, 'user_text': prompt,
             'live_text': '',
         }
         self._agent_worker = worker
@@ -431,6 +430,21 @@ class PlatformWindow(QMainWindow):
         worker.start()
         self._pending_upload_ids = set()  # 本轮上传已随消息冻结进 operation
         return True
+
+    def _on_agent_accepted_for(self, session_id: str | None,
+                               operation_id: str) -> None:
+        """S1-03：operation_accepted 带回真实 durable id 后登记轮次状态。"""
+        if not session_id or not operation_id:
+            return
+        job = self._agent_jobs.get(session_id)
+        if job is not None:
+            job['operation_id'] = operation_id
+        if session_id == self.session_id:
+            self._agent_operation_id = operation_id
+        self.status_controller.set_turn_phase(
+            session_id, operation_id, '新 Agent 路径：正在生成…')
+        if session_id == self.session_id:
+            self.render_messages()
 
     def _on_agent_delta(self, text: str) -> None:
         self._on_agent_delta_for(self._agent_session_id or self.session_id, text)
@@ -471,12 +485,37 @@ class PlatformWindow(QMainWindow):
                       or result.get('status') or '未知原因')
             reply = f'本轮未完成：{reason}。'
         target_session = session_id
-        # assistant_message/error_message 已由 AgentKernel 持久化；这里仅
-        # 更新状态控制器，不能再次写入 legacy store.messages。
-        if (target_session and not hasattr(job.get('gateway'), 'repo')):
+        # S1-03：优先使用 gateway 返回的真实 durable operation id。
+        operation_id = result.get('operation_id') or job.get('operation_id')
+        if operation_id:
+            job['operation_id'] = operation_id
+        gateway = job.get('gateway')
+        repo = getattr(gateway, 'repo', None)
+        if target_session and repo is None:
+            # 无 repo 的测试替身/第三方适配：保持旧的本地消息追加。
             self.store.append(target_session, 'assistant', reply)
+        elif (target_session and repo is not None and operation_id
+                and result.get('status') != 'completed'):
+            # S1-04：先查本轮 operation 是否已有 terminal assistant/error
+            # entry；没有才追加 fallback，不得只凭 hasattr(repo) 跳过。
+            terminal = [e for e in repo.entries(target_session, 'main')
+                        if e.operation_id == operation_id
+                        and e.entry_type in ('assistant_message',
+                                             'error_message')
+                        and not e.payload.get('intermediate')]
+            if not terminal:
+                try:
+                    repo.append_entry(
+                        target_session, 'main', 'error_message',
+                        {'text': reply,
+                         'error_code': result.get('error_code') or 'failed',
+                         'fallback': True},
+                        operation_id=operation_id)
+                except Exception:  # UI 兜底不得再次失败
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        'fallback 错误 Entry 写入失败', exc_info=True)
         # S16：终态只进轮次控制器与消息表；禁止把完整回复写进状态控件
-        operation_id = job['operation_id']
         if operation_id and target_session:
             if result.get('status') == 'completed':
                 self.status_controller.complete_turn(

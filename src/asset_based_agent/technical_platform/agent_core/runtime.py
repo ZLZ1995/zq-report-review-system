@@ -13,8 +13,14 @@ logger = logging.getLogger(__name__)
 
 from .cancellation import CancelToken
 from .contracts import OperationAccepted
+from .errors import (
+    AgentCancelled,
+    AgentError,
+    AgentInternalError,
+    ToolUnknownOutcome,
+)
 from .events import AgentEvent
-from .fakes import OPEN_STATUSES
+from .fakes import OPEN_STATUSES, TOOL_CALL_OPEN_STATUSES
 from .loop import run_agent_loop
 
 # repo 生命周期方法已自行持久化的事件，kernel 不再重复落库；
@@ -28,6 +34,17 @@ TRANSIENT = frozenset({'message_delta'})
 
 def _now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def _sanitize_summary(message):
+    """未归类异常的对外摘要：不泄露路径、token、API key、traceback。"""
+    text = str(message or '').strip()
+    if not text or len(text) > 200 or any(
+            token in text.lower()
+            for token in ('token', 'bearer', 'password', 'api_key', 'secret',
+                          'traceback', ':\\')):
+        return ''
+    return text
 
 
 class AgentKernel:
@@ -59,9 +76,15 @@ class AgentKernel:
     def _emit(self, event_type, *, session_id, lane_id, operation_id=None,
               turn_id=None, tool_call_id=None, payload=None):
         if event_type not in REPO_PERSISTED and event_type not in TRANSIENT:
-            self.repo.record_event(
-                session_id, lane_id, event_type, operation_id=operation_id,
-                turn_id=turn_id, tool_call_id=tool_call_id, payload=payload)
+            # 事件落库失败不得穿透主状态机：operation 终态由生命周期方法
+            # 自行保证，旁路审计日志异常只告警（P1-05）。
+            try:
+                self.repo.record_event(
+                    session_id, lane_id, event_type, operation_id=operation_id,
+                    turn_id=turn_id, tool_call_id=tool_call_id, payload=payload)
+            except Exception:
+                logger.warning('事件落库失败已隔离: %s', event_type,
+                               exc_info=True)
         self._sequence += 1
         event = AgentEvent(
             event_type=event_type, session_id=session_id, lane_id=lane_id,
@@ -78,6 +101,42 @@ class AgentKernel:
         return event
 
     # ------------------------------------------------------------- operations
+
+    def _ensure_terminal(self, operation, exc):
+        """S1-01 终态兜底：begin_operation 之后任何异常路径都必须收束。
+
+        - 取消 → aborted；
+        - 已归类 AgentError → failed（保留原 code）；
+        - 未归类内部异常 → failed / agent.internal_error，摘要安全化；
+        收束本身失败（如库已损坏）只告警，不再穿透。
+        """
+        try:
+            current = self.repo.get_operation(operation.id)
+        except Exception:
+            logger.exception('终态兜底读取 operation 失败: %s', operation.id)
+            return
+        if current.status not in OPEN_STATUSES:
+            return
+        try:
+            if isinstance(exc, AgentCancelled):
+                self.repo.abort_operation(
+                    operation.id, turn_id=current.current_turn_id)
+                self._emit('operation_aborted',
+                           session_id=operation.session_id,
+                           lane_id=operation.lane_id, operation_id=operation.id,
+                           payload={'error_code': AgentCancelled.code})
+                return
+            code = exc.code if isinstance(exc, AgentError) \
+                else AgentInternalError.code
+            summary = _sanitize_summary(str(exc)) or '内部处理失败'
+            self.repo.fail_operation(
+                operation.id, code=code, summary=summary,
+                turn_id=current.current_turn_id)
+            self._emit('operation_failed', session_id=operation.session_id,
+                       lane_id=operation.lane_id, operation_id=operation.id,
+                       payload={'error_code': code})
+        except Exception:
+            logger.exception('终态兜底收束失败: %s', operation.id)
 
     async def submit(self, session_id, lane_id, request, *, wait=True):
         if not isinstance(request, dict) or not str(request.get('text', '')).strip():
@@ -106,31 +165,37 @@ class AgentKernel:
                 raise InvalidRequest('file binding requires file_id and sha256')
         operation = self.repo.begin_operation(
             session_id, lane_id, **operation_args)
-        for binding in file_bindings:
-            # 本轮勾选/上传的文件必须先绑定再进入 loop：ContextBuilder 只读取
-            # 当前 operation 的 explicit 绑定，缺绑定即“本轮文件摘要：无”。
-            file_id = str(binding.get('file_id', '')).strip()
-            sha256 = str(binding.get('sha256', '')).strip()
-            if not file_id or not sha256:
-                from .errors import InvalidRequest
-                raise InvalidRequest('文件绑定必须包含 file_id 与 sha256')
-            self.repo.bind_file(
-                operation.id, file_id,
-                binding.get('binding_kind') or 'explicit_selection',
-                sha256=sha256, role=binding.get('role'),
-                source_entry_id=binding.get('source_entry_id'))
-        if hasattr(self.repo, 'set_file_scope_snapshot'):
-            self.repo.set_file_scope_snapshot(
-                operation.id,
-                {'files': [
-                    {'file_id': str(binding.get('file_id')),
-                     'sha256': str(binding.get('sha256')),
-                     'binding_kind': binding.get('binding_kind') or
-                     'explicit_selection'}
-                    for binding in file_bindings
-                ]})
-        if snapshot:
-            self.repo.set_resource_snapshot(operation.id, snapshot)
+        try:
+            for binding in file_bindings:
+                # 本轮勾选/上传的文件必须先绑定再进入 loop：ContextBuilder 只读取
+                # 当前 operation 的 explicit 绑定，缺绑定即“本轮文件摘要：无”。
+                file_id = str(binding.get('file_id', '')).strip()
+                sha256 = str(binding.get('sha256', '')).strip()
+                if not file_id or not sha256:
+                    from .errors import InvalidRequest
+                    raise InvalidRequest('文件绑定必须包含 file_id 与 sha256')
+                self.repo.bind_file(
+                    operation.id, file_id,
+                    binding.get('binding_kind') or 'explicit_selection',
+                    sha256=sha256, role=binding.get('role'),
+                    source_entry_id=binding.get('source_entry_id'))
+            if hasattr(self.repo, 'set_file_scope_snapshot'):
+                self.repo.set_file_scope_snapshot(
+                    operation.id,
+                    {'files': [
+                        {'file_id': str(binding.get('file_id')),
+                         'sha256': str(binding.get('sha256')),
+                         'binding_kind': binding.get('binding_kind') or
+                         'explicit_selection'}
+                        for binding in file_bindings
+                    ]})
+            if snapshot:
+                self.repo.set_resource_snapshot(operation.id, snapshot)
+        except Exception as exc:  # noqa: BLE001 - S1-01：begin 后异常必须收束
+            self._ensure_terminal(operation, exc)
+            return OperationAccepted(
+                operation_id=operation.id, session_id=session_id,
+                lane_id=lane_id, request_id=operation.request_id)
         accepted = OperationAccepted(
             operation_id=operation.id, session_id=session_id,
             lane_id=lane_id, request_id=operation.request_id)
@@ -159,6 +224,8 @@ class AgentKernel:
                     policy=self._policy, approver=self._approver,
                     file_scope=self._file_scope,
                     context_builder=self._context_builder)
+            except Exception as exc:  # noqa: BLE001 - S1-01 终态兜底
+                self._ensure_terminal(operation, exc)
             finally:
                 self._steers.pop(operation.id, None)
                 self._cancels.pop(operation.id, None)
@@ -167,8 +234,20 @@ class AgentKernel:
         if wait:
             await drive()
         else:
-            self._tasks[operation.id] = asyncio.ensure_future(drive())
+            task = asyncio.ensure_future(drive())
+            self._tasks[operation.id] = task
+            task.add_done_callback(
+                lambda done: self._on_background_task_done(operation.id, done))
         return operation
+
+    def _on_background_task_done(self, operation_id, task):
+        """S1-05：后台 Task 完成后即从注册表清除，并消费异常引用。"""
+        self._tasks.pop(operation_id, None)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error('后台 operation 任务异常: %s', exc)
 
     async def resume(self, operation_id, *, wait=True):
         """恢复中断（unknown）的 operation：必须找到快照中的原版本资源，
@@ -179,6 +258,20 @@ class AgentKernel:
             raise ValueError('只有中断（unknown）的 operation 可以恢复')
         if self._tool_resolver is None:
             raise ValueError('未配置资源解析器，无法按原版本恢复')
+        # S1-02：中断时存在 open/unknown ToolCall 的 operation 副作用不可判定，
+        # 必须先按 Tool Recovery Policy 收束，不能直接继续跑模型。
+        pending = [c for c in self.repo.tool_calls(operation_id)
+                   if c.status in TOOL_CALL_OPEN_STATUSES
+                   or c.status == 'unknown']
+        if pending:
+            exc = ToolUnknownOutcome(
+                '存在不可判定副作用的工具调用，需人工核对后才能继续')
+            self.repo.fail_operation(
+                operation_id, code=exc.code, summary=str(exc), turn_id=None)
+            self._emit('operation_failed', session_id=operation.session_id,
+                       lane_id=operation.lane_id, operation_id=operation_id,
+                       payload={'error_code': exc.code})
+            raise exc
         snapshot = self.repo.resource_snapshot(operation_id)
         try:
             tools = self._tool_resolver.resolve_pinned(snapshot)

@@ -116,7 +116,11 @@ async def run_agent_loop(*, repo, model, tools, operation, cancel, emit,
     """驱动单个 operation 直到完成/失败/取消；所有结果写回 repo。"""
     emit('operation_started')
     tools_by_name = {tool.descriptor.name: tool for tool in tools}
-    for ordinal in range(1, max_turns + 1):
+    # S1-02：恢复中断 operation 时从 max(existing)+1 起编 ordinal，
+    # 不触碰历史 unknown Turn，也不违反 UNIQUE(operation_id, ordinal)。
+    start_ordinal = max((t.ordinal for t in repo.turns(operation.id)),
+                        default=0) + 1
+    for ordinal in range(start_ordinal, start_ordinal + max_turns):
         if not _is_open(repo, operation.id):
             return 'aborted'
         _drain_steer(repo, operation, steer_queue, emit)

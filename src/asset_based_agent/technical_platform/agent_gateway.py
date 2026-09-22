@@ -223,14 +223,19 @@ class AgentGateway:
 
         def collector(event):
             if event.operation_id:
-                self._open_operations.add(event.operation_id)
+                # 仅在真正开工/恢复时登记 open；recovery_required 等旁路事件
+                # 不得把已收束的 operation 重新计入（S1-05）。
+                if event.event_type in ('operation_accepted',
+                                        'operation_resumed'):
+                    self._open_operations.add(event.operation_id)
                 if event.operation_id not in operation_ids:
                     operation_ids.append(event.operation_id)
             if event.event_type == 'operation_failed':
                 error_code.append((event.payload or {}).get('error_code',
                                                            'failed'))
             if event.event_type in ('operation_completed',
-                                    'operation_failed', 'operation_aborted'):
+                                    'operation_failed', 'operation_aborted',
+                                    'operation_unknown'):
                 completed.append(event.event_type)
                 if event.operation_id:
                     self._open_operations.discard(event.operation_id)
@@ -255,16 +260,20 @@ class AgentGateway:
                     for token in ('token', 'bearer', 'password', 'api_key', 'secret')):
                 message = ''
             return {'status': 'failed', 'reply': '', 'error_code': str(code),
-                    'error_message': message}
+                    'error_message': message,
+                    'operation_id': operation_ids[-1] if operation_ids else None}
         operation_id = operation_ids[-1] if operation_ids else None
         reply = self._last_assistant_text(operation_id)
         if 'operation_completed' in completed:
-            return {'status': 'completed', 'reply': reply, 'error_code': ''}
+            return {'status': 'completed', 'reply': reply, 'error_code': '',
+                    'operation_id': operation_id}
         if 'operation_aborted' in completed:
             return {'status': 'aborted', 'reply': reply,
-                    'error_code': error_code[0] if error_code else 'aborted'}
+                    'error_code': error_code[0] if error_code else 'aborted',
+                    'operation_id': operation_id}
         return {'status': 'failed', 'reply': reply,
-                'error_code': error_code[0] if error_code else 'failed'}
+                'error_code': error_code[0] if error_code else 'failed',
+                'operation_id': operation_id}
 
     def _last_assistant_text(self, operation_id=None) -> str:
         entries = self.repo.entries(self._session_id, 'main')

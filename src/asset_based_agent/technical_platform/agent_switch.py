@@ -111,6 +111,7 @@ def _build_worker_class():
 
         delta = Signal(str)
         done = Signal(dict)
+        accepted = Signal(str)  # durable operation_id（S1-03：UI 不再造假 ID）
 
         def __init__(self, gateway, text, parent=None, file_ids=(),
                      upload_ids=()) -> None:
@@ -132,6 +133,11 @@ def _build_worker_class():
                     last_delta_emit = time.monotonic()
 
             def forward(event) -> None:
+                if getattr(event, 'event_type', '') == 'operation_accepted':
+                    operation_id = str(getattr(event, 'operation_id', '') or '')
+                    if operation_id:
+                        self.accepted.emit(operation_id)
+                    return
                 if getattr(event, 'event_type', '') == 'message_delta':
                     text = str((event.payload or {}).get('text', ''))
                     if not text:
