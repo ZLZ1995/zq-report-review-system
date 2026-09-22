@@ -1,44 +1,27 @@
-# PI Agent rebuild execution ledger — S43
+# PI Agent 重构执行账本 S43
 
-Date: 2026-09-21
+## 目标
 
-## CI failure diagnosis and fix
+将已验证的 Pi Agent 重构改动与最新 GitHub `main` 集成，并重新推进客户端、服务端及在线更新链路验收。
 
-The public GitHub Actions run `35588475352` for `technical-platform-client`
-failed in `client-regression` at the static/security step. The job metadata
-identifies the exact failing stage; the local equivalent reproduced
-`ruff ISC004` at `scripts/build_technical_platform.py:51` (implicit string
-concatenation inside the hidden-import argument list). The build job was
-skipped because regression failed. This was a build/harness lint defect, not
-an Agent runtime or model-protocol failure.
+## GitHub 集成
 
-The hidden-import list was rewritten with an explicit parenthesized string and
-trailing commas. No runtime behavior or release identity changed.
+- 最新 `origin/main` 基线：`18e73f40`，含服务端流式接口、refresh-token 迁移及部署探活相关提交。
+- 集成分支：`kimi/pi-agent-core-rebuild-integrated`。
+- 集成提交：`46957c37b355149c1dbb8d58282e3ff2eee6a140`。
+- 与最新 main 比较：可自动合并，71 个文件变更（2332 additions / 144 deletions）。
+- PR：[#1 Integrate Pi agent rebuild onto latest main](https://github.com/ZLZ1995/zq-report-review-system/pull/1)。
+- PR 已创建；GitHub Actions 的 server-tests 与 client-regression 检查在创建时均处于运行中，未合并、未发布。
 
-## Verification
+## 本地验证
 
-- Exact CI ruff target list: `All checks passed!`.
-- Agent/platform regression after the patch: `518 passed, 9 xfailed`.
-- Rebuilt EXE tree: `dist/s43`.
-- Ordinary package:
-  `dist/s43/ZQ-Workspace-0.2.11-Windows.zip`
-  size `281866826`, SHA-256
-  `7264568954d4b3ba65f7c335519c909297bd6c5162de3e479a318a405ecf3126`.
-- Managed package:
-  `dist/s43/ZQ-Workspace-0.2.11-Managed-Windows.zip`
-  size `421608852`, SHA-256
-  `66fb5b48f97e9437e52e41416ad9291f0f73083d43d43496de128ecbb08a7bef`.
-- Ordinary manifest SHA-256:
-  `444b670e3552017dc24bf368a20370f309107037cb77fcc8704e9b0532c73d04`.
-- Managed manifest SHA-256:
-  `c25782ec298bc19410706dd2c4345cbe7f7174df00b96d6ac476f2d3652add1e`.
-- Both manifests verified offline with `D:/1/KEY`, key id
-  `zq-release-20260917`, sequence `6`, schema range `[15,15]`.
+- 集成后的聚焦回归：65 passed（`pytest --basetemp` 放置于非系统盘）。
+- 全量回归：2394 passed、1 skipped、9 xfailed、2 failed；另有 3 个既有根目录测试因引用仓库内不存在的 helper 而无法收集，故按既定策略排除。
+- 两个失败均为诊断日志断言，单独合并运行时为 2 passed；全量顺序中的失败原因尚未定位，故全量验收仍不通过，禁止据此发布稳定版。
+- Git 补丁空白检查通过；工作区原有未跟踪 `NUL` 保留，未触碰。
 
-## Online release state
+## 当前结论 / 下一步
 
-GitHub API read access is healthy and confirms only public stable releases
-through `v0.2.10`; the web/Git transport path returns HTTP 400 in this
-environment. No `v0.2.11` release or upload was created. Zeabur still serves
-0.2.10/schema 11, so the S43 artifacts remain local signed candidates and
-are not represented as active online releases.
+1. 先取得 PR CI 结果并继续定位全量回归的两个日志测试顺序相关失败。
+2. 只有测试门槛通过后，才合并 PR 并从最终合并提交重新构建、签名客户端。
+3. 之后再核对 GitHub Release 资产、Zeabur 当前版本及 Build SHA，并通过在线更新探活；本轮尚未激活正式发布。
