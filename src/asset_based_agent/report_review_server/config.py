@@ -19,6 +19,7 @@ class ServerSettings:
     refresh_grace_seconds: int = 120
     provider_encryption_key: str = ""
     build_sha: str | None = None
+    provider_url_allowlist: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         if self.build_sha is not None and not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', self.build_sha):
@@ -57,6 +58,11 @@ class ServerSettings:
             provider_encryption_key=os.environ.get("REPORT_REVIEW_PROVIDER_ENCRYPTION_KEY", ""),
             build_sha=(os.environ.get('REPORT_REVIEW_IMAGE_BUILD_SHA')
                        or os.environ.get('REPORT_REVIEW_BUILD_SHA') or None),
+            provider_url_allowlist=frozenset(
+                host.strip().lower()
+                for host in os.environ.get(
+                    'REPORT_REVIEW_PROVIDER_URL_ALLOWLIST', '').split(',')
+                if host.strip()),
         )
 
     def encryption_key_bytes(self) -> bytes:

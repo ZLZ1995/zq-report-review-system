@@ -191,24 +191,112 @@ class ReplayResult:
     billing_request_id: str
 
 
+MAX_TOOL_SCHEMA_BYTES = 16 * 1024
+MAX_TOOL_SCHEMA_DEPTH = 16
+MAX_TOOL_SCHEMA_PROPERTIES = 128
+MAX_TOOL_SCHEMA_TOTAL_PROPERTIES = 512
+# 工具 schema 只允许安全的 JSON Schema 子集；$ref/$defs/definitions 等
+# 引用类关键字会引入递归爆炸，明确拒绝。
+_ALLOWED_SCHEMA_KEYS = frozenset({
+    'type', 'properties', 'required', 'items', 'enum', 'const',
+    'description', 'title', 'default', 'minimum', 'maximum',
+    'exclusiveMinimum', 'exclusiveMaximum', 'minLength', 'maxLength',
+    'pattern', 'format', 'additionalProperties', 'anyOf', 'oneOf',
+    'allOf', 'not', 'nullable', 'minItems', 'maxItems', 'uniqueItems',
+    'examples', 'minProperties', 'maxProperties',
+})
+
+
 def validate_tool_schemas(tools: list[dict[str, object]]) -> None:
     for tool in tools:
         schema = tool.get('input_schema')
         if not isinstance(schema, dict):
             raise ServiceError(
                 'invalid_tool_schema', '工具 input_schema 必须是对象。', 400)
-        properties = schema.get('properties')
-        if properties is not None and not isinstance(properties, dict):
+        size = len(json.dumps(schema, ensure_ascii=False).encode('utf-8'))
+        if size > MAX_TOOL_SCHEMA_BYTES:
             raise ServiceError(
-                'invalid_tool_schema', '工具 input_schema.properties 必须是对象。',
+                'invalid_tool_schema',
+                f'工具 input_schema 超过大小限制（{MAX_TOOL_SCHEMA_BYTES} 字节）。',
                 400)
-        required = schema.get('required')
-        if required is not None and (
-                not isinstance(required, list)
+        _check_schema_node(schema, depth=1,
+                           budget=[MAX_TOOL_SCHEMA_TOTAL_PROPERTIES])
+
+
+def _check_schema_node(node: object, *, depth: int, budget: list[int]) -> None:
+    if not isinstance(node, dict):
+        raise ServiceError(
+            'invalid_tool_schema', '工具 input_schema 子节点必须是对象。', 400)
+    if depth > MAX_TOOL_SCHEMA_DEPTH:
+        raise ServiceError(
+            'invalid_tool_schema', '工具 input_schema 嵌套深度超限。', 400)
+    unknown = sorted(set(node) - _ALLOWED_SCHEMA_KEYS)
+    if unknown:
+        raise ServiceError(
+            'invalid_tool_schema',
+            f'工具 input_schema 包含不支持的关键字: {", ".join(unknown)}。', 400)
+    properties = node.get('properties')
+    if properties is not None and not isinstance(properties, dict):
+        raise ServiceError(
+            'invalid_tool_schema', '工具 input_schema.properties 必须是对象。',
+            400)
+    if properties:
+        if len(properties) > MAX_TOOL_SCHEMA_PROPERTIES:
+            raise ServiceError(
+                'invalid_tool_schema',
+                '工具 input_schema.properties 数量超限。', 400)
+        budget[0] -= len(properties)
+        if budget[0] < 0:
+            raise ServiceError(
+                'invalid_tool_schema',
+                '工具 input_schema properties 总数超限。', 400)
+    required = node.get('required')
+    if required is not None:
+        if (not isinstance(required, list)
                 or any(type(item) is not str for item in required)):
             raise ServiceError(
                 'invalid_tool_schema',
                 '工具 input_schema.required 必须是字符串数组。', 400)
+        declared = set(properties or ())
+        dangling = [name for name in required if name not in declared]
+        if dangling:
+            raise ServiceError(
+                'invalid_tool_schema',
+                '工具 input_schema.required 必须对应已声明的 property: '
+                + ', '.join(dangling), 400)
+    if properties:
+        for sub in properties.values():
+            _check_schema_node(sub, depth=depth + 1, budget=budget)
+    items = node.get('items')
+    if isinstance(items, dict):
+        _check_schema_node(items, depth=depth + 1, budget=budget)
+    elif isinstance(items, list):
+        for sub in items:
+            _check_schema_node(sub, depth=depth + 1, budget=budget)
+    elif items is not None:
+        raise ServiceError(
+            'invalid_tool_schema', '工具 input_schema.items 必须是对象或数组。',
+            400)
+    for key in ('anyOf', 'oneOf', 'allOf'):
+        branches = node.get(key)
+        if branches is None:
+            continue
+        if not isinstance(branches, list):
+            raise ServiceError(
+                'invalid_tool_schema',
+                f'工具 input_schema.{key} 必须是数组。', 400)
+        for sub in branches:
+            _check_schema_node(sub, depth=depth + 1, budget=budget)
+    additional = node.get('additionalProperties')
+    if isinstance(additional, dict):
+        _check_schema_node(additional, depth=depth + 1, budget=budget)
+    elif additional is not None and not isinstance(additional, bool):
+        raise ServiceError(
+            'invalid_tool_schema',
+            '工具 input_schema.additionalProperties 必须是布尔或对象。', 400)
+    negation = node.get('not')
+    if negation is not None:
+        _check_schema_node(negation, depth=depth + 1, budget=budget)
 
 
 def estimate_usage(messages: list[dict[str, object]], *,

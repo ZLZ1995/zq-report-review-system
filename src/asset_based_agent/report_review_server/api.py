@@ -152,7 +152,8 @@ def create_app(
     app.state.client_release_service = ClientReleaseService()
     app.state.skill_release_service = SkillReleaseService()
     app.state.model_admin_service = ModelAdminService(
-        SecretCipher(actual_settings.encryption_key_bytes())
+        SecretCipher(actual_settings.encryption_key_bytes()),
+        url_allowlist=actual_settings.provider_url_allowlist,
     )
     app.state.review_job_service = ReviewJobService(
         actual_settings,
