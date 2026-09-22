@@ -42,7 +42,11 @@ class QtBrowserAgentBackend:
 
     def download(self, target):
         self.click(target)
-        raise RuntimeError('下载已触发；请从浏览器下载面板核对结果')
+        # The click is an external side effect, but this backend cannot observe
+        # the browser download manager's completion or retrieve a file receipt.
+        # Report an explicit unknown outcome so the model will not retry it as
+        # a failed tool call and accidentally trigger duplicate downloads.
+        return {'status': 'unknown', 'target': str(target)}
 
     def save_credential(self, _origin, _username, _password):
         raise RuntimeError('保存凭据必须由浏览器账号面板单独确认')

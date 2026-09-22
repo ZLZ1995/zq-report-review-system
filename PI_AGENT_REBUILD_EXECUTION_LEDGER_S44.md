@@ -42,3 +42,14 @@
 2. 全部检查通过后合并 PR，使 Zeabur 自动部署 main；核对实际部署 SHA 与接口/能力探活结果。
 3. 从最终 main 合并 SHA 构建正式客户端，核对 ZIP/EXE 哈希、清单、客户端版本与 schema；用 `D:\1\KEY` 中的发布私钥按既定流程签名。不得覆盖或复用 `dist/s44` 旧候选。
 4. 先验证更新清单、签名、下载和客户端兼容性，再发布/激活稳定通道；完成升级探活后才结项。
+
+## 2026-09-22 代码审查修复检查点
+
+- PR #1 的 Windows 构建与客户端回归检查在提交 `8a4c32491660ea32c410f9f2a3c0c617d9cd0c6d` 上均已成功：CI 构建/打包 Windows 候选耗时 5m31s；此前同 SHA 客户端回归为 `2150 passed, 9 xfailed`。
+- 进一步复核 PR 评审留下的三个缺陷仍存在，未贸然合并：业务工具目录两套装配逻辑权限不一致；Qt 浏览器点击下载后以异常假报失败；新旧会话消息按存储来源拼接且重复去重仅按文本，导致顺序/成果锚点错误。
+- 已先加入失败测试确认问题，再修正 `AgentGateway` 共用 fail-closed 工具分类（`read_project_file` 纳入只读类，未知业务工具默认不暴露）；下载无法确认完成时返回 `unknown/browser_download_pending`，并明确禁止重试；时间线按消息时间合并、只按迁移源消息 ID 去重，并将旧 run 成果重新锚定到对应 Agent 助手消息。
+- 直接邻近测试最终 `52 passed`（pytest 基准目录在 `D:\ZQ-Acceptance\pytest-comments-s46`）。最初一次使用 C 盘临时目录运行下载相关测试触发项目系统盘保护，随后按仓库约束改至 D 盘重跑通过；未更改该保护逻辑。
+- 完整 Actions 同范围本地回归在独立 D 盘基准目录通过：`2154 passed, 9 xfailed in 548.12s`；含新增回归测试。
+- 此检查点修复尚未提交/推送，PR 与 main 尚未变更；需先跑 `git diff --check`、提交并推送，再等待所有 PR checks 成功。之后才可合并及触发 Zeabur 部署。
+- 复测时 Zeabur `/api/v1/health` 为 HTTP 200；`/api/v1/capabilities` 当前 `build_sha=eda21aec50ba68d70c1db06f624094ca3d14506e`；稳定通道仍为 `0.2.10 / sequence 5 / schema 11`。无新候选包发布或激活。
+- 持续保留用户已有的未跟踪 `NUL` 文件；现有 `dist/s44`、`dist/s45` 候选未覆盖或复用。

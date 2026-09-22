@@ -231,6 +231,13 @@ def build_browser_tools(session_id, backend, *, scope=None):
         if not target:
             raise BrowserToolError('缺少下载目标')
         item = _scrub(await call_backend('download', target))
+        if isinstance(item, dict) and item.get('status') in {'pending', 'unknown'}:
+            return ToolResult(
+                status='unknown', error_code='browser_download_pending',
+                result={'download_status': item['status'],
+                        'target': str(item.get('target', target))[:MAX_TARGET]},
+                content='已触发浏览器下载，但尚未取得完成回执；请核对下载面板，'
+                        '不要重复点击。')
         artifact = {'name': str(item.get('name', ''))[:500],
                     'path': str(item.get('path', ''))[:2048],
                     'sha256': str(item.get('sha256', ''))[:128],

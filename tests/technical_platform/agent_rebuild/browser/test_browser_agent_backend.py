@@ -51,3 +51,26 @@ def test_qt_backend_keeps_side_effects_explicitly_user_confirmed():
         assert '接管' in str(exc)
     else:
         raise AssertionError('upload must not silently bypass GUI confirmation')
+
+
+def test_download_trigger_is_reported_unknown_instead_of_failed():
+    import asyncio
+
+    from asset_based_agent.technical_platform.tools.browser_tools import (
+        build_browser_tools,
+    )
+
+    panel = Panel()
+    backend = QtBrowserAgentBackend(panel)
+    tools = {tool.descriptor.name: tool
+             for tool in build_browser_tools('s1', backend)}
+    asyncio.run(tools['browser_open'].execute(
+        None, {'url': 'https://example.com'}, None))
+
+    result = asyncio.run(tools['browser_download'].execute(
+        None, {'target': 'download'}, None))
+
+    assert result.status == 'unknown'
+    assert result.error_code == 'browser_download_pending'
+    assert '不要重复' in result.content
+    assert [call[0] for call in panel.calls][-1] == 'js'

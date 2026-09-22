@@ -54,7 +54,11 @@ def project_agent_timeline(entries, *, live_status=None) -> list[TimelineItem]:
             message_id=entry_id,
             operation_id=getattr(entry, 'operation_id', None),
             created_at=getattr(entry, 'created_at', '') or '',
-            payload={'text': str(payload.get('text', ''))},
+            payload={
+                'text': str(payload.get('text', '')),
+                **({'_legacy_message_id': str(payload['_legacy_message_id'])}
+                   if payload.get('_legacy_message_id') else {}),
+            },
         ))
     if live_status:
         user_text = str(live_status.get('user_text', '')).strip()
@@ -103,22 +107,71 @@ def project_timeline(messages: list[dict], links: list[dict],
             agent_entries, live_status=live_status)
         legacy_items = project_timeline(
             messages, links, runs, live_status=None)
-        agent_texts = {
-            (item.kind, item.payload.get('text', ''))
-            for item in agent_items if item.kind in {'user', 'assistant', 'event'}
-        }
-        duplicate_message_ids = {
-            item.message_id for item in legacy_items
+        mirrored_ids = {
+            item.payload['_legacy_message_id'] for item in agent_items
             if item.kind in {'user', 'assistant', 'event'}
-            and (item.kind, item.payload.get('text', '')) in agent_texts
+            and item.payload.get('_legacy_message_id')
         }
-        # Remove only the grey-period message copy. Keep its artifact block:
-        # historical files remain visible, but are no longer attached to the
-        # newly projected Agent reply.
+        mirrored_entry_ids = {
+            item.payload['_legacy_message_id']: item.message_id
+            for item in agent_items
+            if item.kind in {'user', 'assistant', 'event'}
+            and item.payload.get('_legacy_message_id')
+        }
+        # Match mirrored rows by durable source ID, never by text: users can
+        # legitimately send the same message several times in one session.
         legacy_items = [item for item in legacy_items if not (
             item.kind in {'user', 'assistant', 'event'}
-            and item.message_id in duplicate_message_ids)]
-        return legacy_items + agent_items
+            and str(item.message_id) in mirrored_ids)]
+
+        # Run links still reference legacy assistant IDs. Re-anchor those
+        # artifacts to the exact mirrored Agent entry before removing the
+        # legacy message copy, so migration does not strand old files.
+        from dataclasses import replace
+        legacy_items = [
+            replace(item, message_id=mirrored_entry_ids[
+                str(item.message_id)])
+            if item.kind == 'artifacts'
+            and str(item.message_id) in mirrored_entry_ids else item
+            for item in legacy_items
+        ]
+
+        # Preserve artifact anchors while merging both stores by event time.
+        # Sorting a flat list would detach artifacts from their assistant row;
+        # therefore collect them by anchor and emit immediately after it.
+        artifacts_by_message = {}
+        legacy_zone = []
+        legacy_messages = []
+        for item in legacy_items:
+            if item.kind == 'artifacts':
+                artifacts_by_message.setdefault(item.message_id, []).append(item)
+            elif item.kind == 'legacy_artifacts':
+                legacy_zone.append(item)
+            else:
+                legacy_messages.append(item)
+        live_items = [item for item in agent_items
+                      if item.kind in {'live_user', 'live_status'}]
+        conversational = [item for item in agent_items
+                          if item.kind not in {'live_user', 'live_status'}]
+        merged = legacy_messages + conversational
+        merged.sort(key=lambda item: (item.created_at or '',
+                                      0 if item.kind == 'user' else 1,
+                                      item.message_id or 0))
+        ordered = []
+        for item in merged:
+            ordered.append(item)
+            if item.kind == 'assistant' and item.message_id in artifacts_by_message:
+                ordered.extend(artifacts_by_message.pop(item.message_id))
+        # Orphan artifacts are retained in a separate zone, never attached to
+        # the most recent Agent response by accident.
+        orphan_artifacts = [artifact for group in artifacts_by_message.values()
+                            for artifact in group]
+        if orphan_artifacts:
+            legacy_zone.append(TimelineItem(
+                kind='legacy_artifacts',
+                payload={'runs': [item.payload.get('run', {})
+                                  for item in orphan_artifacts]}))
+        return ordered + live_items + legacy_zone
 
     runs_by_id = {run['id']: run for run in runs}
     # assistant 消息 → 关联 run（保持 runs 原有顺序）

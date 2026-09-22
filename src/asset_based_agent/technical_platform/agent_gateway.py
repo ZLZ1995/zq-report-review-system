@@ -32,10 +32,13 @@ _SKILL_CATEGORIES = frozenset({
 _BUSINESS_TOOL_CATEGORY = {
     'inspect_project_files': 'file_readonly_analysis',
     'analyze_file_roles': 'file_readonly_analysis',
+    'read_project_file': 'file_readonly_analysis',
     'list_final_artifacts': 'file_readonly_analysis',
     'annotate_reviewed_files': 'review_annotation_copy',
-    # execute/query/cancel 属于任一 Skill 类别
 }
+
+_SKILL_TOOL_NAMES = frozenset({
+    'execute_skill_plan', 'query_business_run', 'cancel_business_run'})
 
 _BROWSER_READONLY_TOOLS = frozenset({
     'browser_open', 'browser_observe', 'browser_download'})
@@ -93,14 +96,7 @@ class AgentGateway:
             tools.extend(self._tool_registry.resolve_for_operation()[0])
         service = BusinessRunService(self._store, self._session_id,
                                      provider_factory=self._provider_factory)
-        for tool in business_tools(service):
-            name = tool.descriptor.name
-            category = _BUSINESS_TOOL_CATEGORY.get(name)
-            if category is not None:
-                if self._enabled(category):
-                    tools.append(tool)
-            elif any(self._enabled(c) for c in _SKILL_CATEGORIES):
-                tools.append(tool)
+        tools.extend(self._active_business_tools(service))
         if self._enabled('browser_readonly') \
                 or self._enabled('browser_write_upload'):
             backend = self._browser_backend or NullBrowserBackend()
@@ -110,17 +106,26 @@ class AgentGateway:
                     tools.append(tool)
         return tuple(tools)
 
+    def _active_business_tools(self, service):
+        """Apply one identical flag policy to every business-tool catalog."""
+        skill_enabled = any(self._enabled(c) for c in _SKILL_CATEGORIES)
+        active = []
+        for tool in business_tools(service):
+            category = _BUSINESS_TOOL_CATEGORY.get(tool.descriptor.name)
+            if category is not None and self._enabled(category):
+                active.append(tool)
+            elif (category is None and skill_enabled
+                  and tool.descriptor.name in _SKILL_TOOL_NAMES):
+                active.append(tool)
+        return active
+
     def _build_kernel(self):
         """Build one kernel with the same resolver/catalog used at accept time."""
         self._mirror_session()
         service = BusinessRunService(
             self._store, self._session_id,
             provider_factory=self._provider_factory)
-        business = []
-        for tool in business_tools(service):
-            category = _BUSINESS_TOOL_CATEGORY.get(tool.descriptor.name)
-            if category is None or self._enabled(category):
-                business.append(tool)
+        business = self._active_business_tools(service)
         browser = ()
         if self._enabled('browser_readonly') or self._enabled('browser_write_upload'):
             backend = self._browser_backend or NullBrowserBackend()
