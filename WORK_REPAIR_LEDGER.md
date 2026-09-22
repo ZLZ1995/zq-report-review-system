@@ -40,8 +40,8 @@ CI 基线: technical-platform-client / report-review-server 在 879a4aa 均 succ
 - [x] S6-02 优雅关闭（ReviewJobExecutor.shutdown(timeout)：停收新任务→等 worker 到安全检查点→超时 requeue_for_shutdown 标记 shutdown_grace_expired→cancel_futures 关池；顺带修复 submit 锁内注册 done 回调的自死锁；客户端 closeEvent 15s 宽限期，超时 mark_operations_unknown 持久化 durable 检查点后放行关闭）
 
 ## S7 认证与安全加固
-- [ ] S7-01 客户账号密码策略
-- [ ] S7-02 Refresh Token Rotation / Reuse Detection
+- [x] S7-01 登录防护（保留客户简化密码格式——characterization 冻结；进程内按用户名计数：连续 5 次失败锁定 15 分钟 423、第 3 次失败起递增重试间隔 429、成功登录清零、改密/管理员重置解锁；不存在的用户名同等计数防枚举预言机；配置项 REPORT_REVIEW_LOGIN_MAX_FAILURES/LOCKOUT_SECONDS/FAILURE_DELAY_SECONDS）
+- [x] S7-02 Refresh Token 轮换链加固（grace 外旧令牌再现→撤销整条 session family（refresh_token_reuse_detected）；refresh 绑定 client_instance_id，不匹配→撤销 family（client_instance_mismatch）；不带实例 id 的旧客户端兼容放行）
 
 ## S8 CI / 质量门禁 / 仓库治理
 - [ ] S8-01 全仓 Ruff
@@ -78,6 +78,8 @@ CI 基线: technical-platform-client / report-review-server 在 879a4aa 均 succ
 - S5 回归：agent_rebuild 447 passed/9 xfailed；report_review_server 293 passed/1 skipped；technical_platform 顶层 92+136+260+509+409（含 S5 新增 8）全绿；app/acceptance/update/detail 块 364 passed（含 S5 新增 12）
 - S6 定向：修复前 1 failed + 1 死锁挂起 + 2 ImportError/不可用（先红）→ 修复后 9 passed（tmp-pytest-s6green3）
 - S6 回归：agent_rebuild 453 passed/9 xfailed（447+6）；report_review_server 296 passed/1 skipped（293+3）；technical_platform 顶层 92+136+260+509+409 全绿；app/acceptance/update/detail 块 364 passed
+- S7 定向：修复前 7 failed / 2 passed（守护用例）→ 修复后 9 passed（tmp-pytest-s7green3）
+- S7 回归：report_review_server 305 passed/1 skipped（296+9）；agent_rebuild 453 passed/9 xfailed；technical_platform 顶层 92+136+260+509+409 全绿；app/acceptance/update/detail 块 364 passed
 - 存量问题：根目录 3 个 test_detail_*.py 缺 test_detail_workbook_pipeline_guards 模块，HEAD 即无法收集（留 S8）；services 层 browser_step/client_release_service/task_planning/task_understanding 存量 I001（留 S8）；ui/project_window.py 存量 I001（S5 改动该文件但 I001 为 HEAD 既有，留 S8 统一处理）；api.py 67 处 B008（FastAPI 惯例，改动前后均为 67，零新增）
 
 阶段结论：
@@ -87,3 +89,4 @@ CI 基线: technical-platform-client / report-review-server 在 879a4aa 均 succ
 - S4 已完成（2026-09-22）：ZIP 安全/SSRF/Tool Schema 全部落地，40 项验收测试全绿，全量回归无新增失败；阶段报告见 remediation/s4/STAGE_REPORT.md
 - S5 已完成（2026-09-22）：导入事务化/凭据库并发/损坏项目可见/interrupted 状态收束全部落地，20 项验收测试全绿，全量回归无新增失败；阶段报告见 remediation/s5/STAGE_REPORT.md
 - S6 已完成（2026-09-22）：每会话独立 live render/executor 优雅关闭/客户端关闭 durable 检查点全部落地，9 项验收测试全绿，全量回归无新增失败；阶段报告见 remediation/s6/STAGE_REPORT.md
+- S7 已完成（2026-09-22）：登录失败锁定+递增延迟/refresh 重用检测撤销 family/实例绑定全部落地，9 项验收测试全绿，全量回归无新增失败；阶段报告见 remediation/s7/STAGE_REPORT.md

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -42,6 +43,53 @@ class AuthContext:
 class AuthService:
     def __init__(self, settings: ServerSettings) -> None:
         self.settings = settings
+        # S7-01 登录防护（进程内计数；当前部署为单副本，重启即清零是可接受
+        # 残余风险——攻击者无法触发服务端重启）。按规范化用户名计数，包括
+        # 不存在的用户名，避免"锁定即存在"的枚举预言机。
+        self._login_guard_lock = threading.Lock()
+        self._login_failures: dict[str, dict] = {}
+
+    def _check_login_allowed(self, username: str) -> None:
+        with self._login_guard_lock:
+            state = self._login_failures.get(username)
+            if state is None:
+                return
+            now = datetime.now(timezone.utc)
+            locked_until = state.get('locked_until')
+            if locked_until is not None:
+                if locked_until > now:
+                    raise ServiceError(
+                        "account_locked",
+                        "连续登录失败次数过多，账号已临时锁定，请稍后重试或联系管理员重置。",
+                        423)
+                # 锁定期满：清零重来
+                self._login_failures.pop(username, None)
+                return
+            next_allowed_at = state.get('next_allowed_at')
+            if next_allowed_at is not None and next_allowed_at > now:
+                raise ServiceError(
+                    "login_too_frequent",
+                    "登录尝试过于频繁，请稍候再试。",
+                    429)
+
+    def _record_login_failure(self, username: str) -> None:
+        with self._login_guard_lock:
+            state = self._login_failures.setdefault(username, {'count': 0})
+            state['count'] += 1
+            now = datetime.now(timezone.utc)
+            if state['count'] >= self.settings.login_max_failures:
+                state['locked_until'] = now + timedelta(
+                    seconds=self.settings.login_lockout_seconds)
+            elif state['count'] >= 3:
+                # 递增重试间隔：前两次失败（手误）不惩罚，第 3 次起
+                # 至少等 (n-2)×delay 秒
+                state['next_allowed_at'] = now + timedelta(
+                    seconds=self.settings.login_failure_delay_seconds
+                    * (state['count'] - 2))
+
+    def _reset_login_failures(self, username: str) -> None:
+        with self._login_guard_lock:
+            self._login_failures.pop(username, None)
 
     def login(
         self,
@@ -52,17 +100,21 @@ class AuthService:
         client_instance_id: str,
     ) -> TokenResponse:
         normalized = normalize_username(username)
+        self._check_login_allowed(normalized)
         user = db.scalar(select(User).where(User.username == normalized).with_for_update())
         if (
             user is None
             or user.status != "active"
             or not verify_password(password, user.password_hash)
         ):
+            self._record_login_failure(normalized)
             raise ServiceError("invalid_credentials", "用户名或密码错误。", 401)
+        self._reset_login_failures(normalized)
         self._revoke_user_sessions(db, user.user_id, "replaced_by_new_login")
         return self._new_session(db, user, client_instance_id)
 
-    def refresh(self, db: Session, refresh_token: str) -> TokenResponse:
+    def refresh(self, db: Session, refresh_token: str,
+                *, client_instance_id: str | None = None) -> TokenResponse:
         token_hash = hash_refresh_token(refresh_token)
         auth_session = db.scalar(
             select(AuthSession)
@@ -89,6 +141,12 @@ class AuthService:
                 or rotated_at is None
                 or datetime.now(timezone.utc) - rotated_at > grace
             ):
+                # S7-02：grace 之外旧令牌再现 = 重用检测命中，
+                # 撤销整条 session family（单会话模型下即该用户全部会话）。
+                if auth_session is not None:
+                    self._revoke_user_sessions(
+                        db, auth_session.user_id, "refresh_token_reuse_detected")
+                    db.commit()
                 raise ServiceError(
                     "invalid_refresh_token", "刷新令牌无效或已过期。", 401)
         if (
@@ -96,6 +154,17 @@ class AuthService:
             or is_expired(auth_session.expires_at)
         ):
             raise ServiceError("invalid_refresh_token", "刷新令牌无效或已过期。", 401)
+        # S7-02：client_instance_id 绑定——调用方显式带上实例 id 时必须匹配，
+        # 不匹配视为令牌泄露，撤销整条 family；旧客户端不带则保持兼容放行。
+        if (
+            client_instance_id is not None
+            and auth_session.client_instance_id != client_instance_id.strip()
+        ):
+            self._revoke_user_sessions(
+                db, auth_session.user_id, "client_instance_mismatch")
+            db.commit()
+            raise ServiceError(
+                "invalid_refresh_token", "刷新令牌无效或已过期。", 401)
         user = db.get(User, auth_session.user_id)
         if user is None or user.status != "active":
             raise ServiceError("account_disabled", "账号不可用。", 401)
@@ -154,6 +223,7 @@ class AuthService:
         user.must_change_password = False
         self._revoke_user_sessions(db, user.user_id, "password_changed")
         db.commit()
+        self._reset_login_failures(user.username)  # S7-01：改密成功即解锁
 
     def create_user(
         self,
@@ -200,6 +270,7 @@ class AuthService:
         user.must_change_password = True
         self._revoke_user_sessions(db, user.user_id, "password_reset")
         db.commit()
+        self._reset_login_failures(user.username)  # S7-01：管理员重置即解锁
 
     def require_admin(self, context: AuthContext) -> None:
         if context.user.role != "admin":

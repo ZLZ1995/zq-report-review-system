@@ -290,7 +290,9 @@ def create_app(
         request: Request,
         db: Session = Depends(get_db),
     ):
-        return request.app.state.auth_service.refresh(db, payload.refresh_token)
+        return request.app.state.auth_service.refresh(
+            db, payload.refresh_token,
+            client_instance_id=payload.client_instance_id)
 
     @app.post("/api/v1/auth/heartbeat")
     def heartbeat(

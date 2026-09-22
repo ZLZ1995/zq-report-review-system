@@ -17,6 +17,8 @@ class LoginRequest(BaseModel):
 
 class RefreshRequest(BaseModel):
     refresh_token: str = Field(min_length=32, max_length=512)
+    # S7-02：可选实例绑定——显式携带时必须与会话创建时的实例匹配
+    client_instance_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class ChangePasswordRequest(BaseModel):
