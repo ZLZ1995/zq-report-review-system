@@ -672,12 +672,16 @@ class PlatformWindow(QMainWindow):
         self.project_tree.itemClicked.connect(self.project_tree_action)
         self.project_tree.customContextMenuRequested.connect(self.tree_menu)
         left.addWidget(self.project_tree, 3)
-        self.button("恢复已归档会话", self.restore_session, left).setObjectName("mutedButton")
-        self.button("恢复已归档项目", self.restore_project, left).setObjectName(
-            "mutedButton"
-        )
-        self.button("认领旧共享项目", self.claim_legacy_project, left).setObjectName("mutedButton")
-        self.button("能力与 Skill", self.manage_skills, left).setObjectName("mutedButton")
+        self.button("工具与能力", self.manage_skills, left).setObjectName("mutedButton")
+        self.more_button = QPushButton("更多", self)
+        self.more_button.setObjectName("mutedButton")
+        more_menu = QMenu(self.more_button)
+        more_menu.addAction("恢复已归档会话", self.restore_session)
+        more_menu.addAction("恢复已归档项目", self.restore_project)
+        more_menu.addAction("认领旧共享项目", self.claim_legacy_project)
+        more_menu.addAction("检查服务版本兼容性", self.check_versions)
+        self.more_button.setMenu(more_menu)
+        left.addWidget(self.more_button)
         left.addSpacing(12)
         account = QLabel(
             "●  本地预览 <span style='color:#a5a7ae'> / 只读模式</span>"
@@ -688,10 +692,9 @@ class PlatformWindow(QMainWindow):
         left.addWidget(account)
         self.account_label = account
         self.button("连接 / 登录模型服务", self.connect_service, left)
-        self.version_label = QLabel(f"客户端 {CLIENT_VERSION} · 审核 Skill {REVIEW.version}")
+        self.version_label = QLabel(f"客户端 {CLIENT_VERSION} · 审核工具 {REVIEW.version}")
         self.version_label.setWordWrap(True)
         left.addWidget(self.version_label)
-        self.button("检查服务版本兼容性", self.check_versions, left)
         self.update_button = self.button("下载并安装更新", self.install_update, left)
         self.update_button.hide()
         splitter.addWidget(sidebar)
@@ -704,9 +707,15 @@ class PlatformWindow(QMainWindow):
         self.title = QLabel("创建项目，开始工作")
         self.title.setObjectName("title")
         top.addWidget(self.title, 1)
-        self.button("项目面板", self.toggle_details, top).setObjectName("panelButton")
+        panel_button = self.button("项目面板", self.toggle_details, top)
+        panel_button.setObjectName("panelButton")
+        panel_button.setToolTip("显示或隐藏项目面板（文件 / 记忆 / 成果 / 任务）")
         self.button('浏览器', self.toggle_browser, top).setToolTip('显示或隐藏独立浏览器')
         middle.addLayout(top)
+        self.project_summary = QLabel("")
+        self.project_summary.setObjectName("muted")
+        self.project_summary.setVisible(False)
+        middle.addWidget(self.project_summary)
         self.transcript = QTextBrowser()
         self.transcript.setObjectName("transcript")
         self.transcript.setOpenExternalLinks(False)
@@ -1082,6 +1091,7 @@ class PlatformWindow(QMainWindow):
                 self.render_messages()
                 return
         self.title.setText(self.store.project(self.project_id)["name"])
+        self.title.setToolTip(self.store.project(self.project_id)["name"])
         # S16：空会话说明由 transcript 空状态承载（render_messages），不再占用状态控件
         for session in self.store.sessions(self.project_id):
             row = QListWidgetItem(session["title"])
@@ -1831,6 +1841,7 @@ class PlatformWindow(QMainWindow):
             self.artifacts_list.clear()
             self.tasks_list.clear()
             self.task_detail.setText("双击任务查看详情")
+            self.project_summary.setVisible(False)
             return
         files = self.store.files(self.project_id)
         self._file_records = {item['id']: item for item in files}
@@ -1860,7 +1871,20 @@ class PlatformWindow(QMainWindow):
         del blocker
         self._apply_file_filter()
         self._refresh_artifacts_and_tasks()
+        self._update_project_summary()
         self.save_current_draft()
+
+    def _update_project_summary(self):
+        """动态项目摘要：真实统计文件/会话/成果数量。"""
+        if not self.project_id:
+            self.project_summary.setVisible(False)
+            return
+        files = len(self.store.files(self.project_id))
+        sessions = len(self.store.sessions(self.project_id))
+        artifacts = len(self._artifact_entries)
+        self.project_summary.setText(
+            f'{files} 个文件 · {sessions} 个会话 · {artifacts} 项成果')
+        self.project_summary.setVisible(True)
 
     def _refresh_artifacts_and_tasks(self):
         """成果 Tab 与任务 Tab：数据全部来自 store 真实 runs 记录。"""
@@ -3167,7 +3191,7 @@ class PlatformWindow(QMainWindow):
         build = info.get('server_build', '未提供')
         build_label = '服务端构建号未提供' if build == '未提供' else f'服务端构建号 {build}'
         self.version_label.setText(
-            f"客户端 {CLIENT_VERSION} · Skill {REVIEW.version}\n"
+            f"客户端 {CLIENT_VERSION} · 审核工具 {REVIEW.version}\n"
             f"服务端 API {info['server_api_version']} · {supported}\n"
             f"{build_label} · "
             f"协议 {info.get('protocol_version') or '未声明'}（API 版本不等于部署版本）"

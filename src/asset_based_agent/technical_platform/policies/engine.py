@@ -3,7 +3,7 @@
 - 请求批准（request）：本地只读自动允许，其余一律询问；
 - 帮我批准（assisted）：只读与可恢复操作自动允许，高风险写入/上传/
   凭据/浏览器/进程/更新询问；
-- 完全访问（full）：范围内允许，但原件修改永远拒绝、凭据与更新永远询问；
+- 范围内自动执行（full）：范围内允许，但原件修改永远拒绝、凭据与更新永远询问；
 - 路径范围：写入类工具的目标路径超出 FileScope 时不得自动允许。
 """
 from pathlib import Path
@@ -14,7 +14,7 @@ from .receipts import ReceiptService
 
 # 原件只读是平台硬规则：任何模式都不允许。
 _ALWAYS_DENY = frozenset({'original_modify'})
-# 凭据与软件更新即使在完全访问模式下也必须逐项确认（密钥保护）。
+# 凭据与软件更新即使在范围内自动执行模式下也必须逐项确认（密钥保护）。
 _ALWAYS_ASK = frozenset({'credential', 'update'})
 _ASSISTED_ALLOW = frozenset(
     {'local_readonly', 'local_create', 'copy_modify', 'network_read'})

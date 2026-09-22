@@ -118,3 +118,9 @@ CI 基线: technical-platform-client / report-review-server 在 879a4aa 均 succ
 
 阶段结论（续）：
 - S12 已完成（2026-09-22）：ArtifactCard 行卡/成果 Tab/任务 Tab/历史成果可访问/打开/另存为/生成说明/任务 ID·operation ID 详情全部落地，10 项验收测试全绿；阶段报告见 remediation/s12/STAGE_REPORT.md
+- S13 定向：先红（5 failed + 1 守护通过）→ 实现后 6 passed；联合权限模式/存储偏好校准用例 18 passed（tmp-pytest-s13a）
+- S13 回归：agent_rebuild 475 passed/9 xfailed；report_review_server+fault_injection 322 passed/1 skipped；technical_platform 顶层 92+136+260+509+509+445（[p-z] 块 439+6 含 S13 新增）全绿；app/acceptance/update/detail 块 364 passed
+- S13 落地：'完全访问权限'→'范围内自动执行'（id=full 与判定语义不变，3 处冻结断言按任务书校准）；'能力与 Skill'→'工具与能力'、版本标签'审核工具'、权限描述'安装能力包'；低频功能（恢复归档会话/项目、认领旧共享、版本兼容性检查）移入"更多"菜单；项目/会话完整标题 tooltip；顶部导航按钮补提示；动态项目摘要（N 文件·M 会话·K 成果，真实统计）
+
+阶段结论（续）：
+- S13 已完成（2026-09-22）：侧栏可调宽（验证锁定）/完整标题/更多菜单/权限改名/Skill 文案统一/顶部导航提示/动态项目摘要全部落地，6 项验收测试全绿；阶段报告见 remediation/s13/STAGE_REPORT.md

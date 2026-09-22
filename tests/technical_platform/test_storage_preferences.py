@@ -84,7 +84,7 @@ def test_window_uses_installation_data_without_folder_prompt(tmp_path, monkeypat
     try:
         assert window.permission_button.text() == '帮我批准'
         window.set_agent_permission_mode('full')
-        assert window.permission_button.text() == '完全访问权限'
+        assert window.permission_button.text() == '范围内自动执行'
         assert preferences.permission_mode('alice') == 'full'
         assert calls == []
         assert window.ensure_storage_layout().data_root == (program / 'data').resolve()

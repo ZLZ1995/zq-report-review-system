@@ -15,9 +15,9 @@ class PermissionMode:
 
 
 _MODES = (
-    PermissionMode('request', '请求批准', '编辑或生成文件、安装 Skill 和使用互联网时询问'),
+    PermissionMode('request', '请求批准', '编辑或生成文件、安装能力包和使用互联网时询问'),
     PermissionMode('risk', '帮我批准', '仅对可能修改数据、使用凭据或扩展能力的操作询问'),
-    PermissionMode('full', '完全访问权限', '在当前任务、项目与已安装能力范围内默认执行'),
+    PermissionMode('full', '范围内自动执行', '在当前任务、项目与已安装能力范围内默认执行'),
 )
 _MODE_IDS = frozenset(item.id for item in _MODES)
 _OPERATIONS = frozenset({

@@ -12,7 +12,7 @@ def test_three_permission_modes_exist_with_labels():
     )
     assert [item.id for item in permission_mode_options()] == ['request', 'risk', 'full']
     assert [item.title for item in permission_mode_options()] == [
-        '请求批准', '帮我批准', '完全访问权限']
+        '请求批准', '帮我批准', '范围内自动执行']
 
 
 def test_unknown_permission_mode_rejected():
