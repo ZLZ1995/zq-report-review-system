@@ -9,7 +9,6 @@ from typing import Any
 
 from docx import Document
 
-
 REQUIRED_TOC_HEADINGS = [
     "声明",
     "资产评估报告摘要",

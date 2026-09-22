@@ -1,0 +1,19 @@
+# S8-03 Dependabot：pip 依赖与 GitHub Actions 每周自动更新 PR
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/deploy/report_review_server"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "security"]
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "ci"]

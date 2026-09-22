@@ -5,7 +5,6 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
 from asset_based_agent.technical_platform.app import PlatformWindow
-from asset_based_agent.technical_platform.skills import REVIEW
 from asset_based_agent.technical_platform.store import PlatformStore
 
 

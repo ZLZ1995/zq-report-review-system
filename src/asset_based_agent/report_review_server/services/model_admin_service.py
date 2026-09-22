@@ -11,12 +11,19 @@ from sqlalchemy.orm import Session
 from ..crypto import SecretCipher
 from ..models import ModelDefinition, ProviderRoute, User
 from .auth_service import ServiceError
+from .url_security import validate_provider_base_url
 from .wallet_service import money
 
 
 class ModelAdminService:
-    def __init__(self, cipher: SecretCipher) -> None:
+    def __init__(
+        self,
+        cipher: SecretCipher,
+        *,
+        url_allowlist: frozenset[str] = frozenset(),
+    ) -> None:
         self.cipher = cipher
+        self.url_allowlist = url_allowlist
 
     def create_model(
         self,
@@ -63,6 +70,8 @@ class ModelAdminService:
     ) -> ProviderRoute:
         if db.get(ModelDefinition, model_id) is None:
             raise ServiceError("model_not_found", "模型不存在。", 404)
+        base_url = validate_provider_base_url(
+            base_url, allowed_hosts=self.url_allowlist)
         normalized_rates = {name: money(value) for name, value in rates.items()}
         if any(value < 0 for value in normalized_rates.values()):
             raise ServiceError("invalid_rate", "Token价格不能为负数。", 422)

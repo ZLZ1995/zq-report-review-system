@@ -19,6 +19,11 @@ class ServerSettings:
     refresh_grace_seconds: int = 120
     provider_encryption_key: str = ""
     build_sha: str | None = None
+    provider_url_allowlist: frozenset[str] = frozenset()
+    # S7-01 登录防护：连续失败锁定 + 递增重试间隔（进程内计数，单副本部署）
+    login_max_failures: int = 5
+    login_lockout_seconds: int = 900
+    login_failure_delay_seconds: float = 1.0
 
     def __post_init__(self) -> None:
         if self.build_sha is not None and not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', self.build_sha):
@@ -31,6 +36,10 @@ class ServerSettings:
             raise ValueError("refresh token lifetime must be positive")
         if self.environment == "production" and not self.provider_encryption_key:
             raise ValueError("REPORT_REVIEW_PROVIDER_ENCRYPTION_KEY is required")
+        if self.login_max_failures < 1:
+            raise ValueError("login max failures must be positive")
+        if self.login_lockout_seconds < 0 or self.login_failure_delay_seconds < 0:
+            raise ValueError("login lockout/delay must not be negative")
         if self.provider_encryption_key:
             try:
                 key = base64.urlsafe_b64decode(self.provider_encryption_key)
@@ -57,6 +66,15 @@ class ServerSettings:
             provider_encryption_key=os.environ.get("REPORT_REVIEW_PROVIDER_ENCRYPTION_KEY", ""),
             build_sha=(os.environ.get('REPORT_REVIEW_IMAGE_BUILD_SHA')
                        or os.environ.get('REPORT_REVIEW_BUILD_SHA') or None),
+            provider_url_allowlist=frozenset(
+                host.strip().lower()
+                for host in os.environ.get(
+                    'REPORT_REVIEW_PROVIDER_URL_ALLOWLIST', '').split(',')
+                if host.strip()),
+            login_max_failures=int(os.environ.get("REPORT_REVIEW_LOGIN_MAX_FAILURES", "5")),
+            login_lockout_seconds=int(os.environ.get("REPORT_REVIEW_LOGIN_LOCKOUT_SECONDS", "900")),
+            login_failure_delay_seconds=float(
+                os.environ.get("REPORT_REVIEW_LOGIN_FAILURE_DELAY_SECONDS", "1.0")),
         )
 
     def encryption_key_bytes(self) -> bytes:

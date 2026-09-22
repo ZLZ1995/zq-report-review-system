@@ -32,17 +32,7 @@ jobs:
       - name: Run client static and security checks
         shell: cmd
         run: >-
-          python -m ruff check scripts\build_technical_platform.py
-          scripts\package_technical_platform.py
-          src\asset_based_agent\technical_platform\release_info.py
-          src\asset_based_agent\technical_platform\updates
-          src\asset_based_agent\technical_platform\memory_contracts.py
-          src\asset_based_agent\technical_platform\memory_service.py
-          src\asset_based_agent\technical_platform\memory_retrieval.py
-          src\asset_based_agent\technical_platform\feedback_service.py
-          src\asset_based_agent\technical_platform\skill_improvement.py
-          src\asset_based_agent\technical_platform\review_issues.py
-          src\asset_based_agent\technical_platform\ui\memory_panel.py
+          python -m ruff check src tests scripts deploy
       - name: Run update and client contract suites
         shell: cmd
         run: >-

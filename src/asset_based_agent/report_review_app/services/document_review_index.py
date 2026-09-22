@@ -13,7 +13,7 @@ class DocumentReviewIndex:
     rows_by_sheet: dict[tuple[str, str], set[int]] = field(default_factory=dict)
 
     @classmethod
-    def build(cls, documents: list[ExtractedDocument]) -> "DocumentReviewIndex":
+    def build(cls, documents: list[ExtractedDocument]) -> DocumentReviewIndex:
         index = cls()
         for document in documents:
             file_id = document.source_file.file_id

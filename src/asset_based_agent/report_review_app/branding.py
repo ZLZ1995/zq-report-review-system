@@ -5,7 +5,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-
 APPLICATION_NAME = "ZQ评估报告审核系统"
 CONFIG_TOOL_NAME = f"{APPLICATION_NAME}配置工具"
 

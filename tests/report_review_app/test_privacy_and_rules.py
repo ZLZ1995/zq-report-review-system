@@ -6,7 +6,9 @@ from asset_based_agent.report_review_app.services.document_extraction_service im
     DocumentChunk,
     ExtractedDocument,
 )
-from asset_based_agent.report_review_app.services.privacy_filter import PrivacyChunkSelector
+from asset_based_agent.report_review_app.services.privacy_filter import (
+    PrivacyChunkSelector,
+)
 from asset_based_agent.report_review_app.services.rule_registry import (
     AttachmentCompletenessRule,
     BrokenSummaryFormulaRule,
@@ -16,7 +18,9 @@ from asset_based_agent.report_review_app.services.rule_registry import (
     ScoreConservationRule,
     TemplatePlaceholderRule,
 )
-from asset_based_agent.reporting.valuation_report_structure import REQUIRED_BODY_HEADINGS
+from asset_based_agent.reporting.valuation_report_structure import (
+    REQUIRED_BODY_HEADINGS,
+)
 
 
 def document(

@@ -31,7 +31,7 @@ class AgentEvent:
     operation_id: str | None = None
     turn_id: str | None = None
     tool_call_id: str | None = None
-    payload: dict = None
+    payload: dict | None = None
     schema_version: int = EVENT_SCHEMA_VERSION
 
     def __post_init__(self):

@@ -369,6 +369,8 @@ class MeteredModelService:
         model: ModelDefinition,
         user: User,
         error_code: str | None,
+        *,
+        commit: bool = True,
     ) -> None:
         base_cost = _base_cost(route, usage)
         charged_amount = _charge_for_usage(route, usage, model, user)
@@ -388,7 +390,8 @@ class MeteredModelService:
                 error_code=error_code,
             )
         )
-        db.commit()
+        if commit:
+            db.commit()
 
     def _complete_success(
         self,

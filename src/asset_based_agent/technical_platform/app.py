@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import ClassVar
 
 from PySide6.QtCore import (
     QEvent,
@@ -32,6 +33,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -46,8 +48,15 @@ from PySide6.QtWidgets import (
 )
 
 from .agent_controller import ClarificationContextLimit
+from .artifact_panel import (
+    artifact_row_text,
+    collect_artifacts,
+    task_detail_text,
+    task_row_text,
+)
 from .composer import ChatComposer
 from .execution import execute_task
+from .file_panel import build_file_rows, file_detail_text, filter_rows, row_label
 from .project_catalog import ProjectCatalog
 from .release_info import CLIENT_VERSION, inspect_server, local_release, release_details
 from .skills import BUILTINS, GENERATORS, REVIEW, SkillRegistry, digest
@@ -55,6 +64,7 @@ from .store import PlatformStore
 from .task_events import CompletionEventRelay, TaskDestination, TaskEventRelay
 from .task_manager import TaskBinding, TaskManager
 from .task_spec import build_task_spec
+from .ui_theme import MAX_CONTENT_WIDTH, qss_overrides
 
 SERVER_URL = "https://zq-report-review.zeabur.app/api/v1"
 
@@ -148,7 +158,7 @@ class TaskWorker(QThread):
                 client=self.client,
             )
             self.completed.emit(result)
-        except Exception as exc:  # noqa: BLE001 - worker boundary records failure and reports to UI
+        except Exception as exc:
             # The harness owns state transitions; a rejected duplicate owns no run.
             self.failed.emit(str(exc))
 
@@ -183,14 +193,31 @@ class PlatformWindow(QMainWindow):
         # S30：新 Agent worker 按会话隔离；_agent_worker 仅保留为当前会话兼容别名。
         self._agent_jobs = {}
         self._close_after_agent_jobs = False
+        # S6-02：优雅关闭——宽限期计时与强制关闭标记
+        self._close_grace_seconds = 15.0
+        self._force_close = False
+        self._close_grace_timer = QTimer(self)
+        self._close_grace_timer.setSingleShot(True)
+        self._close_grace_timer.timeout.connect(self._force_close_with_checkpoints)
         self._agent_session_id = None
         # 新 Agent 的增量文本先在内存中合并，再以低频刷新到对话面板。
         # 逐 token 调用 setHtml 会把 GUI 事件队列塞满，长回复看起来就像“卡死”。
         self._live_agent_text = ''
+        # S6-01：每会话独立 live render state——timer 只是节流器，
+        # 待刷新状态按 session 记账，互不干扰。
+        self._live_render_pending: set = set()
         self._live_render_timer = QTimer(self)
         self._live_render_timer.setSingleShot(True)
         self._live_render_timer.setInterval(80)
         self._live_render_timer.timeout.connect(self._flush_live_agent_render)
+        # S9：运行状态卡 elapsed/last-activity 每秒刷新；
+        # 仅在有活跃任务时走表，不用 polling 伪造进度。
+        self._status_timer = QTimer(self)
+        self._status_timer.setInterval(1000)
+        self._status_timer.timeout.connect(self._tick_run_status)
+        # S10：执行记录折叠展开状态（内存态，随会话切换自然隔离）
+        self._expanded_event_groups: set = set()
+        self._last_event_group_keys: list = []
         self._feature_flags_cache = None
         # S16：会话/轮次状态控制器 + 当前轮次锚点（替代固定状态栏）
         from .conversation_status import ConversationStatusController
@@ -199,6 +226,10 @@ class PlatformWindow(QMainWindow):
         self._agent_operation_id = None
         self._agent_user_message_id = None
         self._agent_user_text = ''
+        self._file_rows = []
+        self._file_records = {}
+        self._artifact_entries = []
+        self._task_records = []
         self._approval_requested.connect(self._handle_approval_request)
         self.network_state = "connected"
         self.setWindowTitle(
@@ -387,8 +418,6 @@ class PlatformWindow(QMainWindow):
             self.status.setText('新 Agent 尚未连接服务端，本轮未发送；请先连接并重试。')
             return True
         self._agent_gateway = gateway
-        from uuid import uuid4
-
         from .agent_switch import AgentTurnWorker
 
         # 新 Agent 的 begin_operation 原子地写入 user_message。不要再向
@@ -402,24 +431,29 @@ class PlatformWindow(QMainWindow):
         if not hasattr(gateway, 'repo'):
             self._agent_user_message_id = self.store.append(
                 self.session_id, 'user', prompt)
-        operation_id = uuid4().hex
-        self._agent_operation_id = operation_id
-        self.status_controller.set_turn_phase(
-            self.session_id, self._agent_operation_id, '新 Agent 路径：正在生成…')
+        # S1-03：UI 不再自造假 operation id；真实 durable id 由 worker 的
+        # accepted 信号带回（operation_accepted 事件）后再登记状态控制器。
+        self._agent_operation_id = None
         worker = AgentTurnWorker(gateway, prompt, parent=self,
                                  file_ids=tuple(file_ids),
                                  upload_ids=tuple(upload_ids))
         session_id = self.session_id
+        worker.accepted.connect(lambda op_id, sid=session_id:
+                                self._on_agent_accepted_for(sid, op_id))
         worker.delta.connect(lambda text, sid=session_id:
                              self._on_agent_delta_for(sid, text))
         worker.done.connect(lambda result, sid=session_id:
                             self._on_agent_done_for(sid, result))
         worker.finished.connect(lambda sid=session_id:
                                 self._on_agent_worker_finished_for(sid))
+        now = time.monotonic()
         self._agent_jobs[session_id] = {
             'worker': worker, 'gateway': gateway,
-            'operation_id': operation_id, 'user_text': prompt,
+            'operation_id': None, 'user_text': prompt,
             'live_text': '',
+            # S9：真实计时锚点（单调时钟）与停止标记
+            'started_at': now, 'last_activity_at': now,
+            'stop_requested': False,
         }
         self._agent_worker = worker
         self._agent_session_id = session_id
@@ -432,6 +466,24 @@ class PlatformWindow(QMainWindow):
         self._pending_upload_ids = set()  # 本轮上传已随消息冻结进 operation
         return True
 
+    def _on_agent_accepted_for(self, session_id: str | None,
+                               operation_id: str) -> None:
+        """S1-03：operation_accepted 带回真实 durable id 后登记轮次状态。"""
+        if not session_id or not operation_id:
+            return
+        job = self._agent_jobs.get(session_id)
+        if job is not None:
+            job['operation_id'] = operation_id
+            job['last_activity_at'] = time.monotonic()
+        if session_id == self.session_id:
+            self._agent_operation_id = operation_id
+        self.status_controller.set_turn_phase(
+            session_id, operation_id, '新 Agent 路径：正在生成…')
+        if session_id == self.session_id:
+            if not self._status_timer.isActive():
+                self._status_timer.start()
+            self.render_messages()
+
     def _on_agent_delta(self, text: str) -> None:
         self._on_agent_delta_for(self._agent_session_id or self.session_id, text)
 
@@ -441,6 +493,8 @@ class PlatformWindow(QMainWindow):
             if job is None:
                 return
             job['live_text'] += text
+            job['last_activity_at'] = time.monotonic()
+            self._live_render_pending.add(session_id)
             if session_id == self.session_id:
                 self._live_agent_text = job['live_text']
             # 只把“正在生成”状态写到状态栏；正文在对话面板中增量显示。
@@ -451,15 +505,27 @@ class PlatformWindow(QMainWindow):
                 self._live_render_timer.start()
 
     def _flush_live_agent_render(self) -> None:
-        job = self._agent_jobs.get(self.session_id)
-        if (job is not None and self._live_agent_text):
+        # S6-01：只冲刷当前会话的待刷新记账；后台会话的 live text
+        # 在 job 内持续累积，切回时由 choose_session 一次性呈现。
+        current = self.session_id
+        if current not in self._live_render_pending:
+            return
+        self._live_render_pending.discard(current)
+        job = self._agent_jobs.get(current)
+        if job is not None:
+            self._live_agent_text = job['live_text']
             self.render_messages()
 
     def _on_agent_done(self, result: dict) -> None:
         self._on_agent_done_for(self._agent_session_id or self.session_id, result)
 
     def _on_agent_done_for(self, session_id: str | None, result: dict) -> None:
-        self._live_render_timer.stop()
+        # S6-01：只清除本会话的待刷新记账；其他会话仍在流式时
+        # 绝不停掉 timer，否则后台会话完成会冻结当前会话的实时刷新。
+        self._live_render_pending.discard(session_id)
+        if (session_id == self.session_id
+                and self.session_id not in self._live_render_pending):
+            self._live_render_timer.stop()
         job = self._agent_jobs.get(session_id)
         if job is None:
             return
@@ -471,12 +537,37 @@ class PlatformWindow(QMainWindow):
                       or result.get('status') or '未知原因')
             reply = f'本轮未完成：{reason}。'
         target_session = session_id
-        # assistant_message/error_message 已由 AgentKernel 持久化；这里仅
-        # 更新状态控制器，不能再次写入 legacy store.messages。
-        if (target_session and not hasattr(job.get('gateway'), 'repo')):
+        # S1-03：优先使用 gateway 返回的真实 durable operation id。
+        operation_id = result.get('operation_id') or job.get('operation_id')
+        if operation_id:
+            job['operation_id'] = operation_id
+        gateway = job.get('gateway')
+        repo = getattr(gateway, 'repo', None)
+        if target_session and repo is None:
+            # 无 repo 的测试替身/第三方适配：保持旧的本地消息追加。
             self.store.append(target_session, 'assistant', reply)
+        elif (target_session and repo is not None and operation_id
+                and result.get('status') != 'completed'):
+            # S1-04：先查本轮 operation 是否已有 terminal assistant/error
+            # entry；没有才追加 fallback，不得只凭 hasattr(repo) 跳过。
+            terminal = [e for e in repo.entries(target_session, 'main')
+                        if e.operation_id == operation_id
+                        and e.entry_type in ('assistant_message',
+                                             'error_message')
+                        and not e.payload.get('intermediate')]
+            if not terminal:
+                try:
+                    repo.append_entry(
+                        target_session, 'main', 'error_message',
+                        {'text': reply,
+                         'error_code': result.get('error_code') or 'failed',
+                         'fallback': True},
+                        operation_id=operation_id)
+                except Exception:  # UI 兜底不得再次失败
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        'fallback 错误 Entry 写入失败', exc_info=True)
         # S16：终态只进轮次控制器与消息表；禁止把完整回复写进状态控件
-        operation_id = job['operation_id']
         if operation_id and target_session:
             if result.get('status') == 'completed':
                 self.status_controller.complete_turn(
@@ -499,6 +590,8 @@ class PlatformWindow(QMainWindow):
 
     def _on_agent_worker_finished_for(self, session_id: str | None) -> None:
         self._agent_jobs.pop(session_id, None)
+        if not self._agent_jobs and self._status_timer.isActive():
+            self._status_timer.stop()
         if session_id != self.session_id:
             if self._close_after_agent_jobs and not self._agent_jobs:
                 self._close_after_agent_jobs = False
@@ -580,12 +673,16 @@ class PlatformWindow(QMainWindow):
         self.project_tree.itemClicked.connect(self.project_tree_action)
         self.project_tree.customContextMenuRequested.connect(self.tree_menu)
         left.addWidget(self.project_tree, 3)
-        self.button("恢复已归档会话", self.restore_session, left).setObjectName("mutedButton")
-        self.button("恢复已归档项目", self.restore_project, left).setObjectName(
-            "mutedButton"
-        )
-        self.button("认领旧共享项目", self.claim_legacy_project, left).setObjectName("mutedButton")
-        self.button("能力与 Skill", self.manage_skills, left).setObjectName("mutedButton")
+        self.button("工具与能力", self.manage_skills, left).setObjectName("mutedButton")
+        self.more_button = QPushButton("更多", self)
+        self.more_button.setObjectName("mutedButton")
+        more_menu = QMenu(self.more_button)
+        more_menu.addAction("恢复已归档会话", self.restore_session)
+        more_menu.addAction("恢复已归档项目", self.restore_project)
+        more_menu.addAction("认领旧共享项目", self.claim_legacy_project)
+        more_menu.addAction("检查服务版本兼容性", self.check_versions)
+        self.more_button.setMenu(more_menu)
+        left.addWidget(self.more_button)
         left.addSpacing(12)
         account = QLabel(
             "●  本地预览 <span style='color:#a5a7ae'> / 只读模式</span>"
@@ -596,10 +693,9 @@ class PlatformWindow(QMainWindow):
         left.addWidget(account)
         self.account_label = account
         self.button("连接 / 登录模型服务", self.connect_service, left)
-        self.version_label = QLabel(f"客户端 {CLIENT_VERSION} · 审核 Skill {REVIEW.version}")
+        self.version_label = QLabel(f"客户端 {CLIENT_VERSION} · 审核工具 {REVIEW.version}")
         self.version_label.setWordWrap(True)
         left.addWidget(self.version_label)
-        self.button("检查服务版本兼容性", self.check_versions, left)
         self.update_button = self.button("下载并安装更新", self.install_update, left)
         self.update_button.hide()
         splitter.addWidget(sidebar)
@@ -612,9 +708,15 @@ class PlatformWindow(QMainWindow):
         self.title = QLabel("创建项目，开始工作")
         self.title.setObjectName("title")
         top.addWidget(self.title, 1)
-        self.button("项目面板", self.toggle_details, top).setObjectName("panelButton")
+        panel_button = self.button("项目面板", self.toggle_details, top)
+        panel_button.setObjectName("panelButton")
+        panel_button.setToolTip("显示或隐藏项目面板（文件 / 记忆 / 成果 / 任务）")
         self.button('浏览器', self.toggle_browser, top).setToolTip('显示或隐藏独立浏览器')
         middle.addLayout(top)
+        self.project_summary = QLabel("")
+        self.project_summary.setObjectName("muted")
+        self.project_summary.setVisible(False)
+        middle.addWidget(self.project_summary)
         self.transcript = QTextBrowser()
         self.transcript.setObjectName("transcript")
         self.transcript.setOpenExternalLinks(False)
@@ -697,8 +799,32 @@ class PlatformWindow(QMainWindow):
         caption = QLabel("资料仅在本地读取\n隐藏工作表会自动排除")
         caption.setObjectName("muted")
         file_layout.addWidget(caption)
+        self.file_search = QLineEdit()
+        self.file_search.setObjectName("fileSearch")
+        self.file_search.setPlaceholderText("搜索文件名")
+        self.file_search.setClearButtonEnabled(True)
+        file_layout.addWidget(self.file_search)
+        self.file_filter = QComboBox()
+        self.file_filter.setObjectName("fileFilter")
+        self.file_filter.addItems(["全部文件", "本轮已选", "未使用", "已用于任务"])
+        file_layout.addWidget(self.file_filter)
+        batch_row = QHBoxLayout()
+        self.file_select_visible = QPushButton("全选可见")
+        self.file_clear_visible = QPushButton("取消可见")
+        batch_row.addWidget(self.file_select_visible)
+        batch_row.addWidget(self.file_clear_visible)
+        file_layout.addLayout(batch_row)
         file_layout.addWidget(self.files, 1)
+        self.file_detail = QLabel("双击文件查看详情")
+        self.file_detail.setObjectName("muted")
+        self.file_detail.setWordWrap(True)
+        file_layout.addWidget(self.file_detail)
         self.details.addTab(file_page, "文件")
+        self.file_search.textChanged.connect(self._apply_file_filter)
+        self.file_filter.currentIndexChanged.connect(self._apply_file_filter)
+        self.file_select_visible.clicked.connect(self.select_visible_files)
+        self.file_clear_visible.clicked.connect(self.clear_visible_files)
+        self.files.itemDoubleClicked.connect(self.show_file_detail)
         memory_page = QWidget()
         memory_layout = QVBoxLayout(memory_page)
         memory_layout.addWidget(
@@ -709,7 +835,44 @@ class PlatformWindow(QMainWindow):
         self.button("添加已确认偏好", self.add_memory, memory_layout)
         self.button("删除选中记忆", self.delete_memory, memory_layout)
         self.details.addTab(memory_page, "记忆")
+        artifacts_page = QWidget()
+        artifacts_layout = QVBoxLayout(artifacts_page)
+        artifacts_layout.setContentsMargins(18, 22, 18, 16)
+        artifacts_layout.setSpacing(12)
+        artifacts_title = QLabel("成果交付")
+        artifacts_title.setObjectName("detailTitle")
+        artifacts_layout.addWidget(artifacts_title)
+        self.artifacts_list = QListWidget()
+        self.artifacts_list.setObjectName("artifactsList")
+        artifacts_layout.addWidget(self.artifacts_list, 1)
+        artifact_buttons = QHBoxLayout()
+        self.artifact_open = QPushButton("打开成果")
+        self.artifact_save = QPushButton("另存为…")
+        artifact_buttons.addWidget(self.artifact_open)
+        artifact_buttons.addWidget(self.artifact_save)
+        artifacts_layout.addLayout(artifact_buttons)
+        self.details.addTab(artifacts_page, "成果")
+        tasks_page = QWidget()
+        tasks_layout = QVBoxLayout(tasks_page)
+        tasks_layout.setContentsMargins(18, 22, 18, 16)
+        tasks_layout.setSpacing(12)
+        tasks_title = QLabel("任务历史")
+        tasks_title.setObjectName("detailTitle")
+        tasks_layout.addWidget(tasks_title)
+        self.tasks_list = QListWidget()
+        self.tasks_list.setObjectName("tasksList")
+        tasks_layout.addWidget(self.tasks_list, 1)
+        self.task_detail = QLabel("双击任务查看详情")
+        self.task_detail.setObjectName("muted")
+        self.task_detail.setWordWrap(True)
+        tasks_layout.addWidget(self.task_detail)
+        self.details.addTab(tasks_page, "任务")
         splitter.addWidget(self.details)
+        self.artifact_open.clicked.connect(self.open_selected_artifact)
+        self.artifact_save.clicked.connect(self.save_artifact_as)
+        self.artifacts_list.itemDoubleClicked.connect(
+            lambda _item: self.open_selected_artifact())
+        self.tasks_list.itemDoubleClicked.connect(self.show_task_detail)
         splitter.setSizes([242, 886, 312])
         splitter.setCollapsible(1, False)
         self.setStyleSheet("""
@@ -757,6 +920,10 @@ class PlatformWindow(QMainWindow):
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }
             QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background:transparent; }
         """)
+        # S14：主题覆盖层（对比度/选中态/运行中状态色）+ 最大内容宽度
+        self.setStyleSheet(self.styleSheet() + qss_overrides())
+        self.transcript.setMaximumWidth(MAX_CONTENT_WIDTH)
+        composer_card.setMaximumWidth(MAX_CONTENT_WIDTH)
 
     def reload_projects(self, selected=None):
         self.projects.clear()
@@ -929,6 +1096,7 @@ class PlatformWindow(QMainWindow):
                 self.render_messages()
                 return
         self.title.setText(self.store.project(self.project_id)["name"])
+        self.title.setToolTip(self.store.project(self.project_id)["name"])
         # S16：空会话说明由 transcript 空状态承载（render_messages），不再占用状态控件
         for session in self.store.sessions(self.project_id):
             row = QListWidgetItem(session["title"])
@@ -1057,6 +1225,9 @@ class PlatformWindow(QMainWindow):
         self._live_render_timer.stop()
         self._draft_binding = None
         self.session_id = item.data(Qt.ItemDataRole.UserRole) if item else None
+        # S6-01：新会话的累积 live text 由下方 restore+render 一次性呈现，
+        # 其待刷新记账随之结清；后台会话的记账保留，不受切换影响。
+        self._live_render_pending.discard(self.session_id)
         current_job = self._agent_jobs.get(self.session_id)
         if current_job and current_job.get('done'):
             current_job = None
@@ -1136,39 +1307,43 @@ class PlatformWindow(QMainWindow):
         return True
 
     def _render_timeline_item(self, item) -> list:
-        """把 TimelineItem 渲染成 HTML 片段（S16：渲染只认 ViewModel）。"""
+        """把 TimelineItem 渲染成 HTML 片段（S16：渲染只认 ViewModel；
+        S10：卡片化层级 + 错误/警告严重级路由）。"""
+        from .message_cards import (
+            assistant_card_html,
+            error_card_html,
+            system_event_card_html,
+            user_card_html,
+            warning_card_html,
+        )
         text = html.escape(item.payload.get('text', '')).replace("\n", "<br>")
+        raw_text = item.payload.get('text', '')
         if item.kind == 'user':
-            return [(
-                '<table width="100%" cellspacing="0" cellpadding="16">'
-                '<tr><td width="12%"></td><td bgcolor="#f3f4f7">'
-                '<span style="color:#9399a6;font-size:11px">你</span>'
-                f'<p style="line-height:160%;font-size:14px">{text}</p>'
-                '</td></tr></table><p style="font-size:8px">&nbsp;</p>'
-            )]
+            return [user_card_html(raw_text)]
         if item.kind == 'live_user':
-            return [(
-                '<table width="100%" cellspacing="0" cellpadding="16">'
-                '<tr><td width="12%"></td><td bgcolor="#f3f4f7">'
-                '<span style="color:#9399a6;font-size:11px">你 · 发送中</span>'
-                f'<p style="line-height:160%;font-size:14px">{text}</p>'
-                '</td></tr></table><p style="font-size:8px">&nbsp;</p>'
-            )]
+            return [user_card_html(raw_text, live=True)]
         if item.kind == 'event':
-            return [(
-                '<table width="100%" cellpadding="12"><tr>'
-                '<td bgcolor="#fafbfc"><span style="color:#758399;font-size:11px">'
-                "●  执行记录</span>"
-                f'<p style="color:#858d9b;font-size:12px;line-height:150%">{text}</p>'
-                '</td></tr></table><p style="font-size:8px">&nbsp;</p>'
-            )]
+            severity = item.payload.get('severity')
+            if severity == 'error':
+                return [error_card_html(
+                    raw_text,
+                    error_code=item.payload.get('error_code', ''),
+                    operation_id=item.operation_id or '')]
+            if severity == 'warning':
+                return [warning_card_html(raw_text)]
+            return [system_event_card_html(raw_text)]
         if item.kind == 'assistant':
-            return [(
-                '<p style="font-size:13px;color:#3e4c66"><b>ZQ</b>'
-                ' <span style="font-size:10px;color:#a0a6b1"> / ASSISTANT</span></p>'
-                f'<p style="font-size:14px;line-height:170%;margin-bottom:28px">{text}</p>'
-            )]
+            return [assistant_card_html(raw_text)]
         if item.kind == 'live_status':
+            view = item.payload.get('view')
+            if view is not None:
+                # S9：实时运行状态卡（真实状态/计时/步骤）
+                import dataclasses
+
+                from .run_status import status_card_html
+                view = dataclasses.replace(
+                    view, text=item.payload.get('text', ''))
+                return [status_card_html(view)]
             return [(
                 '<p style="font-size:13px;color:#3e4c66"><b>ZQ</b>'
                 ' <span style="font-size:10px;color:#a0a6b1"> / ASSISTANT · 生成中</span></p>'
@@ -1262,6 +1437,100 @@ class PlatformWindow(QMainWindow):
                 content.append(f'<p>📄 {name}　<a href="zq-report:{identity}">打开文件</a>　<a href="zq-folder:{identity}">打开所在文件夹</a></p>')
         return content
 
+    # ------------------------------------------------------- S9 运行状态卡
+
+    @staticmethod
+    def _is_foldable_event(item) -> bool:
+        """只有中性执行记录参与折叠；错误/警告卡必须始终可见。"""
+        return item.kind == 'event' and not item.payload.get('severity')
+
+    def _fold_execution_groups(self, items) -> list:
+        """连续 ≥3 条中性执行记录折叠为一组；返回 item 或 (key, events)。"""
+        blocks: list = []
+        group_keys: list = []
+        index = 0
+        while index < len(items):
+            item = items[index]
+            if not self._is_foldable_event(item) or item.message_id is None:
+                blocks.append(item)
+                index += 1
+                continue
+            group = [item]
+            index += 1
+            while (index < len(items)
+                   and self._is_foldable_event(items[index])
+                   and items[index].message_id is not None):
+                group.append(items[index])
+                index += 1
+            if len(group) >= 3:
+                key = f'{self.session_id}:{group[0].message_id}'
+                group_keys.append(key)
+                blocks.append((key, [g.payload.get('text', '')
+                                     for g in group]))
+            else:
+                blocks.extend(group)
+        self._last_event_group_keys = group_keys
+        return blocks
+
+    def _expanded_event_groups_snapshot(self) -> list:
+        """当前渲染出的折叠组 key 列表（测试与调试入口）。"""
+        return list(self._last_event_group_keys)
+
+
+    def _live_status_view(self, job):
+        """从真实 job 记账 + durable operation 推导状态卡视图。"""
+        from .run_status import RunStatusView, derive_run_state, derive_step
+        now = time.monotonic()
+        operation_id = job.get('operation_id') or ''
+        operation_status = None
+        tools_running = 0
+        gateway = job.get('gateway')
+        repo = getattr(gateway, 'repo', None)
+        if repo is not None and operation_id:
+            try:
+                record = repo.get_operation(operation_id)
+                operation_status = record.status
+                tools_running = sum(
+                    1 for call in repo.tool_calls(operation_id)
+                    if call.status in ('proposed', 'running'))
+            except (KeyError, ValueError, sqlite3.Error):
+                operation_status = None
+        state = derive_run_state(
+            'running', operation_status=operation_status,
+            stop_requested=bool(job.get('stop_requested')))
+        step = derive_step(accepted=bool(operation_id),
+                           has_output=bool(job.get('live_text')),
+                           tools_running=tools_running)
+        return RunStatusView(
+            state=state, operation_id=operation_id or 'pending',
+            elapsed_seconds=int(now - job.get('started_at', now)),
+            last_activity_seconds=int(now - job.get('last_activity_at', now)),
+            step_index=step, text='')
+
+    def _terminal_status_line(self):
+        """最近一轮的终态摘要行；无终态记录时返回 None。"""
+        from .conversation_status import TERMINAL_PHASES
+        from .run_status import RunStatusView, terminal_line_html
+        status = self.status_controller.turn_phase(self.session_id)
+        if status is None or status.phase not in TERMINAL_PHASES - {'waiting'}:
+            return None
+        elapsed = 0
+        if status.started_at and status.last_activity_at:
+            elapsed = int(status.last_activity_at - status.started_at)
+        view = RunStatusView(
+            state=status.phase, operation_id=status.operation_id,
+            elapsed_seconds=elapsed, last_activity_seconds=None,
+            step_index=3, text='')
+        return terminal_line_html(view)
+
+    def _tick_run_status(self) -> None:
+        """每秒刷新当前会话状态卡的计时；无活跃任务即停表。"""
+        job = self._agent_jobs.get(self.session_id)
+        if job is None or job.get('done'):
+            self._status_timer.stop()
+            return
+        self.render_messages()
+
     def render_messages(self):
         scroll = self.transcript.verticalScrollBar()
         previous_position = scroll.value()
@@ -1279,7 +1548,9 @@ class PlatformWindow(QMainWindow):
             live = {'after_message_id': None,
                     'operation_id': current_job['operation_id'],
                     'user_text': current_job['user_text'],
-                    'text': current_job['live_text'] or '新 Agent 路径：正在生成…'}
+                    'text': current_job['live_text'] or '新 Agent 路径：正在生成…',
+                    # S9：实时状态卡视图（真实状态 + 真实计时）
+                    'view': self._live_status_view(current_job)}
         agent_entries = []
         if self.session_id:
             try:
@@ -1314,8 +1585,20 @@ class PlatformWindow(QMainWindow):
             content.append(
                 '<p style="color:#858d9b;font-size:14px;line-height:180%">'
                 '添加本轮资料，用自然语言描述任务。原始文件只读。</p>')
-        for item in items:
-            content.extend(self._render_timeline_item(item))
+        for block in self._fold_execution_groups(items):
+            if isinstance(block, tuple):
+                key, events = block
+                from .message_cards import execution_group_html
+                content.append(execution_group_html(
+                    events, group_id=key,
+                    collapsed=key not in self._expanded_event_groups))
+            else:
+                content.extend(self._render_timeline_item(block))
+        if live is None and self.session_id:
+            # S9：临时状态卡被终态摘要行替换（内存态，重开会话不残留）
+            terminal_html = self._terminal_status_line()
+            if terminal_html:
+                content.append(terminal_html)
         self.transcript.setHtml(
             "".join(content)
             or (
@@ -1370,6 +1653,40 @@ class PlatformWindow(QMainWindow):
     def handle_report_link(self, url):
         from .report_export import export_review
         action = url.scheme()
+        if action == 'zq-events':
+            # S10：执行记录折叠组展开/收起（仅允许当前渲染出的组 key）
+            key = url.path()
+            if not key or url.hasQuery() or url.hasFragment() or url.host():
+                return
+            if key not in self._last_event_group_keys:
+                return
+            if key in self._expanded_event_groups:
+                self._expanded_event_groups.discard(key)
+            else:
+                self._expanded_event_groups.add(key)
+            self.render_messages()
+            return
+        if action == 'zq-diagnostics':
+            # S10：复制诊断信息——只含公开字段，不含 traceback/凭据
+            if url.hasQuery() or url.hasFragment() or url.host():
+                return
+            parts = url.path().split('/')
+            operation_id = parts[0] if parts and parts[0] else ''
+            if not operation_id:
+                return
+            error_code = parts[1] if len(parts) > 1 else ''
+            summary = ''
+            status = self.status_controller.turn_phase(
+                self.session_id, operation_id)
+            if status is not None:
+                summary = status.text
+            from PySide6.QtGui import QGuiApplication
+
+            from .message_cards import diagnostics_text
+            QGuiApplication.clipboard().setText(diagnostics_text(
+                operation_id=operation_id, error_code=error_code,
+                summary=summary, client_version=CLIENT_VERSION))
+            return
         if action == 'zq-download-folder':
             from .browser_download_delivery import download_folder
             try:
@@ -1522,17 +1839,27 @@ class PlatformWindow(QMainWindow):
         self.files.clear()
         self.memories.clear()
         if not self.project_id:
+            self._file_rows = []
+            self._file_records = {}
+            self._artifact_entries = []
+            self._task_records = []
+            self.artifacts_list.clear()
+            self.tasks_list.clear()
+            self.task_detail.setText("双击任务查看详情")
+            self.project_summary.setVisible(False)
             return
         files = self.store.files(self.project_id)
-        for item in files:
-            row = QListWidgetItem(
-                f"{item['name']}\n{item['size']:,} bytes · {item['sha256'][:10]}"
-            )
-            row.setData(Qt.ItemDataRole.UserRole, item["id"])
+        self._file_records = {item['id']: item for item in files}
+        self._file_rows = build_file_rows(
+            files, selected_ids=set(selected_ids),
+            used_ids=self._used_file_ids())
+        for view in self._file_rows:
+            row = QListWidgetItem(row_label(view, files_map={}))
+            row.setData(Qt.ItemDataRole.UserRole, view.file_id)
             row.setFlags(row.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             row.setCheckState(
                 Qt.CheckState.Checked
-                if item["id"] in selected_ids
+                if view.selected
                 else Qt.CheckState.Unchecked
             )
             self.files.addItem(row)
@@ -1547,7 +1874,169 @@ class PlatformWindow(QMainWindow):
                 row.setFlags(row.flags() & ~Qt.ItemFlag.ItemIsEnabled)
             self.memories.addItem(row)
         del blocker
+        self._apply_file_filter()
+        self._refresh_artifacts_and_tasks()
+        self._update_project_summary()
         self.save_current_draft()
+
+    def _update_project_summary(self):
+        """动态项目摘要：真实统计文件/会话/成果数量。"""
+        if not self.project_id:
+            self.project_summary.setVisible(False)
+            return
+        files = len(self.store.files(self.project_id))
+        sessions = len(self.store.sessions(self.project_id))
+        artifacts = len(self._artifact_entries)
+        self.project_summary.setText(
+            f'{files} 个文件 · {sessions} 个会话 · {artifacts} 项成果')
+        self.project_summary.setVisible(True)
+
+    def _refresh_artifacts_and_tasks(self):
+        """成果 Tab 与任务 Tab：数据全部来自 store 真实 runs 记录。"""
+        self._artifact_entries = collect_artifacts(self.store, self.project_id)
+        self.artifacts_list.clear()
+        for index, entry in enumerate(self._artifact_entries):
+            row = QListWidgetItem(artifact_row_text(entry))
+            row.setData(Qt.ItemDataRole.UserRole, index)
+            self.artifacts_list.addItem(row)
+        self._task_records = []
+        self.tasks_list.clear()
+        for session in self.store.sessions(self.project_id):
+            for run in self.store.runs(session['id']):
+                try:
+                    snapshot = json.loads(run.get('snapshot') or '{}')
+                except (TypeError, ValueError):
+                    snapshot = {}
+                self._task_records.append((run, snapshot))
+                row = QListWidgetItem(task_row_text(run, snapshot))
+                row.setData(Qt.ItemDataRole.UserRole,
+                            len(self._task_records) - 1)
+                self.tasks_list.addItem(row)
+
+    def _selected_artifact_entry(self):
+        row = self.artifacts_list.currentRow()
+        if row < 0 and self.artifacts_list.count():
+            row = 0
+        if not 0 <= row < len(self._artifact_entries):
+            return None
+        return self._artifact_entries[row]
+
+    def _resolve_artifact_path(self, entry):
+        """generation 成果走带范围校验的 artifact_path；其余校验文件存在。"""
+        if entry.kind == 'generation' and entry.index is not None:
+            from .generation import artifact_path
+            return artifact_path(self.store, entry.session_id,
+                                 entry.run_id, entry.index)
+        path = Path(entry.path)
+        if not path.is_file():
+            raise ValueError('成果文件已移动或删除，请在项目目录核对。')
+        return path
+
+    def open_selected_artifact(self):
+        entry = self._selected_artifact_entry()
+        if entry is None:
+            return
+        try:
+            path = self._resolve_artifact_path(entry)
+            if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+                raise ValueError('无法打开文件，请检查默认应用')
+        except (ValueError, OSError, PermissionError) as exc:
+            QMessageBox.warning(self, '成果', str(exc))
+
+    def save_artifact_as(self):
+        entry = self._selected_artifact_entry()
+        if entry is None:
+            return
+        try:
+            source = self._resolve_artifact_path(entry)
+        except (ValueError, OSError, PermissionError) as exc:
+            QMessageBox.warning(self, '成果', str(exc))
+            return
+        target, _ = QFileDialog.getSaveFileName(self, '另存为', entry.name)
+        if not target:
+            return
+        destination = Path(target)
+        staging = destination.with_name(destination.name + '.part')
+        try:
+            shutil.copy2(source, staging)
+            os.replace(staging, destination)
+        except OSError as exc:
+            try:
+                staging.unlink(missing_ok=True)
+            except OSError:
+                staging = None
+            QMessageBox.warning(self, '成果', f'另存为失败：{exc}')
+            return
+        self.status.setText(f'成果已另存为：{destination.name}')
+
+    def show_task_detail(self, item):
+        index = item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(index, int) or not 0 <= index < len(self._task_records):
+            return
+        run, snapshot = self._task_records[index]
+        try:
+            result = json.loads(run.get('result') or '{}')
+        except (TypeError, ValueError):
+            result = {}
+        self.task_detail.setText(task_detail_text(run, snapshot, result))
+
+    def _used_file_ids(self):
+        """历史任务快照中真实使用过的文件 id 集合。"""
+        used = set()
+        if not self.project_id:
+            return used
+        for session in self.store.sessions(self.project_id):
+            for run in self.store.runs(session['id']):
+                try:
+                    snapshot = json.loads(run.get('snapshot') or '{}')
+                except (TypeError, ValueError):
+                    continue
+                for entry in snapshot.get('selected_files') or []:
+                    file_id = entry.get('id') if isinstance(entry, dict) else None
+                    if file_id:
+                        used.add(file_id)
+        return used
+
+    _FILE_FILTER_KINDS: ClassVar = {
+        '全部文件': 'all',
+        '本轮已选': 'selected',
+        '未使用': 'unused',
+        '已用于任务': 'used',
+    }
+
+    def _apply_file_filter(self, *_args):
+        kind = self._FILE_FILTER_KINDS.get(self.file_filter.currentText(), 'all')
+        visible = {
+            row.file_id
+            for row in filter_rows(self._file_rows, self.file_search.text(), kind)
+        }
+        for i in range(self.files.count()):
+            item = self.files.item(i)
+            item.setHidden(item.data(Qt.ItemDataRole.UserRole) not in visible)
+
+    def _set_visible_check_state(self, state):
+        blocker = QSignalBlocker(self.files)
+        for i in range(self.files.count()):
+            item = self.files.item(i)
+            if not item.isHidden():
+                item.setCheckState(state)
+        del blocker
+        self.save_current_draft()
+
+    def select_visible_files(self):
+        self._set_visible_check_state(Qt.CheckState.Checked)
+
+    def clear_visible_files(self):
+        self._set_visible_check_state(Qt.CheckState.Unchecked)
+
+    def show_file_detail(self, item):
+        file_id = item.data(Qt.ItemDataRole.UserRole)
+        record = self._file_records.get(file_id)
+        view = next((r for r in self._file_rows if r.file_id == file_id), None)
+        if record is None or view is None:
+            return
+        self.file_detail.setText(file_detail_text(
+            view, sha256=record['sha256'], path=record.get('path', '')))
 
     def add_files(self):
         if not self.project_id or not self.attach.isEnabled():
@@ -2257,6 +2746,17 @@ class PlatformWindow(QMainWindow):
         ):
             widget.setEnabled(not busy)
         self.stop.setEnabled(busy)
+        # S9：按钮禁用必须带原因（tooltip 说明）
+        if busy:
+            self.send.setToolTip('任务运行中：请先等待本轮结束，或停止后再发送')
+            self.attach.setToolTip('任务运行中，暂不能添加文件')
+            self.model_combo.setToolTip('任务运行中，暂不能切换模型')
+            self.stop.setToolTip('停止当前任务；已提交的模型调用仍会结算')
+        else:
+            self.send.setToolTip('发送消息（Enter）；输入框内 Alt+Enter 换行')
+            self.attach.setToolTip('添加项目文件')
+            self.model_combo.setToolTip('')
+            self.stop.setToolTip('当前没有正在运行的任务')
 
     def completed(self, result, *, destination=None):
         target = destination or TaskDestination.resolve(self.store, self.run_id)
@@ -2626,6 +3126,7 @@ class PlatformWindow(QMainWindow):
                           else PlatformStore(self.store.path, payload["owner"]))
             self.project_id = self.session_id = self.run_id = None
             self._live_render_timer.stop()
+            self._live_render_pending.clear()
             self._live_agent_text = ''
             self.composer.clear()
             self.transcript.clear()
@@ -2660,8 +3161,21 @@ class PlatformWindow(QMainWindow):
         elif self._agent_worker is not None:
             # S15：停止新 Agent 路径轮次（abort 内核开放操作，Worker 随后自行结束）
             self._agent_worker.gateway.stop()
+            # S9：进入 stopping 活动态——任务未收束前不得显示为终态
+            session_id = self._agent_session_id or self.session_id
+            job = self._agent_jobs.get(session_id)
+            if job is not None:
+                job['stop_requested'] = True
+                job['last_activity_at'] = time.monotonic()
+            operation_id = self._agent_operation_id
+            if session_id and operation_id:
+                self.status_controller.stopping_turn(
+                    session_id, operation_id,
+                    '正在停止；已提交的模型调用仍会结算。')
             self.status.setText("正在停止新 Agent 轮次；已提交的模型调用可能仍需结束并结算。")
             self.stop.setEnabled(False)
+            self.stop.setToolTip('停止请求已发出，等待本轮安全收束')
+            self.render_messages()
 
     def check_versions(self):
         if self.version_worker is not None:
@@ -2682,7 +3196,7 @@ class PlatformWindow(QMainWindow):
         build = info.get('server_build', '未提供')
         build_label = '服务端构建号未提供' if build == '未提供' else f'服务端构建号 {build}'
         self.version_label.setText(
-            f"客户端 {CLIENT_VERSION} · Skill {REVIEW.version}\n"
+            f"客户端 {CLIENT_VERSION} · 审核工具 {REVIEW.version}\n"
             f"服务端 API {info['server_api_version']} · {supported}\n"
             f"{build_label} · "
             f"协议 {info.get('protocol_version') or '未声明'}（API 版本不等于部署版本）"
@@ -2876,6 +3390,12 @@ class PlatformWindow(QMainWindow):
 
     def closeEvent(self, event):
         from ..report_review_app.services.resource_locks import CLIENT_RESOURCES
+        if self._force_close:
+            # S6-02：宽限期已过，检查点已持久化，直接放行关闭。
+            self.session_badge_timer.stop()
+            self.close_browser()
+            event.accept()
+            return
         if not self.flush_unsaved_drafts():
             event.ignore()
             return
@@ -2894,6 +3414,10 @@ class PlatformWindow(QMainWindow):
                 except Exception:
                     continue
             self._close_after_agent_jobs = True
+            # S6-02：宽限期内等 worker 把终态 durable 落库；超时由
+            # _force_close_with_checkpoints 把开放 operation 标记 unknown 后放行。
+            if not self._close_grace_timer.isActive():
+                self._close_grace_timer.start(int(self._close_grace_seconds * 1000))
             self.status.setText("正在停止所有会话中的 Agent 任务；等待线程结束后才能关闭。")
             event.ignore()
             return
@@ -2915,6 +3439,33 @@ class PlatformWindow(QMainWindow):
         self.session_badge_timer.stop()
         self.close_browser()
         event.accept()
+
+    def _force_close_with_checkpoints(self) -> None:
+        """S6-02：关闭宽限期超时兜底。
+
+        worker 迟迟未收束时，把所有仍开放的 operation 持久化为 unknown
+        durable 检查点（重启后对账恢复），然后强制放行关闭——绝不能只发
+        gateway.stop() 就把内存状态一丢了事。
+        """
+        from .agent_gateway import mark_operations_unknown
+
+        for job in list(self._agent_jobs.values()):
+            gateway = job.get('gateway')
+            repo = getattr(gateway, 'repo', None)
+            open_ops = getattr(gateway, '_open_operations', None) or ()
+            if repo is None:
+                continue
+            try:
+                mark_operations_unknown(
+                    repo, tuple(open_ops),
+                    code='client.shutdown_timeout',
+                    summary='客户端关闭宽限期超时，已持久化 unknown 待对账')
+            except Exception:  # 关闭兜底路径不得再抛错
+                import logging
+                logging.getLogger(__name__).warning(
+                    '会话关闭检查点写入失败，继续处理其余会话', exc_info=True)
+        self._force_close = True
+        self.close()
 
 
 def main():

@@ -1,5 +1,4 @@
 """K03 contract: EvidenceRef carries a bounded optional local summary."""
-import json
 import sys
 import unittest
 from pathlib import Path
@@ -10,7 +9,7 @@ sys.path.insert(0, str(ROOT / 'src'))
 import xlwt
 from pydantic import ValidationError
 
-from asset_based_agent.agent_contracts import EvidenceRef, UnderstandingRequest
+from asset_based_agent.agent_contracts import EvidenceRef
 from asset_based_agent.technical_platform.skills import digest
 
 SHA = 'a' * 64
@@ -65,7 +64,10 @@ class PrepareEvidenceTest(unittest.TestCase):
 
     def test_prepare_attaches_summary_for_workbooks(self):
         import tempfile
-        from asset_based_agent.technical_platform.agent_controller import AgentController
+
+        from asset_based_agent.technical_platform.agent_controller import (
+            AgentController,
+        )
         with tempfile.TemporaryDirectory() as tmp:
             store = self.make_store(tmp)
             project = store.create_project('one')
@@ -88,7 +90,10 @@ class PrepareEvidenceTest(unittest.TestCase):
 
     def test_prepare_leaves_other_files_without_summary(self):
         import tempfile
-        from asset_based_agent.technical_platform.agent_controller import AgentController
+
+        from asset_based_agent.technical_platform.agent_controller import (
+            AgentController,
+        )
         with tempfile.TemporaryDirectory() as tmp:
             store = self.make_store(tmp)
             project = store.create_project('one')

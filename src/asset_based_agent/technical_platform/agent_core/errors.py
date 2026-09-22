@@ -28,6 +28,12 @@ class AgentCancelled(AgentError):
     code = 'agent.cancelled'
 
 
+class AgentInternalError(AgentError):
+    """未归类内部异常的安全收束码：不泄露路径、token、堆栈。"""
+
+    code = 'agent.internal_error'
+
+
 class ModelAuthFailed(AgentError):
     code = 'model.auth_failed'
 
@@ -94,6 +100,7 @@ class ResourceDisabled(AgentError):
 
 _CLASSES = (
     InvalidRequest, ContextOverflow, OperationBusy, AgentCancelled,
+    AgentInternalError,
     ModelAuthFailed, ModelBalanceInsufficient, ModelTimeout, ModelProtocolError,
     ServerCapabilityUnavailable,
     ModelBillingReconciliation, ToolInvalidArguments, ToolPermissionDenied,

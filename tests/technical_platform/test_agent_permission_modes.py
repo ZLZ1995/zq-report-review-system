@@ -11,7 +11,7 @@ def test_three_permission_modes_expose_codex_style_labels_and_risk_policy():
     assert [(item.id, item.title) for item in permission_mode_options()] == [
         ('request', '请求批准'),
         ('risk', '帮我批准'),
-        ('full', '完全访问权限'),
+        ('full', '范围内自动执行'),
     ]
     assert all(requires_browser_confirmation('request', action) for action in (
         'navigate', 'scroll', 'click', 'fill', 'select', 'download', 'upload'))

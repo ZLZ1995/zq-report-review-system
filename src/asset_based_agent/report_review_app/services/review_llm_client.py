@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import json
-from http.client import IncompleteRead, RemoteDisconnected
 from collections.abc import Callable
+from http.client import IncompleteRead, RemoteDisconnected
 from typing import Any, Protocol
 from urllib import request
 from urllib.error import HTTPError, URLError

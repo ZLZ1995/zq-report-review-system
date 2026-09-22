@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 
 def _version(db):
@@ -421,6 +421,25 @@ def _backfill_run_message_links(db):
             (run_id, session, source_id, assistant_id, relation, stamp))
 
 
+def apply_v16(db):
+    """S2-01：agent_operations 执行 lease 三列（additive，不改动既有数据）。
+
+    executor_id 标识持有执行权的进程；lease_expires_at/last_heartbeat_at
+    供 recover() 区分活任务与残留任务，双开客户端不得互相误杀。
+    无 agent 表的旧库 no-op（与 v15 的修复型迁移同一约定）。
+    """
+    tables = {row[0] for row in db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    if 'agent_operations' not in tables:
+        return
+    columns = {row[1] for row in db.execute(
+        'PRAGMA table_info(agent_operations)')}
+    for column in ('executor_id', 'lease_expires_at', 'last_heartbeat_at'):
+        if column not in columns:
+            db.execute(
+                f'ALTER TABLE agent_operations ADD COLUMN {column} TEXT')
+
+
 def migrate_database(path: Path) -> Path | None:
     path = path.resolve()
     if not path.is_file():
@@ -488,6 +507,8 @@ def migrate_database(path: Path) -> Path | None:
                 apply_v14(db)
             if previous_version < 15:
                 apply_v15(db)
+            if previous_version < 16:
+                apply_v16(db)
             db.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
             db.commit()
             return backup

@@ -35,6 +35,8 @@ class PlatformStore:
             apply_v12,
             apply_v13,
             apply_v14,
+            apply_v15,
+            apply_v16,
             migrate_database,
         )
 
@@ -97,6 +99,8 @@ class PlatformStore:
                 apply_v12(db)
                 apply_v13(db)
                 apply_v14(db)
+                apply_v15(db)
+                apply_v16(db)
                 db.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
         # Creation is allowed only during explicit initialization. Later requests
         # must fail closed if a disk disappears or the database is moved.
@@ -422,6 +426,12 @@ class PlatformStore:
 
     def claim_run(self, run_id: str) -> dict:
         """Atomically grant the queued run to exactly one execution attempt."""
+        # S5-04 后 interrupted->running 在状态机中合法（供受控恢复路径使用），
+        # 但 claim_run 是普通执行入口：只允许领取 queued / waiting_user（澄清恢复）
+        # 任务；interrupted 任务必须先完成对账、由恢复路径显式放行，杜绝盲目重跑。
+        run = self.run(run_id)
+        if run["state"] not in {"queued", "waiting_user"}:
+            raise ValueError(f"只能领取 queued/waiting_user 状态的任务：当前 {run['state']}")
         self.transition(run_id, "running", "planning: 已领取任务，开始只读计划校验")
         return self.run(run_id)
 
@@ -432,6 +442,8 @@ class PlatformStore:
             "validating": {"succeeded", "failed", "cancelled", "waiting_user"},
             # Clarification resume re-enters running; it never re-bills the model.
             "waiting_user": {"running", "cancelled", "failed"},
+            # S5-04：interrupted 不是孤岛——可核对后失败、从检查点恢复、或放弃
+            "interrupted": {"failed", "running", "cancelled"},
         }
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")

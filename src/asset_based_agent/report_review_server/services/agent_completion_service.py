@@ -41,10 +41,137 @@ SUPPORTED_PROTOCOL_VERSIONS = (1,)
 UNCERTAIN_PROVIDER_CODES = {
     'provider_usage_invalid', 'provider_usage_missing',
     'provider_network_error', 'provider_invalid_json',
+    'provider_invalid_chunk', 'provider_stream_incomplete',
+    'provider_finish_missing',
 }
-MAX_STORED_EVENTS = 2000
+MAX_REPLAY_PAYLOAD_BYTES = 8 * 1024 * 1024
 # sampling 只允许携带采样参数，不得覆盖线格式保留键
 _RESERVED_WIRE_KEYS = frozenset({'messages', 'tools'})
+
+
+class ReplayPayloadTooLargeError(RuntimeError):
+    """canonical replay payload 超过存储上限（S3-02：绝不静默截断）。"""
+
+
+class CanonicalReplayBuilder:
+    """S3-02：把流事件折叠为 canonical replay payload。
+
+    存储语义完整且保序：sequence 逐项记录内容事件，usage /
+    message_complete 存原始 data；重放时重新编码为与首次完全一致的
+    SSE 事件序列，不再保存/截断原始 delta 数组。
+    """
+
+    def __init__(self) -> None:
+        self.started = False
+        self.sequence: list[dict[str, object]] = []
+        self.usage: dict[str, object] | None = None
+        self.complete_data: dict[str, object] = {}
+        self.message_complete = False
+        self._text_parts: list[str] = []
+        self._tool_completes: list[dict[str, object]] = []
+
+    def add(self, event: dict[str, object]) -> None:
+        kind = event.get('kind')
+        data = event.get('data')
+        data = data if isinstance(data, dict) else {}
+        if kind == 'message_start':
+            self.started = True
+        elif kind == 'text_delta':
+            text = str(data.get('text', ''))
+            self._text_parts.append(text)
+            self.sequence.append({'kind': 'text_delta', 'text': text})
+        elif kind == 'tool_call_delta':
+            self.sequence.append({
+                'kind': 'tool_call_delta',
+                'index': int(data.get('index', 0) or 0),
+                'name': str(data.get('name', '')),
+                'fragment': str(data.get('arguments_fragment', '')),
+            })
+        elif kind == 'tool_call_complete':
+            entry = {
+                'id': str(data.get('id') or ''),
+                'name': str(data.get('name', '')),
+                'arguments': data.get('arguments'),
+            }
+            self._tool_completes.append(entry)
+            self.sequence.append({'kind': 'tool_call_complete', **entry})
+        elif kind == 'usage':
+            self.usage = dict(data)
+        elif kind == 'message_complete':
+            self.message_complete = True
+            self.complete_data = dict(data)
+        elif kind == 'error':
+            pass  # 失败事件不进入成功回放
+        else:
+            self.sequence.append(
+                {'kind': 'raw', 'event': {'kind': kind, 'data': data}})
+
+    def payload(self) -> dict[str, object]:
+        return {
+            'version': 1,
+            'assistant_text': ''.join(self._text_parts),
+            'tool_calls': list(self._tool_completes),
+            'usage': self.usage,
+            'finish_reason': self.complete_data.get('finish_reason'),
+            'message_complete': self.message_complete,
+            'started': self.started,
+            'complete_data': dict(self.complete_data),
+            'sequence': list(self.sequence),
+        }
+
+
+def encode_canonical_replay(
+        payload: dict[str, object]) -> list[dict[str, object]]:
+    """把 canonical replay payload 重新编码为 SSE 事件序列。"""
+    events: list[dict[str, object]] = []
+    if payload.get('started', True):
+        events.append({'kind': 'message_start', 'data': {}})
+    sequence = payload.get('sequence') or []
+    for item in sequence:  # type: ignore[union-attr]
+        kind = item.get('kind')
+        if kind == 'text_delta':
+            events.append({'kind': 'text_delta',
+                           'data': {'text': item.get('text', '')}})
+        elif kind == 'tool_call_delta':
+            events.append({'kind': 'tool_call_delta', 'data': {
+                'index': item.get('index', 0),
+                'name': item.get('name', ''),
+                'arguments_fragment': item.get('fragment', ''),
+            }})
+        elif kind == 'tool_call_complete':
+            events.append({'kind': 'tool_call_complete', 'data': {
+                'id': item.get('id'),
+                'name': item.get('name', ''),
+                'arguments': item.get('arguments'),
+            }})
+        elif kind == 'raw':
+            events.append(dict(item.get('event') or {}))
+    if payload.get('usage') is not None:
+        events.append({'kind': 'usage', 'data': dict(payload['usage'])})
+    if payload.get('message_complete'):
+        events.append({'kind': 'message_complete', 'data': dict(
+            payload.get('complete_data')
+            or {'finish_reason': payload.get('finish_reason')})})
+    return events
+
+
+def _usage_from_event(event: dict[str, object]) -> NormalizedUsage:
+    """流事件中的 usage 严格校验：类型非法一律 provider_usage_invalid。"""
+    data = event.get('data')
+    if not isinstance(data, dict):
+        raise ProviderCallError(
+            'provider_usage_invalid', '模型渠道未返回可信Token用量。',
+            retryable=False)
+    values: dict[str, int] = {}
+    for key in ('input_tokens', 'output_tokens', 'cache_hit_tokens',
+                'cache_miss_tokens', 'reasoning_tokens'):
+        value = data.get(key, 0)
+        if type(value) is not int or value < 0:
+            raise ProviderCallError(
+                'provider_usage_invalid', '模型渠道未返回可信Token用量。',
+                retryable=False)
+        values[key] = value
+    return NormalizedUsage(**values)
 
 
 @dataclass
@@ -64,24 +191,112 @@ class ReplayResult:
     billing_request_id: str
 
 
+MAX_TOOL_SCHEMA_BYTES = 16 * 1024
+MAX_TOOL_SCHEMA_DEPTH = 16
+MAX_TOOL_SCHEMA_PROPERTIES = 128
+MAX_TOOL_SCHEMA_TOTAL_PROPERTIES = 512
+# 工具 schema 只允许安全的 JSON Schema 子集；$ref/$defs/definitions 等
+# 引用类关键字会引入递归爆炸，明确拒绝。
+_ALLOWED_SCHEMA_KEYS = frozenset({
+    'type', 'properties', 'required', 'items', 'enum', 'const',
+    'description', 'title', 'default', 'minimum', 'maximum',
+    'exclusiveMinimum', 'exclusiveMaximum', 'minLength', 'maxLength',
+    'pattern', 'format', 'additionalProperties', 'anyOf', 'oneOf',
+    'allOf', 'not', 'nullable', 'minItems', 'maxItems', 'uniqueItems',
+    'examples', 'minProperties', 'maxProperties',
+})
+
+
 def validate_tool_schemas(tools: list[dict[str, object]]) -> None:
     for tool in tools:
         schema = tool.get('input_schema')
         if not isinstance(schema, dict):
             raise ServiceError(
                 'invalid_tool_schema', '工具 input_schema 必须是对象。', 400)
-        properties = schema.get('properties')
-        if properties is not None and not isinstance(properties, dict):
+        size = len(json.dumps(schema, ensure_ascii=False).encode('utf-8'))
+        if size > MAX_TOOL_SCHEMA_BYTES:
             raise ServiceError(
-                'invalid_tool_schema', '工具 input_schema.properties 必须是对象。',
+                'invalid_tool_schema',
+                f'工具 input_schema 超过大小限制（{MAX_TOOL_SCHEMA_BYTES} 字节）。',
                 400)
-        required = schema.get('required')
-        if required is not None and (
-                not isinstance(required, list)
+        _check_schema_node(schema, depth=1,
+                           budget=[MAX_TOOL_SCHEMA_TOTAL_PROPERTIES])
+
+
+def _check_schema_node(node: object, *, depth: int, budget: list[int]) -> None:
+    if not isinstance(node, dict):
+        raise ServiceError(
+            'invalid_tool_schema', '工具 input_schema 子节点必须是对象。', 400)
+    if depth > MAX_TOOL_SCHEMA_DEPTH:
+        raise ServiceError(
+            'invalid_tool_schema', '工具 input_schema 嵌套深度超限。', 400)
+    unknown = sorted(set(node) - _ALLOWED_SCHEMA_KEYS)
+    if unknown:
+        raise ServiceError(
+            'invalid_tool_schema',
+            f'工具 input_schema 包含不支持的关键字: {", ".join(unknown)}。', 400)
+    properties = node.get('properties')
+    if properties is not None and not isinstance(properties, dict):
+        raise ServiceError(
+            'invalid_tool_schema', '工具 input_schema.properties 必须是对象。',
+            400)
+    if properties:
+        if len(properties) > MAX_TOOL_SCHEMA_PROPERTIES:
+            raise ServiceError(
+                'invalid_tool_schema',
+                '工具 input_schema.properties 数量超限。', 400)
+        budget[0] -= len(properties)
+        if budget[0] < 0:
+            raise ServiceError(
+                'invalid_tool_schema',
+                '工具 input_schema properties 总数超限。', 400)
+    required = node.get('required')
+    if required is not None:
+        if (not isinstance(required, list)
                 or any(type(item) is not str for item in required)):
             raise ServiceError(
                 'invalid_tool_schema',
                 '工具 input_schema.required 必须是字符串数组。', 400)
+        declared = set(properties or ())
+        dangling = [name for name in required if name not in declared]
+        if dangling:
+            raise ServiceError(
+                'invalid_tool_schema',
+                '工具 input_schema.required 必须对应已声明的 property: '
+                + ', '.join(dangling), 400)
+    if properties:
+        for sub in properties.values():
+            _check_schema_node(sub, depth=depth + 1, budget=budget)
+    items = node.get('items')
+    if isinstance(items, dict):
+        _check_schema_node(items, depth=depth + 1, budget=budget)
+    elif isinstance(items, list):
+        for sub in items:
+            _check_schema_node(sub, depth=depth + 1, budget=budget)
+    elif items is not None:
+        raise ServiceError(
+            'invalid_tool_schema', '工具 input_schema.items 必须是对象或数组。',
+            400)
+    for key in ('anyOf', 'oneOf', 'allOf'):
+        branches = node.get(key)
+        if branches is None:
+            continue
+        if not isinstance(branches, list):
+            raise ServiceError(
+                'invalid_tool_schema',
+                f'工具 input_schema.{key} 必须是数组。', 400)
+        for sub in branches:
+            _check_schema_node(sub, depth=depth + 1, budget=budget)
+    additional = node.get('additionalProperties')
+    if isinstance(additional, dict):
+        _check_schema_node(additional, depth=depth + 1, budget=budget)
+    elif additional is not None and not isinstance(additional, bool):
+        raise ServiceError(
+            'invalid_tool_schema',
+            '工具 input_schema.additionalProperties 必须是布尔或对象。', 400)
+    negation = node.get('not')
+    if negation is not None:
+        _check_schema_node(negation, depth=depth + 1, budget=budget)
 
 
 def estimate_usage(messages: list[dict[str, object]], *,
@@ -177,6 +392,30 @@ class AgentCompletionService:
         if existing.request_hash != request_hash:
             raise ServiceError(
                 'idempotency_conflict', '相同请求编号对应了不同内容。', 409)
+        return self._replay_stored(existing)
+
+    def replay_by_request_id(
+        self,
+        db: Session,
+        *,
+        user_id: str,
+        client_request_id: str,
+    ) -> ReplayResult:
+        """S2-03：对账回放——按 client_request_id 取回已存储的事件流。
+
+        与 _replay 的差异：调用方是断线恢复的客户端，手里没有原始 payload，
+        因此跳过 request_hash 校验；其余状态门禁完全一致。
+        """
+        billing = db.scalar(
+            select(BillingRequest).where(
+                BillingRequest.user_id == user_id,
+                BillingRequest.client_request_id == client_request_id,
+            ))
+        if billing is None:
+            raise ServiceError('completion_not_found', '没有该请求的记录。', 404)
+        return self._replay_stored(billing)
+
+    def _replay_stored(self, existing: BillingRequest) -> ReplayResult:
         if existing.status == 'streaming':
             raise ServiceError('request_in_progress', '请求仍在处理中。', 409)
         if existing.status in ('uncertain', 'disconnected'):
@@ -194,13 +433,49 @@ class AgentCompletionService:
             raise ServiceError(
                 'idempotent_result_expired',
                 '该请求已结算，但临时结果已经过期。', 410)
-        events = json.loads(self.cipher.decrypt(
+        stored = json.loads(self.cipher.decrypt(
             existing.response_ciphertext,
             purpose=f'billing-response:{existing.billing_request_id}'))
+        if isinstance(stored, list):
+            events = stored  # 旧格式：原始事件数组（S3-02 之前的存量行）
+        else:
+            events = encode_canonical_replay(stored)
         return ReplayResult(
             events=events,
             charged_amount=money(existing.charged_amount),
             billing_request_id=existing.billing_request_id)
+
+    # --------------------------------------------------------------- 对账
+
+    def reconcile(
+        self,
+        db: Session,
+        *,
+        user_id: str,
+        client_request_id: str,
+    ) -> dict[str, object] | None:
+        """S2-03：按 client_request_id 返回可对账状态；无记录返回 None。
+
+        只读查询：不触碰计费、不触发回放、不改任何状态。
+        """
+        billing = db.scalar(
+            select(BillingRequest).where(
+                BillingRequest.user_id == user_id,
+                BillingRequest.client_request_id == client_request_id,
+            ))
+        if billing is None:
+            return None
+        replay_available = bool(
+            billing.status == 'succeeded'
+            and billing.response_ciphertext
+            and billing.response_expires_at is not None
+            and not is_expired(billing.response_expires_at))
+        return {
+            'status': billing.status,
+            'billing_request_id': billing.billing_request_id,
+            'replay_available': replay_available,
+            'error_code': billing.error_code or '',
+        }
 
     # --------------------------------------------------------------- 流式
 
@@ -209,31 +484,33 @@ class AgentCompletionService:
         db: Session,
         prepared: PreparedStream,
     ) -> Iterator[dict[str, object]]:
-        """产出 SSE 事件 dict；任何分支都留下可对账状态。"""
+        """产出 SSE 事件 dict；任何分支都留下可对账状态。
+
+        S3-01 terminal guard：按执行阶段（provider_started / usage 可信 /
+        settled）分类异常——
+        - provider 未开始：failed + release hold
+        - provider 已开始、usage 不可信：uncertain
+        - 已拿到可信 usage：按已知 usage 结算后 failed
+        - GeneratorExit：disconnected
+        任何出口后 billing.status != 'streaming'。
+        """
         billing, hold, route = prepared.billing, prepared.hold, prepared.route
         user, model = prepared.user, prepared.model
         wire_payload = prepared.wire_payload
-        emitted: list[dict[str, object]] = []
+        replay = CanonicalReplayBuilder()
         usage: NormalizedUsage | None = None
+        provider_started = False
 
         def track(event):
-            if len(emitted) < MAX_STORED_EVENTS:
-                emitted.append(event)
+            replay.add(event)
             return event
 
         try:
             for event in self.metered.provider_client.stream(
                     route, wire_payload):
-                if event['kind'] == 'usage':
-                    data = event['data']
-                    usage = NormalizedUsage(
-                        input_tokens=int(data.get('input_tokens', 0)),
-                        output_tokens=int(data.get('output_tokens', 0)),
-                        cache_hit_tokens=int(data.get('cache_hit_tokens', 0)),
-                        cache_miss_tokens=int(
-                            data.get('cache_miss_tokens', 0)),
-                        reasoning_tokens=int(
-                            data.get('reasoning_tokens', 0)))
+                provider_started = True
+                if event.get('kind') == 'usage':
+                    usage = _usage_from_event(event)
                 yield track(event)
             if usage is None:
                 raise ProviderCallError(
@@ -241,9 +518,10 @@ class AgentCompletionService:
                     retryable=False)
             charge = _charge_for_usage(route, usage, model, user)
             self.metered._record_attempt(
-                db, billing, route, 1, 'succeeded', usage, model, user, None)
+                db, billing, route, 1, 'succeeded', usage, model, user, None,
+                commit=False)
             self._settle_success(db, billing=billing, hold=hold,
-                                 charge=charge, events=emitted)
+                                 charge=charge, replay=replay)
             yield {'kind': 'receipt', 'data': {
                 'billing_request_id': billing.billing_request_id,
                 'charged_amount': str(money(charge)),
@@ -259,8 +537,19 @@ class AgentCompletionService:
         except GeneratorExit:
             self._mark_disconnected(billing.billing_request_id)
             raise
+        except Exception:  # noqa: BLE001 - terminal guard：内部异常也必须落终态
+            yield track({'kind': 'error', 'data': self._internal_failure(
+                db, billing=billing, hold=hold, route=route, user=user,
+                model=model, provider_started=provider_started,
+                usage=usage)})
 
-    def _settle_success(self, db: Session, *, billing, hold, charge, events):
+    def _settle_success(self, db: Session, *, billing, hold, charge,
+                        replay: CanonicalReplayBuilder):
+        payload_json = json.dumps(
+            replay.payload(), ensure_ascii=False, separators=(',', ':'))
+        if len(payload_json.encode('utf-8')) > MAX_REPLAY_PAYLOAD_BYTES:
+            raise ReplayPayloadTooLargeError(
+                'canonical replay payload 超过存储上限')
         self.metered.wallet_service.charge(
             db, user_id=billing.user_id, amount=money(charge),
             reference_id=billing.billing_request_id)
@@ -269,11 +558,66 @@ class AgentCompletionService:
         billing.status = 'succeeded'
         billing.charged_amount = money(charge)
         billing.response_ciphertext = self.cipher.encrypt(
-            json.dumps(events, ensure_ascii=False, separators=(',', ':')),
+            payload_json,
             purpose=f'billing-response:{billing.billing_request_id}')
         billing.response_expires_at = utc_now() + timedelta(hours=24)
         billing.completed_at = utc_now()
         db.commit()
+
+    def _internal_failure(self, db: Session, *, billing, hold, route, user,
+                          model, provider_started: bool,
+                          usage: NormalizedUsage | None):
+        """S3-01：非 provider 协议异常（DB/加密/扣费/未知内部错误）的终态兜底。
+
+        结算自身再失败时，通过独立会话落 uncertain，保证任何出口后
+        billing.status != 'streaming'。
+        """
+        code = 'internal_error'
+        try:
+            db.rollback()
+            if not provider_started:
+                self.metered._record_attempt(
+                    db, billing, route, 1, 'failed', NormalizedUsage(),
+                    model, user, code, commit=False)
+                hold.status = 'released'
+                billing.status = 'failed'
+                billing.error_code = code
+                billing.charged_amount = money(0)
+                billing.completed_at = utc_now()
+                db.commit()
+                return {'code': code, 'message': '服务内部错误，未产生费用。'}
+            if usage is None:
+                billing.status = 'uncertain'
+                billing.error_code = code
+                hold.status = 'uncertain'
+                self.metered._record_attempt(
+                    db, billing, route, 1, 'uncertain', NormalizedUsage(),
+                    model, user, code, commit=False)
+                db.commit()
+                return {'code': 'billing_reconciliation_required',
+                        'message': '渠道结果不可核验，需要对账。'}
+            charge = _charge_for_usage(route, usage, model, user)
+            self.metered._record_attempt(
+                db, billing, route, 1, 'failed', usage, model, user, code,
+                commit=False)
+            if charge:
+                self.metered.wallet_service.charge(
+                    db, user_id=billing.user_id, amount=money(charge),
+                    reference_id=billing.billing_request_id)
+            hold.status = 'captured' if charge else 'released'
+            hold.settled_amount = money(charge)
+            billing.status = 'failed'
+            billing.charged_amount = money(charge)
+            billing.error_code = code
+            billing.completed_at = utc_now()
+            db.commit()
+            return {'code': code,
+                    'message': '服务内部错误，已按已核验用量结算。'}
+        except Exception:  # noqa: BLE001 - 结算再失败：独立会话落可对账状态
+            db.rollback()
+            self._mark_uncertain(billing.billing_request_id)
+            return {'code': 'billing_reconciliation_required',
+                    'message': '渠道结果不可核验，需要对账。'}
 
     def _provider_failure(self, db: Session, *, billing, hold, route, user,
                           model, exc: ProviderCallError):
@@ -317,6 +661,27 @@ class AgentCompletionService:
             if hold is not None and hold.status == 'active':
                 hold.status = 'released'  # 无可信用量，释放冻结
             db.commit()
+
+    def _mark_uncertain(self, billing_request_id: str) -> None:
+        """S3-01：结算不可恢复时，独立会话落 uncertain（请求会话可能已坏）。
+
+        兜底会话自身也失败时不再上抛——已无任何可持久化手段，避免在错误
+        处理路径上二次崩穿。
+        """
+        try:
+            with self.session_factory() as db:
+                billing = db.get(BillingRequest, billing_request_id)
+                if billing is None or billing.status != 'streaming':
+                    return
+                hold = db.get(BalanceHold, billing.hold_id)
+                billing.status = 'uncertain'
+                billing.error_code = 'internal_error'
+                billing.completed_at = utc_now()
+                if hold is not None and hold.status == 'active':
+                    hold.status = 'uncertain'
+                db.commit()
+        except Exception:  # noqa: BLE001 - 兜底路径不再上抛
+            return
 
 
 def replay_events(replay: ReplayResult) -> Iterator[dict[str, object]]:

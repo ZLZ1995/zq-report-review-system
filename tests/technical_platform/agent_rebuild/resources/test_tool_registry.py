@@ -2,18 +2,19 @@
 import asyncio
 
 import pytest
-from .skill_fixtures import (
-    make_registry,
-    make_tool_registry,
-    probe_tool,
-    write_skill,
-)
 
 from asset_based_agent.technical_platform.agent_core.contracts import (
     ToolDescriptor,
 )
 from asset_based_agent.technical_platform.agent_core.errors import (
     ResourceManifestInvalid,
+)
+
+from .skill_fixtures import (
+    make_registry,
+    make_tool_registry,
+    probe_tool,
+    write_skill,
 )
 
 

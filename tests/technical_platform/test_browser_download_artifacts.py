@@ -48,7 +48,9 @@ def test_download_fingerprint_ignores_windows_ctime_view_difference(tmp_path, mo
     """Path.stat and fstat may expose different Windows ctime views for one file."""
     from types import SimpleNamespace
 
-    from asset_based_agent.technical_platform import browser_download_artifacts as artifacts
+    from asset_based_agent.technical_platform import (
+        browser_download_artifacts as artifacts,
+    )
 
     path=tmp_path/'file.txt'; path.write_bytes(b'data')
     real_fstat=artifacts.os.fstat

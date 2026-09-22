@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
+from ..agent_core.cancellation import CancelToken
 from ..agent_core.contracts import ModelEvent, ToolDescriptor
 from ..agent_core.errors import (
     AgentCancelled,
@@ -35,7 +36,6 @@ from .sse import iter_sse_events
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from ..agent_core.cancellation import CancelToken
     from ..agent_core.contracts import ModelRequest
     from .token_provider import TokenManager
 
@@ -227,6 +227,39 @@ class ServerModelPort:
             token = await self.token_manager.refresh(stale_token=used)
             response = await self._get(url, token, cancel)
         return response
+
+    # ------------------------------------------------------------- 对账
+
+    async def reconcile_request(self, client_request_id: str,
+                                cancel: CancelToken | None = None
+                                ) -> dict | None:
+        """S2-03：查询服务端请求状态；404（无记录）→ None。"""
+        cancel = cancel or CancelToken()
+        url = self._endpoint(
+            f'/api/v1/agent/completions/{client_request_id}')
+        response = await self._get_with_auth_retry(url, cancel)
+        if response.status_code == 404:
+            return None
+        if response.status_code != 200:
+            code, message = _error_envelope(response)
+            raise _map_error(code, message)
+        return response.json()
+
+    async def replay_request(self, client_request_id: str,
+                             cancel: CancelToken | None = None) -> list:
+        """S2-03：取回服务端已存储的事件流（仅 succeeded 可用）。"""
+        cancel = cancel or CancelToken()
+        url = self._endpoint(
+            f'/api/v1/agent/completions/{client_request_id}/replay')
+        response = await self._get_with_auth_retry(url, cancel)
+        if response.status_code != 200:
+            code, message = _error_envelope(response)
+            raise _map_error(code or f'http_{response.status_code}', message)
+        data = response.json()
+        events = data.get('events') if isinstance(data, dict) else None
+        if not isinstance(events, list):
+            raise ModelProtocolError('服务端回放响应缺少事件列表')
+        return events
 
     async def _get(self, url: str, token: str,
                    cancel: CancelToken) -> httpx.Response:

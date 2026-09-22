@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 import httpx
 
@@ -186,9 +186,15 @@ def iter_openai_stream_events(
 
     产出 kind ∈ {message_start, text_delta, tool_call_delta,
     tool_call_complete, usage, message_complete}。
+
+    S3-04 严格协议校验：所有上游 payload 类型显式检查，非法结构一律
+    ProviderCallError，不允许 AttributeError/TypeError/ValueError 裸穿透；
+    只有收到可靠终止证据（[DONE] 且 finish_reason 可信）才发
+    message_complete。
     """
     started = False
-    tool_buffers: dict[int, dict[str, object]] = {}
+    done_seen = False
+    tool_buffers: dict[int, dict[str, Any]] = {}
     finish_reason: str | None = None
     usage: dict[str, int] | None = None
     for raw in lines:
@@ -197,6 +203,7 @@ def iter_openai_stream_events(
             continue
         data = line[5:].strip()
         if data == "[DONE]":
+            done_seen = True
             break
         try:
             chunk = json.loads(data)
@@ -207,44 +214,139 @@ def iter_openai_stream_events(
                 retryable=True,
             ) from exc
         if not isinstance(chunk, dict):
-            continue
+            raise ProviderCallError(
+                "provider_invalid_chunk",
+                "模型渠道流式帧结构无效。",
+                retryable=True,
+            )
         raw_usage = chunk.get("usage")
-        if isinstance(raw_usage, dict) and raw_usage:
-            details = raw_usage.get("completion_tokens_details") or {}
-            usage = {
-                "input_tokens": int(raw_usage.get("prompt_tokens") or 0),
-                "output_tokens": int(raw_usage.get("completion_tokens") or 0),
-                "cache_hit_tokens": int(
-                    raw_usage.get("prompt_cache_hit_tokens") or 0),
-                "cache_miss_tokens": int(
-                    raw_usage.get("prompt_cache_miss_tokens") or 0),
-                "reasoning_tokens": int(details.get("reasoning_tokens") or 0),
-            }
-        for choice in chunk.get("choices") or []:
-            delta = choice.get("delta") or {}
+        if raw_usage:
+            usage = _strict_stream_usage(raw_usage)
+        choices = chunk.get("choices")
+        if choices is None:
+            continue
+        if not isinstance(choices, list):
+            raise ProviderCallError(
+                "provider_invalid_chunk",
+                "模型渠道流式帧 choices 结构无效。",
+                retryable=True,
+            )
+        for choice in choices:
+            if not isinstance(choice, dict):
+                raise ProviderCallError(
+                    "provider_invalid_chunk",
+                    "模型渠道流式帧 choice 结构无效。",
+                    retryable=True,
+                )
+            delta = choice.get("delta")
+            if delta is None:
+                delta = {}
+            if not isinstance(delta, dict):
+                raise ProviderCallError(
+                    "provider_invalid_chunk",
+                    "模型渠道流式帧 delta 结构无效。",
+                    retryable=True,
+                )
             if not started:
                 started = True
                 yield {"kind": "message_start", "data": {}}
             content = delta.get("content")
-            if content:
-                yield {"kind": "text_delta", "data": {"text": content}}
-            for tool_call in delta.get("tool_calls") or []:
-                index = int(tool_call.get("index") or 0)
-                buffer = tool_buffers.setdefault(
-                    index, {"id": None, "name": "", "fragments": []})
-                if tool_call.get("id"):
-                    buffer["id"] = tool_call["id"]
-                function = tool_call.get("function") or {}
-                if function.get("name"):
-                    buffer["name"] = function["name"]
-                fragment = function.get("arguments") or ""
-                buffer["fragments"].append(fragment)
-                yield {"kind": "tool_call_delta", "data": {
-                    "index": index, "name": buffer["name"],
-                    "arguments_fragment": fragment,
-                }}
-            if choice.get("finish_reason"):
-                finish_reason = str(choice["finish_reason"])
+            if content is not None:
+                if not isinstance(content, str):
+                    raise ProviderCallError(
+                        "provider_invalid_chunk",
+                        "模型渠道流式帧 content 类型无效。",
+                        retryable=True,
+                    )
+                if content:
+                    yield {"kind": "text_delta", "data": {"text": content}}
+            tool_calls = delta.get("tool_calls")
+            if tool_calls is not None:
+                if not isinstance(tool_calls, list):
+                    raise ProviderCallError(
+                        "provider_invalid_chunk",
+                        "模型渠道流式帧 tool_calls 结构无效。",
+                        retryable=True,
+                    )
+                for tool_call in tool_calls:
+                    if not isinstance(tool_call, dict):
+                        raise ProviderCallError(
+                            "provider_invalid_chunk",
+                            "模型渠道流式帧 tool_call 结构无效。",
+                            retryable=True,
+                        )
+                    index = tool_call.get("index", 0)
+                    if type(index) is not int or index < 0:
+                        raise ProviderCallError(
+                            "provider_invalid_chunk",
+                            "模型渠道 tool_call 索引无效。",
+                            retryable=True,
+                        )
+                    tool_call_id = tool_call.get("id")
+                    if tool_call_id is not None and not isinstance(
+                            tool_call_id, str):
+                        raise ProviderCallError(
+                            "provider_invalid_chunk",
+                            "模型渠道 tool_call 标识无效。",
+                            retryable=True,
+                        )
+                    function = tool_call.get("function")
+                    if function is None:
+                        function = {}
+                    if not isinstance(function, dict):
+                        raise ProviderCallError(
+                            "provider_invalid_chunk",
+                            "模型渠道 tool_call function 结构无效。",
+                            retryable=True,
+                        )
+                    name = function.get("name")
+                    if name is not None and not isinstance(name, str):
+                        raise ProviderCallError(
+                            "provider_invalid_chunk",
+                            "模型渠道 tool_call 名称无效。",
+                            retryable=True,
+                        )
+                    fragment = function.get("arguments")
+                    if fragment is None:
+                        fragment = ""
+                    if not isinstance(fragment, str):
+                        raise ProviderCallError(
+                            "provider_invalid_chunk",
+                            "模型渠道 tool_call 参数片段无效。",
+                            retryable=True,
+                        )
+                    buffer = tool_buffers.setdefault(
+                        index, {"id": None, "name": "", "fragments": []})
+                    if tool_call_id:
+                        buffer["id"] = tool_call_id
+                    if name:
+                        buffer["name"] = name
+                    buffer["fragments"].append(fragment)
+                    yield {"kind": "tool_call_delta", "data": {
+                        "index": index, "name": buffer["name"],
+                        "arguments_fragment": fragment,
+                    }}
+            reason = choice.get("finish_reason")
+            if reason is not None:
+                if not isinstance(reason, str):
+                    raise ProviderCallError(
+                        "provider_invalid_chunk",
+                        "模型渠道 finish_reason 类型无效。",
+                        retryable=True,
+                    )
+                finish_reason = reason
+    if not done_seen:
+        raise ProviderCallError(
+            "provider_stream_incomplete",
+            "模型渠道流式响应未正常结束。",
+            retryable=True,
+        )
+    if started and finish_reason is None:
+        raise ProviderCallError(
+            "provider_finish_missing",
+            "模型渠道未返回可信结束标志。",
+            retryable=True,
+        )
     if tool_buffers:
         for index in sorted(tool_buffers):
             buffer = tool_buffers[index]
@@ -259,6 +361,31 @@ def iter_openai_stream_events(
     if usage is not None:
         yield {"kind": "usage", "data": usage}
     yield {"kind": "message_complete", "data": {"finish_reason": finish_reason}}
+
+
+def _strict_stream_usage(raw_usage: object) -> dict[str, int]:
+    """流式 usage 帧的严格校验：结构/类型非法一律 provider_usage_invalid。"""
+    if not isinstance(raw_usage, dict):
+        raise ProviderCallError(
+            "provider_usage_invalid",
+            "模型渠道返回的Token用量无法核验。",
+            retryable=False,
+        )
+    try:
+        normalized = normalize_openai_usage(raw_usage)
+    except ValueError as exc:
+        raise ProviderCallError(
+            "provider_usage_invalid",
+            "模型渠道返回的Token用量无法核验。",
+            retryable=False,
+        ) from exc
+    return {
+        "input_tokens": normalized.input_tokens,
+        "output_tokens": normalized.output_tokens,
+        "cache_hit_tokens": normalized.cache_hit_tokens,
+        "cache_miss_tokens": normalized.cache_miss_tokens,
+        "reasoning_tokens": normalized.reasoning_tokens,
+    }
 
 
 def _chat_completions_endpoint(route: ProviderRoute) -> str:

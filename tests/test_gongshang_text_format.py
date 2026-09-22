@@ -1,11 +1,10 @@
+import runpy
 from io import BytesIO
 from pathlib import Path
-import runpy
 
 from docx import Document
 from docx.oxml.ns import qn
 from docx.shared import Pt
-
 
 SCRIPT = Path(__file__).resolve().parents[1] / '.codex/skills/gongshang-change-history-docx/scripts/build_gongshang_docx.py'
 

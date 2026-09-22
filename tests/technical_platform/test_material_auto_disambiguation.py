@@ -76,7 +76,9 @@ class TrialBalanceDisambiguationTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def resolve(self, plan, *paths):
-        from asset_based_agent.technical_platform.material_analysis import resolve_materials
+        from asset_based_agent.technical_platform.material_analysis import (
+            resolve_materials,
+        )
         return resolve_materials(plan, files_arg(*paths))
 
     def test_multi_period_trial_balance_selects_latest_as_reference_not_comparison(self):

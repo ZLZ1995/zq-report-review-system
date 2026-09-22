@@ -12,7 +12,13 @@ from sqlalchemy.orm import Session
 
 from ..config import ServerSettings
 from ..crypto import SecretCipher
-from ..models import ModelDefinition, ReviewJob, ReviewJobEvent, utc_now
+from ..models import (
+    BalanceHold,
+    ModelDefinition,
+    ReviewJob,
+    ReviewJobEvent,
+    utc_now,
+)
 from ..schemas import ReviewJobCreateRequest, ReviewJobResponse
 from .auth_service import ServiceError, is_expired
 from .metered_model_service import BillingReconciliationRequired, MeteredModelService
@@ -282,7 +288,30 @@ class ReviewJobService:
         db.refresh(job)
         return self.to_response(job)
 
+    def settle_terminal_jobs(self, db: Session) -> int:
+        """S3-03：终态 job 残留 active hold 的崩溃中间态，幂等补结算。
+
+        job terminal commit 与 capture_hold 之间崩溃会留下
+        `job 终态 + hold active`；capture_hold 自身幂等（已 captured 直接
+        返回），因此重启后调用本方法不会重复扣费。返回补结算数量。
+        """
+        terminal_jobs = list(db.scalars(select(ReviewJob).where(
+            ReviewJob.status.in_(("succeeded", "failed", "cancelled")),
+            ReviewJob.hold_id.is_not(None),
+        )))
+        settled = 0
+        for job in terminal_jobs:
+            hold = db.get(BalanceHold, job.hold_id)
+            if hold is None or hold.status != "active":
+                continue
+            self.metered.capture_hold(
+                db, hold_id=hold.hold_id, reference_id=job.job_id)
+            settled += 1
+        return settled
+
     def recover_interrupted(self, db: Session) -> list[tuple[str, str]]:
+        # S3-03：先完成终态 job 的 settlement 对账，再重排被中断的任务
+        self.settle_terminal_jobs(db)
         interrupted = list(db.scalars(select(ReviewJob).where(ReviewJob.status == "running")))
         for job in interrupted:
             job.status = "queued"
@@ -297,6 +326,28 @@ class ReviewJobService:
             ReviewJob.execution_requested_at.is_not(None),
         ))
         return [(user_id, job_id) for user_id, job_id in rows]
+
+    def requeue_for_shutdown(self, db: Session, *, worker_id: str, job_ids,
+                             error_code: str = "shutdown_grace_expired") -> int:
+        """S6-02：优雅关闭超时兜底——只把本 worker 仍在 running 的 job 重新排队。
+
+        终态 job 与其他 worker 的 job 一律不动；被重排的 job 由下次启动的
+        recover_interrupted 重新调度。
+        """
+        requeued = 0
+        for job_id in job_ids:
+            job = db.get(ReviewJob, job_id)
+            if job is None or job.status != "running" or job.worker_id != worker_id:
+                continue
+            job.status = "queued"
+            job.started_at = None
+            job.worker_id = None
+            job.lease_expires_at = None
+            job.error_code = error_code
+            self._record_event(db, job, "shutdown_requeue")
+            requeued += 1
+        db.commit()
+        return requeued
 
     def list_events(self, db: Session, *, user_id: str, job_id: str,
                     after_sequence: int = 0) -> list[ReviewJobEvent]:

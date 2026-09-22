@@ -482,10 +482,10 @@ def _paragraph_outline_level(paragraph: object) -> int | None:
 
 
 def _iter_document_blocks(document: object):
-    from docx.table import Table
-    from docx.text.paragraph import Paragraph
     from docx.oxml.table import CT_Tbl
     from docx.oxml.text.paragraph import CT_P
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
 
     for child in document.element.body.iterchildren():
         if isinstance(child, CT_P):

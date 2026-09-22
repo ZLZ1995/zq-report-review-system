@@ -3,9 +3,17 @@ import json
 from pathlib import Path
 
 try:
-    from ...agent_contracts import TaskUnderstanding, UnderstandingRequest, validate_understanding
+    from ...agent_contracts import (
+        TaskUnderstanding,
+        UnderstandingRequest,
+        validate_understanding,
+    )
 except ModuleNotFoundError:  # pragma: no cover - legacy Zeabur build context
-    from ..compat_agent_contracts import TaskUnderstanding, UnderstandingRequest, validate_understanding
+    from ..compat_agent_contracts import (
+        TaskUnderstanding,
+        UnderstandingRequest,
+        validate_understanding,
+    )
 from .auth_service import ServiceError
 from .provider_gateway import NormalizedUsage
 

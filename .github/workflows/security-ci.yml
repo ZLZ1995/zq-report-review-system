@@ -1,0 +1,48 @@
+name: security-checks
+
+on:
+  push:
+    branches: ["main", "codex/**", "kimi/**"]
+  pull_request:
+  schedule:
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: deploy/report_review_server/requirements.txt
+      - name: Install audit tools
+        run: python -m pip install pip-audit bandit
+      - name: Check requirements lock pinning
+        run: python scripts/check_requirements_lock.py
+      - name: Audit server dependencies for known vulnerabilities
+        run: python -m pip_audit -r deploy/report_review_server/requirements.txt
+      - name: Bandit static security scan (high severity gate)
+        run: python -m bandit -q -r src -lll
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}

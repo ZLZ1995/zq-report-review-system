@@ -1,9 +1,8 @@
-from datetime import datetime
 import importlib
+from datetime import datetime
 
 import pytest
 from openpyxl import Workbook, load_workbook
-
 from test_detail_workbook_pipeline_guards import load_pipeline_module
 
 

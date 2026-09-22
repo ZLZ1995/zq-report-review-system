@@ -532,7 +532,7 @@ class RemoteSessionClient:
             raise RemoteAuthenticationError("服务端登录响应缺少用户信息。")
         try:
             self.credential_store.set(self.client_instance_id, refresh_token)
-        except Exception:  # noqa: BLE001 - do not expose OS errors containing credentials
+        except Exception:
             self.access_token = None
             self.user = None
             raise CredentialStorageError("本机安全凭据保存失败，请检查 Windows 凭据管理器。") from None

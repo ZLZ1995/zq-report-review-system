@@ -11,6 +11,10 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import logging
+
+logger = logging.getLogger(__name__)
 
 from .agent_core.context_builder import ContextBuilder
 from .agent_core.runtime import AgentKernel
@@ -20,10 +24,27 @@ from .flags import FEATURE_FLAG_ORDER
 from .policies.engine import RuleBasedPolicyEngine
 from .policies.file_scope import project_file_scope
 from .sessions.sqlite_repository import SQLiteSessionRepo
-from .tools.browser_tools import BrowserToolError, build_browser_tools
 from .tools.assembly import CompositeToolResolver
+from .tools.browser_tools import BrowserToolError, build_browser_tools
 
 MODE_MAP = {'request': 'request', 'risk': 'assisted', 'full': 'full'}
+
+
+def mark_operations_unknown(repo, operation_ids, *, code, summary) -> int:
+    """S6-02 关闭超时兜底：把仍开放的 operation 持久化为 unknown 检查点。
+
+    客户端关闭等不到 worker 安全收束时调用——绝不能只发取消信号就走，
+    必须在库中留下 durable 的 unknown 标记，等待重启后对账恢复。
+    单个 operation 标记失败不拖垮整批；返回成功标记的数量。
+    """
+    marked = 0
+    for operation_id in tuple(operation_ids):
+        try:
+            repo.interrupt_operation(operation_id, code=code, summary=summary)
+            marked += 1
+        except Exception:  # 关闭兜底路径不得再抛错
+            logger.warning('关闭检查点写入失败: %s', operation_id, exc_info=True)
+    return marked
 
 _SKILL_CATEGORIES = frozenset({
     'single_readonly_skill', 'local_generate_skill', 'report_review',
@@ -112,9 +133,7 @@ class AgentGateway:
         active = []
         for tool in business_tools(service):
             category = _BUSINESS_TOOL_CATEGORY.get(tool.descriptor.name)
-            if category is not None and self._enabled(category):
-                active.append(tool)
-            elif (category is None and skill_enabled
+            if category is not None and self._enabled(category) or (category is None and skill_enabled
                   and tool.descriptor.name in _SKILL_TOOL_NAMES):
                 active.append(tool)
         return active
@@ -223,14 +242,19 @@ class AgentGateway:
 
         def collector(event):
             if event.operation_id:
-                self._open_operations.add(event.operation_id)
+                # 仅在真正开工/恢复时登记 open；recovery_required 等旁路事件
+                # 不得把已收束的 operation 重新计入（S1-05）。
+                if event.event_type in ('operation_accepted',
+                                        'operation_resumed'):
+                    self._open_operations.add(event.operation_id)
                 if event.operation_id not in operation_ids:
                     operation_ids.append(event.operation_id)
             if event.event_type == 'operation_failed':
                 error_code.append((event.payload or {}).get('error_code',
                                                            'failed'))
             if event.event_type in ('operation_completed',
-                                    'operation_failed', 'operation_aborted'):
+                                    'operation_failed', 'operation_aborted',
+                                    'operation_unknown'):
                 completed.append(event.event_type)
                 if event.operation_id:
                     self._open_operations.discard(event.operation_id)
@@ -243,6 +267,9 @@ class AgentGateway:
             # Reconcile those durable open operations before admitting a new
             # turn; otherwise the stale lane remains busy forever.
             asyncio.run(kernel.recover(self._session_id))
+            # S2-03：recover 收束出的 unknown operation 按服务端真实状态对账
+            # （succeeded→replay / failed→本地 fail / uncertain→人工对账）。
+            self._reconcile_unknown(kernel)
             asyncio.run(kernel.submit(
                 self._session_id, 'main',
                 {'text': text, 'model_id': self._model_id,
@@ -255,16 +282,20 @@ class AgentGateway:
                     for token in ('token', 'bearer', 'password', 'api_key', 'secret')):
                 message = ''
             return {'status': 'failed', 'reply': '', 'error_code': str(code),
-                    'error_message': message}
+                    'error_message': message,
+                    'operation_id': operation_ids[-1] if operation_ids else None}
         operation_id = operation_ids[-1] if operation_ids else None
         reply = self._last_assistant_text(operation_id)
         if 'operation_completed' in completed:
-            return {'status': 'completed', 'reply': reply, 'error_code': ''}
+            return {'status': 'completed', 'reply': reply, 'error_code': '',
+                    'operation_id': operation_id}
         if 'operation_aborted' in completed:
             return {'status': 'aborted', 'reply': reply,
-                    'error_code': error_code[0] if error_code else 'aborted'}
+                    'error_code': error_code[0] if error_code else 'aborted',
+                    'operation_id': operation_id}
         return {'status': 'failed', 'reply': reply,
-                'error_code': error_code[0] if error_code else 'failed'}
+                'error_code': error_code[0] if error_code else 'failed',
+                'operation_id': operation_id}
 
     def _last_assistant_text(self, operation_id=None) -> str:
         entries = self.repo.entries(self._session_id, 'main')
@@ -272,6 +303,35 @@ class AgentGateway:
                      and not e.payload.get('intermediate')
                      and (operation_id is None or e.operation_id == operation_id)]
         return assistant[-1].payload.get('text', '') if assistant else ''
+
+    # ------------------------------------------------------------ 对账
+
+    @staticmethod
+    def _sync_awaitable(value):
+        if inspect.isawaitable(value):
+            return asyncio.run(value)
+        return value
+
+    def _reconcile_unknown(self, kernel) -> None:
+        """S2-03：对账 unknown operation。ModelPort 无对账能力（如测试替身）
+        时安全跳过；单个 operation 对账失败不影响其余与新轮次。"""
+        from .agent_core.reconciliation import reconcile_unknown_operation
+
+        port = kernel.model
+        query_fn = getattr(port, 'reconcile_request', None)
+        if query_fn is None:
+            return
+        replay_fn = getattr(port, 'replay_request', None)
+        for operation in self.repo.unknown_operations(self._session_id):
+            try:
+                reconcile_unknown_operation(
+                    self.repo, operation.id,
+                    query=lambda rid: self._sync_awaitable(query_fn(rid)),
+                    replay=(lambda rid: self._sync_awaitable(replay_fn(rid))
+                            if replay_fn is not None else None))
+            except Exception:  # 对账失败保留 unknown 待下轮
+                logger.warning('operation 对账失败，保留 unknown: %s',
+                               operation.id, exc_info=True)
 
     def stop(self) -> None:
         """中止本网关全部活动 operation；无活动时安全返回。"""

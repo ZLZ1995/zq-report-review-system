@@ -24,7 +24,9 @@ from asset_based_agent.report_review_app.services.agent_gateway import (
     AdviceResult,
     ConversationTurnResult,
 )
-from asset_based_agent.report_review_app.services.audit_orchestrator import AuditOrchestrator
+from asset_based_agent.report_review_app.services.audit_orchestrator import (
+    AuditOrchestrator,
+)
 from asset_based_agent.report_review_app.services.auth_service import (
     AuthService,
     write_user_config,

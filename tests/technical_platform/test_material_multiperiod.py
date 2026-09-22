@@ -196,7 +196,8 @@ def test_generation_persists_plan_and_waits_user_on_entity_conflict(tmp_path):
 
 def _waiting_two_entity_setup(tmp_path):
     from asset_based_agent.technical_platform.material_analysis import (
-        resolution_snapshot, resolve_materials,
+        resolution_snapshot,
+        resolve_materials,
     )
     a = tmp_path / 'entity_a.xlsx'
     b = tmp_path / 'entity_b.xlsx'
@@ -228,7 +229,8 @@ def test_match_clarification_selects_by_period_wording(tmp_path):
 
 def test_match_clarification_selects_by_file_name(tmp_path):
     from asset_based_agent.technical_platform.material_analysis import (
-        resolution_snapshot, resolve_materials,
+        resolution_snapshot,
+        resolve_materials,
     )
     from asset_based_agent.technical_platform.material_resume import match_clarification
     a = tmp_path / '六月版.xlsx'
@@ -356,8 +358,8 @@ def test_override_cannot_widen_beyond_candidates(tmp_path):
 
 def _waiting_run_window(tmp_path):
     """Real store with a waiting_user run plus a minimal window stub."""
-    from types import SimpleNamespace
     from threading import Event
+    from types import SimpleNamespace
 
     from asset_based_agent.technical_platform.execution import execute_task
     from asset_based_agent.technical_platform.material_analysis import (

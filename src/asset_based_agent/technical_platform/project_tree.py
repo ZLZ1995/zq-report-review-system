@@ -39,6 +39,7 @@ class ProjectTree(QTreeWidget):
                     raise ValueError('Project navigation temporarily unavailable')
                 rows = project['sessions']
                 node.setText(0, project['name'])
+                node.setToolTip(0, project['name'])
                 node.setText(1, '✎')
                 node.setText(2, '⋯')
                 children = {node.child(i).data(0, ROLE)[1]: node.child(i) for i in range(node.childCount())}
@@ -49,14 +50,16 @@ class ProjectTree(QTreeWidget):
                         child = QTreeWidgetItem(node)
                         child.setData(0, ROLE, (identity, row['id']))
                     labels = [row['title']]
+                    tip = row['title']
                     if row['parent_session']:
                         labels.append('分支')
-                        child.setToolTip(0, f"来源会话：{row['parent_session']}；消息：{row['fork_message']}")
+                        tip += f"\n来源会话：{row['parent_session']}；消息：{row['fork_message']}"
                     if manager.for_session(store.owner, identity, row['id']) is not None:
                         labels.append('运行中')
                     if row['unread_count']:
                         labels.append(f"未读 {row['unread_count']}")
                     child.setText(0, ' · '.join(labels))
+                    child.setToolTip(0, tip)
                     if (identity, row['id']) == (project_id, session_id):
                         self.setCurrentItem(child)
                 for i in reversed(range(node.childCount())):

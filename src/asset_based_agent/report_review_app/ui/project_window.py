@@ -16,8 +16,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..services.project_service import ProjectDeletionError, ProjectService
 from ..branding import APPLICATION_NAME
+from ..services.project_service import ProjectDeletionError, ProjectService
 
 
 class ProjectWindow(QMainWindow):
@@ -70,13 +70,24 @@ class ProjectWindow(QMainWindow):
         self.setCentralWidget(container)
 
     def refresh(self) -> None:
+        from ..repositories.project_repository import CorruptedProjectEntry
+
         self.project_list.clear()
         for project in self.project_service.list_projects():
-            item = QListWidgetItem(
-                f"{project.name}    状态：{project.status.value}    "
-                f"最后更新：{project.updated_at.astimezone().strftime('%Y-%m-%d %H:%M')}"
-            )
-            item.setData(Qt.ItemDataRole.UserRole, project.project_id)
+            if isinstance(project, CorruptedProjectEntry):
+                # S5-03：损坏项目可见——显示"项目损坏/不可访问"，而不是消失
+                item = QListWidgetItem(
+                    f"〈项目损坏/不可访问〉 {project.name}    "
+                    f"原因：{project.error}    "
+                    f"最后更新：{project.updated_at.strftime('%Y-%m-%d %H:%M')}"
+                )
+                item.setData(Qt.ItemDataRole.UserRole, None)
+            else:
+                item = QListWidgetItem(
+                    f"{project.name}    状态：{project.status.value}    "
+                    f"最后更新：{project.updated_at.astimezone().strftime('%Y-%m-%d %H:%M')}"
+                )
+                item.setData(Qt.ItemDataRole.UserRole, project.project_id)
             self.project_list.addItem(item)
         self._update_actions()
 
@@ -99,9 +110,12 @@ class ProjectWindow(QMainWindow):
         if item is None:
             QMessageBox.information(self, "请选择项目", "请先选择一个历史项目。")
             return
-        project = self.project_service.continue_project(
-            str(item.data(Qt.ItemDataRole.UserRole))
-        )
+        project_id = item.data(Qt.ItemDataRole.UserRole)
+        if project_id is None:
+            QMessageBox.warning(
+                self, "项目损坏", "该项目清单已损坏，无法继续；请修复或删除项目目录。")
+            return
+        project = self.project_service.continue_project(str(project_id))
         self.project_selected.emit(project)
 
     def _delete(self) -> None:
@@ -109,8 +123,13 @@ class ProjectWindow(QMainWindow):
         if item is None:
             QMessageBox.information(self, "请选择项目", "请先选择要删除的项目。")
             return
-        project_id = str(item.data(Qt.ItemDataRole.UserRole))
-        project = self.project_service.continue_project(project_id)
+        project_id = item.data(Qt.ItemDataRole.UserRole)
+        if project_id is None:
+            QMessageBox.warning(
+                self, "项目损坏",
+                "该项目清单已损坏，无法在此删除；请检查项目目录后手动处理。")
+            return
+        project = self.project_service.continue_project(str(project_id))
         answer = QMessageBox.question(
             self,
             "确认删除项目",
