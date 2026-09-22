@@ -156,6 +156,26 @@ def test_file_summary_uses_current_operation_bindings_only():
     assert 'file-new' in summary and 'file-old' not in summary
 
 
+def test_historical_file_catalog_includes_stable_ids_for_follow_up_reads():
+    repo = make_repo()
+    repo.legacy_project_files = lambda _project_id: [
+        {'id': 'history-1', 'name': 'old.xlsx'},
+    ]
+    operation = current_operation(repo, 'read the historical workbook')
+    built = ContextBuilder().build(repo=repo, operation=operation, tools=[])
+    joined = '\n'.join(texts(built))
+    assert 'old.xlsx' in joined
+    assert 'history-1' in joined
+
+
+def test_file_discovery_rule_directs_read_only_agent_inspection():
+    repo = make_repo()
+    built = ContextBuilder().build(repo=repo, operation=current_operation(repo), tools=[])
+    joined = '\n'.join(texts(built))
+    assert 'inspect_project_files' in joined
+    assert 'read_project_file' in joined
+
+
 def test_kernel_uses_context_builder_when_provided():
     repo = make_repo()
     scripts = [[ModelEvent('message_start', {}),

@@ -16,8 +16,66 @@ ACTIVE_RUN_STATES = frozenset({'queued', 'running', 'validating'})
 LINKED_RELATIONS = frozenset({'exact', 'legacy_inferred'})
 
 ITEM_KINDS = frozenset({
-    'user', 'assistant', 'event', 'live_status', 'artifacts', 'legacy_artifacts',
+    'user', 'assistant', 'event', 'live_user', 'live_status', 'artifacts',
+    'legacy_artifacts',
 })
+
+
+def project_agent_timeline(entries, *, live_status=None) -> list[TimelineItem]:
+    """Project the new Agent repository entries into user-visible messages.
+
+    The legacy Qt store is deliberately not consulted here.  The Agent kernel
+    already persists one ``user_message`` at operation acceptance and one
+    terminal ``assistant_message`` (or ``error_message``).  Tool calls/results
+    and intermediate assistant text are execution internals and must not be
+    rendered as a second conversational answer.
+    """
+    items: list[TimelineItem] = []
+    seen = set()
+    for entry in entries or ():
+        entry_id = getattr(entry, 'id', None)
+        if entry_id in seen:
+            continue
+        seen.add(entry_id)
+        entry_type = getattr(entry, 'entry_type', '')
+        payload = dict(getattr(entry, 'payload', {}) or {})
+        if entry_type == 'user_message':
+            kind = 'user'
+        elif entry_type == 'assistant_message':
+            if payload.get('intermediate'):
+                continue
+            kind = 'assistant'
+        elif entry_type == 'error_message':
+            kind = 'event'
+        else:
+            continue
+        items.append(TimelineItem(
+            kind=kind,
+            message_id=entry_id,
+            operation_id=getattr(entry, 'operation_id', None),
+            created_at=getattr(entry, 'created_at', '') or '',
+            payload={
+                'text': str(payload.get('text', '')),
+                **({'_legacy_message_id': str(payload['_legacy_message_id'])}
+                   if payload.get('_legacy_message_id') else {}),
+            },
+        ))
+    if live_status:
+        user_text = str(live_status.get('user_text', '')).strip()
+        if user_text and not any(
+                item.kind == 'user' and item.payload.get('text') == user_text
+                for item in items):
+            items.append(TimelineItem(
+                kind='live_user',
+                operation_id=live_status.get('operation_id'),
+                payload={'text': user_text},
+            ))
+        items.append(TimelineItem(
+            kind='live_status',
+            operation_id=live_status.get('operation_id'),
+            payload={'text': live_status.get('text', '')},
+        ))
+    return items
 
 
 @dataclass(frozen=True)
@@ -35,8 +93,8 @@ class TimelineItem:
 
 
 def project_timeline(messages: list[dict], links: list[dict],
-                     runs: list[dict], *, live_status: dict | None = None
-                     ) -> list[TimelineItem]:
+                     runs: list[dict], *, live_status: dict | None = None,
+                     agent_entries=None) -> list[TimelineItem]:
     """把会话数据投影成线性 TimelineItem 序列。
 
     messages：store.messages() 行（id/role/text/created，按 id 升序）；
@@ -44,6 +102,77 @@ def project_timeline(messages: list[dict], links: list[dict],
     runs：store.runs() 行；
     live_status：当前轮次 {'after_message_id', 'text', 'operation_id'} 或 None。
     """
+    if agent_entries:
+        agent_items = project_agent_timeline(
+            agent_entries, live_status=live_status)
+        legacy_items = project_timeline(
+            messages, links, runs, live_status=None)
+        mirrored_ids = {
+            item.payload['_legacy_message_id'] for item in agent_items
+            if item.kind in {'user', 'assistant', 'event'}
+            and item.payload.get('_legacy_message_id')
+        }
+        mirrored_entry_ids = {
+            item.payload['_legacy_message_id']: item.message_id
+            for item in agent_items
+            if item.kind in {'user', 'assistant', 'event'}
+            and item.payload.get('_legacy_message_id')
+        }
+        # Match mirrored rows by durable source ID, never by text: users can
+        # legitimately send the same message several times in one session.
+        legacy_items = [item for item in legacy_items if not (
+            item.kind in {'user', 'assistant', 'event'}
+            and str(item.message_id) in mirrored_ids)]
+
+        # Run links still reference legacy assistant IDs. Re-anchor those
+        # artifacts to the exact mirrored Agent entry before removing the
+        # legacy message copy, so migration does not strand old files.
+        from dataclasses import replace
+        legacy_items = [
+            replace(item, message_id=mirrored_entry_ids[
+                str(item.message_id)])
+            if item.kind == 'artifacts'
+            and str(item.message_id) in mirrored_entry_ids else item
+            for item in legacy_items
+        ]
+
+        # Preserve artifact anchors while merging both stores by event time.
+        # Sorting a flat list would detach artifacts from their assistant row;
+        # therefore collect them by anchor and emit immediately after it.
+        artifacts_by_message = {}
+        legacy_zone = []
+        legacy_messages = []
+        for item in legacy_items:
+            if item.kind == 'artifacts':
+                artifacts_by_message.setdefault(item.message_id, []).append(item)
+            elif item.kind == 'legacy_artifacts':
+                legacy_zone.append(item)
+            else:
+                legacy_messages.append(item)
+        live_items = [item for item in agent_items
+                      if item.kind in {'live_user', 'live_status'}]
+        conversational = [item for item in agent_items
+                          if item.kind not in {'live_user', 'live_status'}]
+        merged = legacy_messages + conversational
+        merged.sort(key=lambda item: (item.created_at or '',
+                                      0 if item.kind == 'user' else 1,
+                                      item.message_id or 0))
+        ordered = []
+        for item in merged:
+            ordered.append(item)
+            if item.kind == 'assistant' and item.message_id in artifacts_by_message:
+                ordered.extend(artifacts_by_message.pop(item.message_id))
+        # Orphan artifacts are retained in a separate zone, never attached to
+        # the most recent Agent response by accident.
+        orphan_artifacts = [artifact for group in artifacts_by_message.values()
+                            for artifact in group]
+        if orphan_artifacts:
+            legacy_zone.append(TimelineItem(
+                kind='legacy_artifacts',
+                payload={'runs': [item.payload.get('run', {})
+                                  for item in orphan_artifacts]}))
+        return ordered + live_items + legacy_zone
+
     runs_by_id = {run['id']: run for run in runs}
     # assistant 消息 → 关联 run（保持 runs 原有顺序）
     anchored: dict[int, list[dict]] = {}
@@ -81,6 +210,11 @@ def project_timeline(messages: list[dict], links: list[dict],
                     payload={'run': run}))
     if live_status and not live_inserted:
         # 锚点消息尚未落库（极端时序）：追加在末尾，绝不丢失
+        user_text = str(live_status.get('user_text', '')).strip()
+        if user_text:
+            items.append(TimelineItem(
+                kind='live_user', operation_id=live_status.get('operation_id'),
+                payload={'text': user_text}))
         items.append(TimelineItem(
             kind='live_status', operation_id=live_status.get('operation_id'),
             payload={'text': live_status.get('text', '')}))

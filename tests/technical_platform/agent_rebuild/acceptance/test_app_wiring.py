@@ -169,6 +169,19 @@ def test_single_path_routes_even_when_legacy_flag_state_is_off(tmp_path):
     window.close()
 
 
+def test_production_gateway_receives_active_browser_backend(tmp_path):
+    _app, _store, window = make_window(tmp_path)
+    window.client = SimpleNamespace(access_token='token', base_url='https://model.test')
+    backend = object()
+    window.browser_panel = SimpleNamespace(agent_backend=backend)
+
+    gateway = window._make_agent_gateway()
+
+    assert gateway._browser_backend is backend
+    window.browser_panel = None
+    window.close()
+
+
 # ---------------------------------------------------------------- 灰度菜单
 
 def test_grayscale_menu_persists_flags(tmp_path):

@@ -69,7 +69,7 @@ def plan_for(role_by_index):
 class TrialBalanceDisambiguationTest(unittest.TestCase):
     def setUp(self):
         import tempfile
-        self.tmp = tempfile.TemporaryDirectory(dir=r'D:\ZQ-Acceptance\tmp-pytest-basetemp')
+        self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)
 
     def tearDown(self):

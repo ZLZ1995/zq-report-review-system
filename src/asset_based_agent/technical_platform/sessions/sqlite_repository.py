@@ -83,8 +83,13 @@ class SQLiteSessionRepo:
             (entry_id, session_id, lane_id, leaf_entry_id, sequence, entry_type,
              json.dumps(payload, ensure_ascii=False), operation_id, turn_id,
              ENTRY_SCHEMA_VERSION, created))
-        db.execute('UPDATE agent_lanes SET leaf_entry_id=?, updated_at=? WHERE id=?',
-                   (entry_id, created, lane_id))
+        # lane ids are only unique inside a session (every session has ``main``).
+        # Omitting session_id here lets a write in one session move another
+        # session's leaf, which corrupts history and can surface stale replies.
+        db.execute(
+            'UPDATE agent_lanes SET leaf_entry_id=?, updated_at=? '
+            'WHERE session_id=? AND id=?',
+            (entry_id, created, session_id, lane_id))
         return ConversationEntry(
             id=entry_id, session_id=session_id, lane_id=lane_id,
             parent_id=leaf_entry_id, sequence=sequence, entry_type=entry_type,
@@ -613,7 +618,15 @@ class SQLiteSessionRepo:
                 '(operation_id,file_id,binding_kind,source_entry_id,role,sha256) '
                 'VALUES(?,?,?,?,?,?)',
                 (operation_id, file_id, binding_kind, source_entry_id, role,
-                 sha256))
+                sha256))
+
+    def set_file_scope_snapshot(self, operation_id, snapshot):
+        with self.connect() as db:
+            updated = db.execute(
+                'UPDATE agent_operations SET file_scope_snapshot_json=? WHERE id=?',
+                (json.dumps(snapshot or {}, ensure_ascii=False), operation_id))
+            if updated.rowcount != 1:
+                raise KeyError(f'未知 operation: {operation_id}')
 
     def operation_files(self, operation_id, kinds=None):
         wanted = EXPLICIT_BINDING_KINDS if kinds is None else frozenset(kinds)

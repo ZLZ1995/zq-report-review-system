@@ -47,9 +47,11 @@ def agent_package_arguments():
                           f"asset_based_agent.technical_platform.{package}"]
             continue
         for file in sorted(directory.glob('*.py')):
-            arguments += ["--hidden-import",
-                          f"asset_based_agent.technical_platform."
-                          f"{package}.{file.stem}"]
+            arguments += [
+                "--hidden-import",
+                (f"asset_based_agent.technical_platform."
+                 f"{package}.{file.stem}"),
+            ]
     return arguments
 
 

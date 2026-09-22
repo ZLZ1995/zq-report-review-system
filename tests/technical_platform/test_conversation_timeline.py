@@ -11,6 +11,7 @@ from asset_based_agent.technical_platform.conversation_timeline import (
     TimelineItem,
     project_timeline,
 )
+from types import SimpleNamespace
 
 
 def msg(mid, role, text, created='2026-09-01T09:00:00+00:00'):
@@ -101,3 +102,56 @@ def test_timeline_item_is_stable_viewmodel():
     assert item.kind == 'assistant'
     assert item.message_id == 7
     assert item.run_id is None and item.payload == {}
+
+
+def test_mixed_agent_and_legacy_entries_merge_chronologically_and_keep_artifact_anchor():
+    timestamp = lambda second: f'2026-09-01T09:00:{second:02d}+00:00'
+    messages = [
+        msg(1, 'user', '你好', timestamp(1)),
+        msg(2, 'assistant', '你好呀', timestamp(2)),
+        msg(3, 'user', '你好', timestamp(3)),
+        msg(4, 'assistant', '你好呀', timestamp(4)),
+    ]
+    entries = [
+        SimpleNamespace(id=10, entry_type='user_message',
+                        created_at=timestamp(1),
+                        payload={'text': '你好', '_legacy_message_id': '1'}),
+        SimpleNamespace(id=20, entry_type='assistant_message',
+                        created_at=timestamp(2),
+                        payload={'text': '你好呀', '_legacy_message_id': '2'}),
+        SimpleNamespace(id=30, entry_type='user_message',
+                        created_at=timestamp(3),
+                        payload={'text': '你好', '_legacy_message_id': '3'}),
+        SimpleNamespace(id=40, entry_type='assistant_message',
+                        created_at=timestamp(4),
+                        payload={'text': '你好呀', '_legacy_message_id': '4'}),
+        SimpleNamespace(id=50, entry_type='user_message',
+                        created_at=timestamp(5), payload={'text': '新问题'}),
+        SimpleNamespace(id=60, entry_type='assistant_message',
+                        created_at=timestamp(6), payload={'text': '新回答'}),
+    ]
+
+    items = project_timeline(
+        messages, [link('r1', 1, 2)], [run('r1', created=timestamp(2))],
+        agent_entries=entries)
+
+    assert kinds(items) == [
+        'user', 'assistant', 'artifacts', 'user', 'assistant', 'user', 'assistant']
+    assert [item.payload.get('text') for item in items
+            if item.kind in {'user', 'assistant'}] == [
+                '你好', '你好呀', '你好', '你好呀', '新问题', '新回答']
+    assert items[2].message_id == 20
+    assert items[3].payload['_legacy_message_id'] == '3'
+
+
+def test_mixed_projection_deduplicates_only_the_mirrored_legacy_message_id():
+    messages = [msg(1, 'user', '重复文本'), msg(2, 'user', '重复文本',
+                                             '2026-09-01T09:00:03+00:00')]
+    entries = [SimpleNamespace(
+        id=20, entry_type='user_message', created_at='2026-09-01T09:00:03+00:00',
+        payload={'text': '重复文本', '_legacy_message_id': '2'})]
+
+    items = project_timeline(messages, [], [], agent_entries=entries)
+
+    assert [(item.kind, item.payload.get('text')) for item in items] == [
+        ('user', '重复文本'), ('user', '重复文本')]

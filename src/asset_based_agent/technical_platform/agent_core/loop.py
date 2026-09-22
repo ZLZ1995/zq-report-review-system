@@ -9,6 +9,7 @@
 """
 import asyncio
 import json
+from dataclasses import replace
 from hashlib import sha256
 
 from .contracts import ToolResult
@@ -121,10 +122,20 @@ async def run_agent_loop(*, repo, model, tools, operation, cancel, emit,
         _drain_steer(repo, operation, steer_queue, emit)
         request = repo.build_model_request(operation)
         if context_builder is not None:
-            from dataclasses import replace
             built = context_builder.build(repo=repo, operation=operation,
                                           tools=tools)
             request = replace(request, messages=built.messages)
+        request = replace(
+            request,
+            tools=tuple(tool.descriptor for tool in tools),
+        )
+        # The operation request id identifies the user submission; each model
+        # turn needs its own idempotency key. Reusing it makes a second turn
+        # look like a conflicting replay to the streaming service.
+        request = replace(
+            request,
+            request_id=f'{operation.request_id}:turn:{ordinal}',
+        )
         turn_id = repo.begin_turn(
             operation.id, ordinal,
             input_context_sha256=_context_sha256(request),
@@ -181,6 +192,7 @@ async def _run_turn(*, repo, model, tools_by_name, operation, turn_id,
     accumulator = _ToolCallAccumulator()
     tool_calls = []
     usage = {}
+    message_complete = False
     emit('model_request_started', turn_id=turn_id)
     stream_iter = model.stream(request, cancel)
     while True:
@@ -198,9 +210,16 @@ async def _run_turn(*, repo, model, tools_by_name, operation, turn_id,
             tool_calls.append(accumulator.finalize(event.data))
         elif event.kind == 'usage':
             usage = dict(event.data)
+        elif event.kind == 'message_complete':
+            message_complete = True
         elif event.kind == 'request_failed':
             raise ModelProtocolError(
                 event.data.get('error', '模型请求失败'))
+        # ``ModelPort`` may terminate a stream without a request_failed frame.
+        # Treat that as a protocol failure instead of committing a partial or
+        # empty assistant message as if the turn succeeded.
+    if not message_complete:
+        raise ModelProtocolError('模型流缺少 message_complete 终止事件')
     cancel.raise_if_cancelled()
     if not tool_calls:
         entry = repo.append_entry(

@@ -118,7 +118,7 @@ def test_seven_tools_with_declared_risks(tmp_path):
     assert set(tools) == {
         'inspect_project_files', 'analyze_file_roles', 'execute_skill_plan',
         'query_business_run', 'cancel_business_run', 'list_final_artifacts',
-        'annotate_reviewed_files'}
+        'annotate_reviewed_files', 'read_project_file'}
     assert tools['inspect_project_files'].descriptor.risk == 'local_readonly'
     assert tools['analyze_file_roles'].descriptor.risk == 'local_readonly'
     assert tools['query_business_run'].descriptor.risk == 'local_readonly'

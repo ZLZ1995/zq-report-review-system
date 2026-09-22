@@ -180,6 +180,9 @@ class PlatformWindow(QMainWindow):
         self._close_after_update = False
         self._local_chain = None
         self._agent_worker = None  # S15：新 Agent 路径轮次 Worker（不占用 task_manager）
+        # S30：新 Agent worker 按会话隔离；_agent_worker 仅保留为当前会话兼容别名。
+        self._agent_jobs = {}
+        self._close_after_agent_jobs = False
         self._agent_session_id = None
         # 新 Agent 的增量文本先在内存中合并，再以低频刷新到对话面板。
         # 逐 token 调用 setHtml 会把 GUI 事件队列塞满，长回复看起来就像“卡死”。
@@ -195,6 +198,7 @@ class PlatformWindow(QMainWindow):
         self.status_controller = ConversationStatusController()
         self._agent_operation_id = None
         self._agent_user_message_id = None
+        self._agent_user_text = ''
         self._approval_requested.connect(self._handle_approval_request)
         self.network_state = "connected"
         self.setWindowTitle(
@@ -261,6 +265,12 @@ class PlatformWindow(QMainWindow):
                 self.status.setText('权限模式保存失败，已保留原设置。')
                 return
         stopped = self.task_manager.cancel_all()
+        for job in list(self._agent_jobs.values()):
+            try:
+                job['gateway'].stop()
+                stopped += 1
+            except Exception:
+                continue
         revoked = (self.browser_panel.task_leases.revoke_all()
                    if self.browser_panel is not None else 0)
         self.refresh_permission_menu()
@@ -355,40 +365,64 @@ class PlatformWindow(QMainWindow):
             from .model_port.provider_factory import production_provider_factory
 
             provider_factory = production_provider_factory(self.client, model_id)
-        return AgentGateway(
+        browser_backend = getattr(self.browser_panel, 'agent_backend', None)
+        gateway = AgentGateway(
             self.store, self.session_id,
             flags=self._feature_flags(), model_id=model_id or '',
             model_port_factory=model_factory,
             permission_mode_getter=self.agent_permission_mode,
             provider_factory=provider_factory,
+            browser_backend=browser_backend,
             approver=ApproverBridge(self._ask_approval_gui),
             force_all_tools=True)
+        self._agent_gateway = gateway
+        return gateway
 
     def _try_agent_submit(self, prompt: str, file_ids=(), upload_ids=()) -> bool:
         """生产客户端只使用新 Agent；连接不完整时阻止旧路径接管。"""
-        if self._agent_worker is not None:
-            return True  # 上一轮未结束，吞掉重复提交（与旧 worker 语义一致）
+        if self.session_id in self._agent_jobs:
+            return True  # 当前会话已有轮次；其他会话可以并行运行
         gateway = self._make_agent_gateway()
         if gateway is None:
             self.status.setText('新 Agent 尚未连接服务端，本轮未发送；请先连接并重试。')
             return True
+        self._agent_gateway = gateway
         from uuid import uuid4
 
         from .agent_switch import AgentTurnWorker
 
-        self._agent_user_message_id = self.store.append(
-            self.session_id, 'user', prompt)  # 灰期双写：供 UI 显示
-        self._agent_operation_id = uuid4().hex
+        # 新 Agent 的 begin_operation 原子地写入 user_message。不要再向
+        # legacy store.messages 灰期双写，否则同一轮会在 UI 出现两次。
+        self._agent_user_message_id = None
+        self._agent_user_text = prompt
+        # Test doubles and third-party gateway adapters may not expose the
+        # durable Agent repository. Keep their legacy fallback visible; the
+        # production gateway persists the same entry atomically and therefore
+        # must not receive this second write.
+        if not hasattr(gateway, 'repo'):
+            self._agent_user_message_id = self.store.append(
+                self.session_id, 'user', prompt)
+        operation_id = uuid4().hex
+        self._agent_operation_id = operation_id
         self.status_controller.set_turn_phase(
             self.session_id, self._agent_operation_id, '新 Agent 路径：正在生成…')
         worker = AgentTurnWorker(gateway, prompt, parent=self,
                                  file_ids=tuple(file_ids),
                                  upload_ids=tuple(upload_ids))
-        worker.delta.connect(self._on_agent_delta)
-        worker.done.connect(self._on_agent_done)
-        worker.finished.connect(self._on_agent_worker_finished)
+        session_id = self.session_id
+        worker.delta.connect(lambda text, sid=session_id:
+                             self._on_agent_delta_for(sid, text))
+        worker.done.connect(lambda result, sid=session_id:
+                            self._on_agent_done_for(sid, result))
+        worker.finished.connect(lambda sid=session_id:
+                                self._on_agent_worker_finished_for(sid))
+        self._agent_jobs[session_id] = {
+            'worker': worker, 'gateway': gateway,
+            'operation_id': operation_id, 'user_text': prompt,
+            'live_text': '',
+        }
         self._agent_worker = worker
-        self._agent_session_id = self.session_id
+        self._agent_session_id = session_id
         self._live_agent_text = ''
         self.composer.clear()
         self.set_busy(True)
@@ -399,54 +433,86 @@ class PlatformWindow(QMainWindow):
         return True
 
     def _on_agent_delta(self, text: str) -> None:
+        self._on_agent_delta_for(self._agent_session_id or self.session_id, text)
+
+    def _on_agent_delta_for(self, session_id: str | None, text: str) -> None:
         if text:
-            self._live_agent_text += text
+            job = self._agent_jobs.get(session_id)
+            if job is None:
+                return
+            job['live_text'] += text
+            if session_id == self.session_id:
+                self._live_agent_text = job['live_text']
             # 只把“正在生成”状态写到状态栏；正文在对话面板中增量显示。
-            if self.session_id == self._agent_session_id:
+            if self.session_id == session_id:
                 self.status.setText('新 Agent 路径：正在生成…')
-            if (self.session_id == self._agent_session_id
+            if (self.session_id == session_id
                     and not self._live_render_timer.isActive()):
                 self._live_render_timer.start()
 
     def _flush_live_agent_render(self) -> None:
-        if (self._agent_worker is not None
-                and self.session_id == self._agent_session_id
-                and self._live_agent_text):
+        job = self._agent_jobs.get(self.session_id)
+        if (job is not None and self._live_agent_text):
             self.render_messages()
 
     def _on_agent_done(self, result: dict) -> None:
+        self._on_agent_done_for(self._agent_session_id or self.session_id, result)
+
+    def _on_agent_done_for(self, session_id: str | None, result: dict) -> None:
         self._live_render_timer.stop()
-        self._live_agent_text = ''
+        job = self._agent_jobs.get(session_id)
+        if job is None:
+            return
+        if session_id == self.session_id:
+            self._live_agent_text = ''
         reply = (result.get('reply') or '').strip()
         if not reply:
             reason = (result.get('error_message') or result.get('error_code')
                       or result.get('status') or '未知原因')
             reply = f'本轮未完成：{reason}。'
-        target_session = self._agent_session_id or self.session_id
-        if target_session:
-            self.store.append(target_session, 'assistant', reply)  # 灰期双写
+        target_session = session_id
+        # assistant_message/error_message 已由 AgentKernel 持久化；这里仅
+        # 更新状态控制器，不能再次写入 legacy store.messages。
+        if (target_session and not hasattr(job.get('gateway'), 'repo')):
+            self.store.append(target_session, 'assistant', reply)
         # S16：终态只进轮次控制器与消息表；禁止把完整回复写进状态控件
-        if self._agent_operation_id and target_session:
+        operation_id = job['operation_id']
+        if operation_id and target_session:
             if result.get('status') == 'completed':
                 self.status_controller.complete_turn(
-                    target_session, self._agent_operation_id, reply)
+                    target_session, operation_id, reply)
             elif result.get('status') == 'aborted':
                 self.status_controller.cancel_turn(
-                    target_session, self._agent_operation_id, reply)
+                    target_session, operation_id, reply)
             else:
                 self.status_controller.fail_turn(
-                    target_session, self._agent_operation_id,
+                    target_session, operation_id,
                     result.get('error_code') or 'failed', reply)
-        self._agent_operation_id = None  # 终态已定：live 状态卡退出时间线
+        if session_id == self.session_id:
+            self._agent_operation_id = None  # 终态已定：live 状态卡退出时间线
+        job['done'] = True
         if self.session_id == target_session:
             self.render_messages()
 
     def _on_agent_worker_finished(self) -> None:
+        self._on_agent_worker_finished_for(self._agent_session_id or self.session_id)
+
+    def _on_agent_worker_finished_for(self, session_id: str | None) -> None:
+        self._agent_jobs.pop(session_id, None)
+        if session_id != self.session_id:
+            if self._close_after_agent_jobs and not self._agent_jobs:
+                self._close_after_agent_jobs = False
+                QTimer.singleShot(0, self.close)
+            return
         self._agent_worker = None
         self._agent_session_id = None
         self._agent_operation_id = None
         self._agent_user_message_id = None
+        self._agent_user_text = ''
         self.set_busy(False)
+        if self._close_after_agent_jobs and not self._agent_jobs:
+            self._close_after_agent_jobs = False
+            QTimer.singleShot(0, self.close)
 
     def _ask_approval_gui(self, operation: str, title: str, reason: str) -> bool:
         """ApproverBridge 在 Worker 线程内调用；转到 GUI 线程弹旧批准框。"""
@@ -460,7 +526,10 @@ class PlatformWindow(QMainWindow):
             ready.set()
 
         self._approval_requested.emit(operation, title, reason, callback)
-        ready.wait()
+        # A closed/hidden dialog must not leave the worker or UI blocked
+        # forever.  Timeout is fail-closed; a late callback is ignored.
+        if not ready.wait(timeout=300):
+            return False
         return verdict.get('ok', False)
 
     def _handle_approval_request(self, operation: str, title: str, reason: str,
@@ -986,11 +1055,18 @@ class PlatformWindow(QMainWindow):
         from .task_recovery import reconcile_execution
 
         self._live_render_timer.stop()
-        self._live_agent_text = ''
         self._draft_binding = None
         self.session_id = item.data(Qt.ItemDataRole.UserRole) if item else None
+        current_job = self._agent_jobs.get(self.session_id)
+        if current_job and current_job.get('done'):
+            current_job = None
+        self._agent_worker = current_job['worker'] if current_job else None
+        self._agent_session_id = self.session_id if current_job else None
+        self._agent_operation_id = current_job['operation_id'] if current_job else None
+        self._agent_user_text = current_job['user_text'] if current_job else ''
+        self._live_agent_text = current_job['live_text'] if current_job else ''
         self.run_id = getattr(self.worker, 'run_id', None)
-        self.set_busy(self.worker is not None)
+        self.set_busy(self.worker is not None or current_job is not None)
         self._scope_submitted = False
         self._pending_upload_ids = set()
         self.composer.clear()
@@ -1067,6 +1143,14 @@ class PlatformWindow(QMainWindow):
                 '<table width="100%" cellspacing="0" cellpadding="16">'
                 '<tr><td width="12%"></td><td bgcolor="#f3f4f7">'
                 '<span style="color:#9399a6;font-size:11px">你</span>'
+                f'<p style="line-height:160%;font-size:14px">{text}</p>'
+                '</td></tr></table><p style="font-size:8px">&nbsp;</p>'
+            )]
+        if item.kind == 'live_user':
+            return [(
+                '<table width="100%" cellspacing="0" cellpadding="16">'
+                '<tr><td width="12%"></td><td bgcolor="#f3f4f7">'
+                '<span style="color:#9399a6;font-size:11px">你 · 发送中</span>'
                 f'<p style="line-height:160%;font-size:14px">{text}</p>'
                 '</td></tr></table><p style="font-size:8px">&nbsp;</p>'
             )]
@@ -1188,15 +1272,28 @@ class PlatformWindow(QMainWindow):
             links = self.store.run_links(self.session_id)
             runs = self.store.runs(self.session_id)
         live = None
-        if (self._agent_worker is not None and self.session_id
-                and self.session_id == self._agent_session_id
-                and self._agent_operation_id):
-            live = {'after_message_id': self._agent_user_message_id,
-                    'operation_id': self._agent_operation_id,
-                    'text': self._live_agent_text or '新 Agent 路径：正在生成…'}
+        current_job = self._agent_jobs.get(self.session_id)
+        if current_job and current_job.get('done'):
+            current_job = None
+        if current_job is not None:
+            live = {'after_message_id': None,
+                    'operation_id': current_job['operation_id'],
+                    'user_text': current_job['user_text'],
+                    'text': current_job['live_text'] or '新 Agent 路径：正在生成…'}
+        agent_entries = []
+        if self.session_id:
+            try:
+                from .sessions.sqlite_repository import SQLiteSessionRepo
+                agent_entries = SQLiteSessionRepo(
+                    self.store.path, self.store.owner
+                ).entries(self.session_id, 'main')
+            except (OSError, KeyError, sqlite3.Error):
+                # Legacy-only sessions remain renderable during migration.
+                agent_entries = []
         from .conversation_timeline import project_timeline
 
-        items = project_timeline(rows, links, runs, live_status=live)
+        items = project_timeline(rows, links, runs, live_status=live,
+                                 agent_entries=agent_entries)
         content = []
         if self.session_id:
             from .session_service import SessionService
@@ -1596,6 +1693,55 @@ class PlatformWindow(QMainWindow):
             return
         if self.try_local_skill_install(prompt):
             return
+        gateway_factory = getattr(self._make_agent_gateway, '__func__', None)
+        injected_gateway = gateway_factory is not PlatformWindow._make_agent_gateway
+        from .input_gateway import InputGateway
+        try:
+            envelope = InputGateway(
+                self.store,
+                self.agent_permission_mode,
+            ).create(
+                self.session_id,
+                prompt,
+                selected_ids=self.selected_file_ids(),
+                model_id=self.model_combo.currentData(),
+                newly_attached_ids=tuple(getattr(self, '_pending_upload_ids', set())),
+            )
+            InputGateway(self.store, self.agent_permission_mode).verify(envelope)
+            self.last_turn_envelope = envelope
+        except (ValueError, PermissionError, KeyError, sqlite3.Error) as exc:
+            self.composer.setPlainText(prompt)
+            self.status.setText(str(exc))
+            return
+        if not injected_gateway and self.try_local_builtin(prompt):
+            return
+        if self.client is None:
+            connector = getattr(self, 'connect_service', None)
+            connector_factory = getattr(connector, '__func__', None)
+            injected_connector = connector_factory is not PlatformWindow.connect_service
+            if (not injected_gateway and injected_connector and callable(connector)
+                    and connector() is False):
+                self.composer.setPlainText(prompt)
+                self.status.setText('当前未连接服务端，本轮未发送；可连接后重试。')
+                return
+        # Test/offline adapters intentionally expose the stage-1 contract but
+        # do not carry a RemoteSessionClient access token.  Keep that narrow
+        # adapter path usable for local previews and deterministic Qt tests;
+        # authenticated production clients remain new-Agent-only below.
+        if self._can_use_stage1_compat_client():
+            # The compatibility adapter still performs a model/network call.
+            # It must therefore pass the same permission gate as the new Agent
+            # path; otherwise request mode would clear the composer and start
+            # work even after the user rejected approval.
+            if not self.agent_operation_allowed(
+                'network', '确认 Agent 执行',
+                f'确认允许 Agent 按本轮选中的 {len(self.selected_file_ids())} 个文件和用户要求执行？',
+            ):
+                self.composer.setPlainText(prompt)
+                self.status.setText('已取消执行，未启动任务。')
+                return
+            self._submit_stage1_compat(prompt)
+            return
         # 正式客户端只允许新 Agent；旧 TurnRouter 链路不再作为回退入口。
         # 本轮上传的文件必须进上下文（与勾选无关）；其余勾选文件按显式选择
         # 随消息一起冻结进 operation 绑定，模型才看得到文件。
@@ -1605,6 +1751,63 @@ class PlatformWindow(QMainWindow):
                                upload_ids=sorted(uploads))
         return
 
+    def _can_use_stage1_compat_client(self):
+        client = self.client
+        from ..report_review_app.services.remote_auth_service import RemoteSessionClient
+        return (client is not None
+                and callable(getattr(client, 'understand_task', None))
+                and (not getattr(client, 'access_token', None)
+                     or not isinstance(client, RemoteSessionClient)))
+
+    def _submit_stage1_compat(self, prompt):
+        """Run the pre-Agent stage-1 contract for local/test adapters only.
+
+        This is deliberately capability-based rather than environment/test
+        name based.  A real logged-in client always has an access token and is
+        therefore handled exclusively by ``_try_agent_submit``.
+        """
+        from .routing import ConsultWorker
+        selected = self.selected_file_ids()
+        candidates = self._installed_skill_candidates()
+        worker = ConsultWorker(
+            self.client, self.store, self.session_id, prompt,
+            model_id=self.model_combo.currentData() or '',
+            selected_ids=selected,
+            candidates=candidates,
+            browser_enabled=True,
+            parent=self,
+        )
+        self.register_consult_worker(worker)
+        self.composer.clear()
+        self.set_busy(True)
+        self.status.setText('Agent 正在理解本轮要求…')
+        self.render_messages()
+        worker.start()
+
+    def _installed_skill_candidates(self):
+        """Return enabled data-only Skill identities for stage-1 routing."""
+        from .skill_installation import SkillInstallation
+
+        try:
+            manager = SkillInstallation(self.store, initialize=False)
+            result = []
+            for row in manager.list_versions():
+                if not row['enabled']:
+                    continue
+                package = manager.load(row['skill_id'], row['version'])
+                if not package.ready:
+                    continue
+                manifest = package.manifest
+                result.append({
+                    'id': manifest['id'],
+                    'name': manifest['name'],
+                    'adapter': manifest['adapter'],
+                    'description': str(manifest.get('description', ''))[:1000],
+                })
+            return result
+        except (OSError, ValueError, PermissionError, sqlite3.Error, KeyError, TypeError):
+            return []
+
     def try_local_builtin(self, prompt: str) -> bool:
         """Route new local-only built-ins without requiring a cloud schema change."""
         from .skills import DETAIL, FINANCIAL_BRIEF, HISTORY, WORKFLOW_TO_SKILL
@@ -1612,18 +1815,22 @@ class PlatformWindow(QMainWindow):
         normalized = ''.join(prompt.casefold().split())
         financial = any(token in normalized for token in
                         ('财务简报', '财务状况简表', 'financialbrief'))
+        detail = any(token in normalized for token in
+                     ('评估明细表', 'valuationdetailworkbook', '明细工作簿'))
         workflow = (('skill' in normalized or '技能' in normalized)
                     and '工作流' in normalized
                     and any(token in normalized for token in ('创建', '制作', '生成', '更新', '校验')))
-        if not financial and not workflow:
+        if not financial and not detail and not workflow:
             return False
         chain = []
+        if detail:
+            chain.append(self.registry.get(DETAIL.id))
         if financial:
-            if '明细表' in normalized:
-                chain.append(self.registry.get(DETAIL.id))
             if '历史沿革' in normalized or '工商沿革' in normalized:
                 chain.append(self.registry.get(HISTORY.id))
-        chain.append(self.registry.get(FINANCIAL_BRIEF.id if financial else WORKFLOW_TO_SKILL.id))
+            chain.append(self.registry.get(FINANCIAL_BRIEF.id))
+        elif not detail:
+            chain.append(self.registry.get(WORKFLOW_TO_SKILL.id))
         files = [item for item in self.store.files(self.project_id)
                  if item['id'] in self.selected_file_ids()]
         if len(chain) > 1:
@@ -2678,6 +2885,16 @@ class PlatformWindow(QMainWindow):
             return
         if self.update_worker is not None:
             self.status.setText('更新包仍在验签或暂存，请稍后关闭。')
+            event.ignore()
+            return
+        if self._agent_jobs:
+            for job in list(self._agent_jobs.values()):
+                try:
+                    job['gateway'].stop()
+                except Exception:
+                    continue
+            self._close_after_agent_jobs = True
+            self.status.setText("正在停止所有会话中的 Agent 任务；等待线程结束后才能关闭。")
             event.ignore()
             return
         if self.task_manager.active():

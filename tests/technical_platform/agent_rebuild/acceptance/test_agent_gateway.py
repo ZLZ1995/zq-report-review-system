@@ -65,8 +65,11 @@ def test_tool_catalog_follows_flags(tmp_path):
     _, _, _, gateway = make_stack(
         tmp_path / 'b', flags_on=('chat', 'file_readonly_analysis'))
     names = {t.descriptor.name for t in gateway.active_tools()}
-    assert {'inspect_project_files', 'analyze_file_roles'} <= names
+    assert {'inspect_project_files', 'analyze_file_roles',
+            'read_project_file'} <= names
     assert 'execute_skill_plan' not in names  # 生成类未开闸
+    assert 'query_business_run' not in names
+    assert 'cancel_business_run' not in names
 
     _, _, _, gateway = make_stack(
         tmp_path / 'c', flags_on=('chat', 'local_generate_skill'))
@@ -79,6 +82,15 @@ def test_tool_catalog_follows_flags(tmp_path):
     names = {t.descriptor.name for t in gateway.active_tools()}
     assert 'annotate_reviewed_files' in names
     assert 'execute_skill_plan' not in names
+
+
+def test_kernel_catalog_honors_same_skill_category_gate_as_public_catalog(
+        tmp_path):
+    _, _, _, gateway = make_stack(
+        tmp_path, flags_on=('chat',), scripts=[[text_script('unused')]])
+
+    assert gateway.active_tools() == ()
+    assert gateway._build_kernel().tools == []
 
 
 def test_browser_readonly_excludes_write_tools(tmp_path):
@@ -146,6 +158,22 @@ def test_model_failure_returns_failed_with_error_code(tmp_path):
     # 失败 Turn 有 Entry（验收 #3）
     entries = gateway.repo.entries(session, 'main')
     assert [e for e in entries if e.entry_type == 'user_message']
+
+
+def test_failed_turn_does_not_reuse_previous_assistant_reply(tmp_path):
+    from asset_based_agent.technical_platform.agent_core.errors import (
+        ModelProtocolError,
+    )
+
+    _, _session, _, gateway = make_stack(
+        tmp_path, flags_on=('chat',),
+        scripts=[[text_script('旧回复')], [ModelProtocolError('上游失败')]],
+    )
+    assert gateway.submit('第一轮')['reply'] == '旧回复'
+    result = gateway.submit('第二轮')
+
+    assert result['status'] == 'failed'
+    assert result['reply'] == ''
 
 
 # ---------------------------------------------------------------- 业务工具链

@@ -39,6 +39,50 @@ def test_two_processes_racing_same_lane_have_single_winner(tmp_path):
     assert len(repo.entries('s1', 'main')) == 1
 
 
+def test_main_lane_leaf_is_scoped_by_session(tmp_path):
+    """The same lane id (main) in different sessions must never share a leaf."""
+    path = tmp_path / 'db.sqlite'
+    repo = _repo(path)
+    repo.create_session('s1', project_id='p1', owner_id='alice', title='one')
+    repo.create_session('s2', project_id='p2', owner_id='alice', title='two')
+
+    repo.begin_operation('s1', 'main', user_text='s1 message', request_id='r-s1')
+    repo.begin_operation('s2', 'main', user_text='s2 message', request_id='r-s2')
+
+    assert [entry.payload['text'] for entry in repo.lane_history('s1', 'main')] == [
+        's1 message'
+    ]
+    assert [entry.payload['text'] for entry in repo.lane_history('s2', 'main')] == [
+        's2 message'
+    ]
+
+
+def test_lane_leaf_repair_rebuilds_each_session_partition(tmp_path):
+    """The v15 repair must undo leaves corrupted by the old writer."""
+    import sqlite3
+
+    from asset_based_agent.technical_platform.local_migrations import apply_v15
+
+    path = tmp_path / 'db.sqlite'
+    repo = _repo(path)
+    repo.create_session('s1', project_id='p1', owner_id='alice', title='one')
+    repo.create_session('s2', project_id='p2', owner_id='alice', title='two')
+    repo.begin_operation('s1', 'main', user_text='s1 message', request_id='r-s1')
+    repo.begin_operation('s2', 'main', user_text='s2 message', request_id='r-s2')
+    s1_entry = repo.entries('s1', 'main')[0].id
+    s2_entry = repo.entries('s2', 'main')[0].id
+
+    with sqlite3.connect(path) as db:
+        db.execute(
+            'UPDATE agent_lanes SET leaf_entry_id=? WHERE session_id=? AND id=?',
+            (s2_entry, 's1', 'main'),
+        )
+        apply_v15(db)
+
+    assert repo.lane_history('s1', 'main')[0].id == s1_entry
+    assert repo.lane_history('s2', 'main')[0].id == s2_entry
+
+
 def test_abrupt_close_mid_transaction_leaves_no_partial_data(tmp_path):
     path = tmp_path / 'db.sqlite'
     repo = _repo(path)
@@ -111,3 +155,19 @@ def test_permission_mode_survives_reopen(tmp_path):
     repo.create_session('s1', project_id='p1', owner_id='alice', title='会话')
     repo.set_permission_mode('s1', 'assisted')
     assert _repo(tmp_path / 'db.sqlite').session_permission_mode('s1') == 'assisted'
+
+
+def test_file_scope_snapshot_is_persisted_with_operation(tmp_path):
+    import json
+    repo = _repo(tmp_path / 'db.sqlite')
+    repo.create_session('s1', project_id='p1', owner_id='alice', title='one')
+    operation = repo.begin_operation('s1', 'main', user_text='scope', request_id='r')
+    repo.set_file_scope_snapshot(operation.id, {
+        'files': [{'file_id': 'f1', 'sha256': 'abc'}],
+    })
+    with sqlite3.connect(repo.path) as db:
+        snapshot = db.execute(
+            'SELECT file_scope_snapshot_json FROM agent_operations WHERE id=?',
+            (operation.id,),
+        ).fetchone()[0]
+    assert json.loads(snapshot)['files'][0]['file_id'] == 'f1'

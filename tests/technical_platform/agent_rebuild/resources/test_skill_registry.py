@@ -3,7 +3,7 @@
 import shutil
 
 import pytest
-from skill_fixtures import (
+from .skill_fixtures import (
     make_registry,
     make_zip,
     probe_tool,
