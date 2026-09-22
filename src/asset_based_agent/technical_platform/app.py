@@ -183,10 +183,19 @@ class PlatformWindow(QMainWindow):
         # S30：新 Agent worker 按会话隔离；_agent_worker 仅保留为当前会话兼容别名。
         self._agent_jobs = {}
         self._close_after_agent_jobs = False
+        # S6-02：优雅关闭——宽限期计时与强制关闭标记
+        self._close_grace_seconds = 15.0
+        self._force_close = False
+        self._close_grace_timer = QTimer(self)
+        self._close_grace_timer.setSingleShot(True)
+        self._close_grace_timer.timeout.connect(self._force_close_with_checkpoints)
         self._agent_session_id = None
         # 新 Agent 的增量文本先在内存中合并，再以低频刷新到对话面板。
         # 逐 token 调用 setHtml 会把 GUI 事件队列塞满，长回复看起来就像“卡死”。
         self._live_agent_text = ''
+        # S6-01：每会话独立 live render state——timer 只是节流器，
+        # 待刷新状态按 session 记账，互不干扰。
+        self._live_render_pending: set = set()
         self._live_render_timer = QTimer(self)
         self._live_render_timer.setSingleShot(True)
         self._live_render_timer.setInterval(80)
@@ -455,6 +464,7 @@ class PlatformWindow(QMainWindow):
             if job is None:
                 return
             job['live_text'] += text
+            self._live_render_pending.add(session_id)
             if session_id == self.session_id:
                 self._live_agent_text = job['live_text']
             # 只把“正在生成”状态写到状态栏；正文在对话面板中增量显示。
@@ -465,15 +475,27 @@ class PlatformWindow(QMainWindow):
                 self._live_render_timer.start()
 
     def _flush_live_agent_render(self) -> None:
-        job = self._agent_jobs.get(self.session_id)
-        if (job is not None and self._live_agent_text):
+        # S6-01：只冲刷当前会话的待刷新记账；后台会话的 live text
+        # 在 job 内持续累积，切回时由 choose_session 一次性呈现。
+        current = self.session_id
+        if current not in self._live_render_pending:
+            return
+        self._live_render_pending.discard(current)
+        job = self._agent_jobs.get(current)
+        if job is not None:
+            self._live_agent_text = job['live_text']
             self.render_messages()
 
     def _on_agent_done(self, result: dict) -> None:
         self._on_agent_done_for(self._agent_session_id or self.session_id, result)
 
     def _on_agent_done_for(self, session_id: str | None, result: dict) -> None:
-        self._live_render_timer.stop()
+        # S6-01：只清除本会话的待刷新记账；其他会话仍在流式时
+        # 绝不停掉 timer，否则后台会话完成会冻结当前会话的实时刷新。
+        self._live_render_pending.discard(session_id)
+        if (session_id == self.session_id
+                and self.session_id not in self._live_render_pending):
+            self._live_render_timer.stop()
         job = self._agent_jobs.get(session_id)
         if job is None:
             return
@@ -1096,6 +1118,9 @@ class PlatformWindow(QMainWindow):
         self._live_render_timer.stop()
         self._draft_binding = None
         self.session_id = item.data(Qt.ItemDataRole.UserRole) if item else None
+        # S6-01：新会话的累积 live text 由下方 restore+render 一次性呈现，
+        # 其待刷新记账随之结清；后台会话的记账保留，不受切换影响。
+        self._live_render_pending.discard(self.session_id)
         current_job = self._agent_jobs.get(self.session_id)
         if current_job and current_job.get('done'):
             current_job = None
@@ -2665,6 +2690,7 @@ class PlatformWindow(QMainWindow):
                           else PlatformStore(self.store.path, payload["owner"]))
             self.project_id = self.session_id = self.run_id = None
             self._live_render_timer.stop()
+            self._live_render_pending.clear()
             self._live_agent_text = ''
             self.composer.clear()
             self.transcript.clear()
@@ -2915,6 +2941,12 @@ class PlatformWindow(QMainWindow):
 
     def closeEvent(self, event):
         from ..report_review_app.services.resource_locks import CLIENT_RESOURCES
+        if self._force_close:
+            # S6-02：宽限期已过，检查点已持久化，直接放行关闭。
+            self.session_badge_timer.stop()
+            self.close_browser()
+            event.accept()
+            return
         if not self.flush_unsaved_drafts():
             event.ignore()
             return
@@ -2933,6 +2965,10 @@ class PlatformWindow(QMainWindow):
                 except Exception:
                     continue
             self._close_after_agent_jobs = True
+            # S6-02：宽限期内等 worker 把终态 durable 落库；超时由
+            # _force_close_with_checkpoints 把开放 operation 标记 unknown 后放行。
+            if not self._close_grace_timer.isActive():
+                self._close_grace_timer.start(int(self._close_grace_seconds * 1000))
             self.status.setText("正在停止所有会话中的 Agent 任务；等待线程结束后才能关闭。")
             event.ignore()
             return
@@ -2954,6 +2990,33 @@ class PlatformWindow(QMainWindow):
         self.session_badge_timer.stop()
         self.close_browser()
         event.accept()
+
+    def _force_close_with_checkpoints(self) -> None:
+        """S6-02：关闭宽限期超时兜底。
+
+        worker 迟迟未收束时，把所有仍开放的 operation 持久化为 unknown
+        durable 检查点（重启后对账恢复），然后强制放行关闭——绝不能只发
+        gateway.stop() 就把内存状态一丢了事。
+        """
+        from .agent_gateway import mark_operations_unknown
+
+        for job in list(self._agent_jobs.values()):
+            gateway = job.get('gateway')
+            repo = getattr(gateway, 'repo', None)
+            open_ops = getattr(gateway, '_open_operations', None) or ()
+            if repo is None:
+                continue
+            try:
+                mark_operations_unknown(
+                    repo, tuple(open_ops),
+                    code='client.shutdown_timeout',
+                    summary='客户端关闭宽限期超时，已持久化 unknown 待对账')
+            except Exception:  # 关闭兜底路径不得再抛错
+                import logging
+                logging.getLogger(__name__).warning(
+                    '会话关闭检查点写入失败，继续处理其余会话', exc_info=True)
+        self._force_close = True
+        self.close()
 
 
 def main():

@@ -327,6 +327,28 @@ class ReviewJobService:
         ))
         return [(user_id, job_id) for user_id, job_id in rows]
 
+    def requeue_for_shutdown(self, db: Session, *, worker_id: str, job_ids,
+                             error_code: str = "shutdown_grace_expired") -> int:
+        """S6-02：优雅关闭超时兜底——只把本 worker 仍在 running 的 job 重新排队。
+
+        终态 job 与其他 worker 的 job 一律不动；被重排的 job 由下次启动的
+        recover_interrupted 重新调度。
+        """
+        requeued = 0
+        for job_id in job_ids:
+            job = db.get(ReviewJob, job_id)
+            if job is None or job.status != "running" or job.worker_id != worker_id:
+                continue
+            job.status = "queued"
+            job.started_at = None
+            job.worker_id = None
+            job.lease_expires_at = None
+            job.error_code = error_code
+            self._record_event(db, job, "shutdown_requeue")
+            requeued += 1
+        db.commit()
+        return requeued
+
     def list_events(self, db: Session, *, user_id: str, job_id: str,
                     after_sequence: int = 0) -> list[ReviewJobEvent]:
         self._get_owned_job(db, user_id=user_id, job_id=job_id)

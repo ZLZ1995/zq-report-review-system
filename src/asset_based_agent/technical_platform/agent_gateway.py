@@ -29,6 +29,23 @@ from .tools.assembly import CompositeToolResolver
 
 MODE_MAP = {'request': 'request', 'risk': 'assisted', 'full': 'full'}
 
+
+def mark_operations_unknown(repo, operation_ids, *, code, summary) -> int:
+    """S6-02 关闭超时兜底：把仍开放的 operation 持久化为 unknown 检查点。
+
+    客户端关闭等不到 worker 安全收束时调用——绝不能只发取消信号就走，
+    必须在库中留下 durable 的 unknown 标记，等待重启后对账恢复。
+    单个 operation 标记失败不拖垮整批；返回成功标记的数量。
+    """
+    marked = 0
+    for operation_id in tuple(operation_ids):
+        try:
+            repo.interrupt_operation(operation_id, code=code, summary=summary)
+            marked += 1
+        except Exception:  # 关闭兜底路径不得再抛错
+            logger.warning('关闭检查点写入失败: %s', operation_id, exc_info=True)
+    return marked
+
 _SKILL_CATEGORIES = frozenset({
     'single_readonly_skill', 'local_generate_skill', 'report_review',
     'multi_skill'})
