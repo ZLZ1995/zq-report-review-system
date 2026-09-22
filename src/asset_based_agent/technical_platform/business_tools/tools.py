@@ -53,6 +53,14 @@ def business_tools(service):
         payload = service.analyze_roles(arguments.get('file_ids', []))
         return ToolResult(status='succeeded', result=payload, content='文件角色识别完成。')
 
+    def read_content(arguments, cancel):
+        payload = service.read_file_content(
+            arguments.get('file_id'), max_chars=arguments.get('max_chars', 12000),
+            sheet=arguments.get('sheet'))
+        return ToolResult(status='succeeded', result=payload,
+                          content=payload.get('content', '')
+                          or payload.get('diagnostic', ''))
+
     def execute(arguments, cancel):
         payload = service.execute_skill_plan(
             cancel_event=cancel.threading_event, **arguments)
@@ -96,6 +104,16 @@ def business_tools(service):
             description='按文件名与格式推断文件角色（报告/说明/测算表/参考资料）',
             input_schema={'type': 'object', 'required': ['file_ids']},
             risk='local_readonly'), analyze),
+        BusinessTool(ToolDescriptor(
+            name='read_project_file',
+            description='Read bounded content from a registered project file',
+            input_schema={'type': 'object', 'required': ['file_id'],
+                          'properties': {
+                              'file_id': {'type': 'string'},
+                              'max_chars': {'type': 'integer'},
+                              'sheet': {'type': 'string'},
+                          }},
+            risk='local_readonly'), read_content),
         BusinessTool(ToolDescriptor(
             name='execute_skill_plan',
             description='按已确认参数执行业务 Skill（审核/生成），复用既有硬门禁与验收链',

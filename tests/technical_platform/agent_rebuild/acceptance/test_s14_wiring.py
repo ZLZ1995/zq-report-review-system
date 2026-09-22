@@ -228,7 +228,7 @@ def test_assembly_merges_business_and_browser_tools(tmp_path):
         business_service=service,
         browser=build_browser_tools(session, _StubBrowserBackend()))
     names = {tool.descriptor.name for tool in tools}
-    assert len(tools) == 7 + 10
+    assert len(tools) == 8 + 10
     assert 'browser_open' in names
     assert snapshot  # 资源快照覆盖业务工具与浏览器工具来源
     sources = {entry['id'] for entry in snapshot}

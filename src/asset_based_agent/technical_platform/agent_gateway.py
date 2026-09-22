@@ -18,8 +18,10 @@ from .business_tools import business_tools
 from .business_tools.service import BusinessRunService
 from .flags import FEATURE_FLAG_ORDER
 from .policies.engine import RuleBasedPolicyEngine
+from .policies.file_scope import project_file_scope
 from .sessions.sqlite_repository import SQLiteSessionRepo
 from .tools.browser_tools import BrowserToolError, build_browser_tools
+from .tools.assembly import CompositeToolResolver
 
 MODE_MAP = {'request': 'request', 'risk': 'assisted', 'full': 'full'}
 
@@ -55,7 +57,7 @@ class AgentGateway:
     def __init__(self, store, session_id, *, flags, model_port_factory,
                  model_id='', permission_mode_getter, provider_factory=None,
                  browser_backend=None, approver=None,
-                 force_all_tools: bool = False) -> None:
+                 force_all_tools: bool = False, tool_registry=None) -> None:
         self._store = store
         self._session_id = session_id
         self._model_id = model_id
@@ -66,6 +68,7 @@ class AgentGateway:
         self._browser_backend = browser_backend
         self._approver = approver
         self._force_all_tools = force_all_tools
+        self._tool_registry = tool_registry
         self.repo = SQLiteSessionRepo(store.path, store.owner)
         self._kernel = None
         self._open_operations = set()
@@ -85,6 +88,9 @@ class AgentGateway:
         if not self.new_path_available:
             return ()
         tools = []
+        if self._tool_registry is not None and any(
+                self._enabled(category) for category in _SKILL_CATEGORIES):
+            tools.extend(self._tool_registry.resolve_for_operation()[0])
         service = BusinessRunService(self._store, self._session_id,
                                      provider_factory=self._provider_factory)
         for tool in business_tools(service):
@@ -104,6 +110,40 @@ class AgentGateway:
                     tools.append(tool)
         return tuple(tools)
 
+    def _build_kernel(self):
+        """Build one kernel with the same resolver/catalog used at accept time."""
+        self._mirror_session()
+        service = BusinessRunService(
+            self._store, self._session_id,
+            provider_factory=self._provider_factory)
+        business = []
+        for tool in business_tools(service):
+            category = _BUSINESS_TOOL_CATEGORY.get(tool.descriptor.name)
+            if category is None or self._enabled(category):
+                business.append(tool)
+        browser = ()
+        if self._enabled('browser_readonly') or self._enabled('browser_write_upload'):
+            backend = self._browser_backend or NullBrowserBackend()
+            write = self._enabled('browser_write_upload')
+            browser = tuple(tool for tool in build_browser_tools(
+                self._session_id, backend)
+                if tool.descriptor.name in _BROWSER_READONLY_TOOLS or write)
+        registry = self._tool_registry if any(
+            self._enabled(category) for category in _SKILL_CATEGORIES) else None
+        resolver = CompositeToolResolver(
+            tool_registry=registry,
+            browser=browser, extra=business)
+        project_id = self.repo.session_project_id(self._session_id)
+        project_root = self._store.path.parent
+        attachment_root = project_root / 'attachments' / project_id
+        scope = project_file_scope(project_root, extra_roots=(attachment_root,))
+        tools, _snapshot = resolver.resolve_for_operation()
+        return AgentKernel(
+            repo=self.repo, model=self._model_port_factory(), tools=tools,
+            tool_resolver=resolver, file_scope=scope,
+            policy=RuleBasedPolicyEngine(), approver=self._approver,
+            context_builder=ContextBuilder())
+
     # ------------------------------------------------------------ 会话
 
     def _mirror_session(self):
@@ -117,6 +157,29 @@ class AgentGateway:
                 permission_mode=mode)
         else:
             self.repo.set_permission_mode(self._session_id, mode)
+        # Legacy Qt messages lived outside the Agent tree. Mirror them once so
+        # the new ContextBuilder can answer follow-up questions in old
+        # sessions; the marker makes the migration idempotent and does not
+        # duplicate new Agent entries created later.
+        legacy_rows = self._store.messages(self._session_id)
+        current = self.repo.entries(self._session_id, 'main')
+        mirrored = {
+            str(entry.payload.get('_legacy_message_id'))
+            for entry in current if entry.payload.get('_legacy_message_id')
+        }
+        role_map = {'user': 'user_message', 'assistant': 'assistant_message',
+                    'event': 'event'}
+        for row in legacy_rows:
+            legacy_id = str(row.get('id'))
+            entry_type = role_map.get(row.get('role'))
+            if not entry_type or legacy_id in mirrored:
+                continue
+            self.repo.append_entry(
+                self._session_id, 'main', entry_type,
+                {'text': str(row.get('text', '')),
+                 '_legacy_message_id': legacy_id},
+            )
+            mirrored.add(legacy_id)
 
     # ------------------------------------------------------------ 运行
 
@@ -147,17 +210,17 @@ class AgentGateway:
                     bindings.append({'file_id': file_id,
                                      'sha256': record['sha256'],
                                      'binding_kind': kind})
-        kernel = AgentKernel(
-            repo=self.repo, model=self._model_port_factory(),
-            tools=self.active_tools(), policy=RuleBasedPolicyEngine(),
-            approver=self._approver, context_builder=ContextBuilder())
+        kernel = self._build_kernel()
         self._kernel = kernel
         error_code = []
         completed = []
+        operation_ids = []
 
         def collector(event):
             if event.operation_id:
                 self._open_operations.add(event.operation_id)
+                if event.operation_id not in operation_ids:
+                    operation_ids.append(event.operation_id)
             if event.event_type == 'operation_failed':
                 error_code.append((event.payload or {}).get('error_code',
                                                            'failed'))
@@ -171,6 +234,10 @@ class AgentGateway:
         if on_event is not None:
             kernel.subscribe(on_event)
         try:
+            # A previous process may have died after accepting an operation.
+            # Reconcile those durable open operations before admitting a new
+            # turn; otherwise the stale lane remains busy forever.
+            asyncio.run(kernel.recover(self._session_id))
             asyncio.run(kernel.submit(
                 self._session_id, 'main',
                 {'text': text, 'model_id': self._model_id,
@@ -184,7 +251,8 @@ class AgentGateway:
                 message = ''
             return {'status': 'failed', 'reply': '', 'error_code': str(code),
                     'error_message': message}
-        reply = self._last_assistant_text()
+        operation_id = operation_ids[-1] if operation_ids else None
+        reply = self._last_assistant_text(operation_id)
         if 'operation_completed' in completed:
             return {'status': 'completed', 'reply': reply, 'error_code': ''}
         if 'operation_aborted' in completed:
@@ -193,23 +261,17 @@ class AgentGateway:
         return {'status': 'failed', 'reply': reply,
                 'error_code': error_code[0] if error_code else 'failed'}
 
-    def _last_assistant_text(self) -> str:
+    def _last_assistant_text(self, operation_id=None) -> str:
         entries = self.repo.entries(self._session_id, 'main')
         assistant = [e for e in entries if e.entry_type == 'assistant_message'
-                     and not e.payload.get('intermediate')]
+                     and not e.payload.get('intermediate')
+                     and (operation_id is None or e.operation_id == operation_id)]
         return assistant[-1].payload.get('text', '') if assistant else ''
 
     def stop(self) -> None:
         """中止本网关全部活动 operation；无活动时安全返回。"""
         if self._kernel is None:
             return
-        for operation_id in list(self._open_operations):
-            try:
-                asyncio.run(self._kernel.abort(operation_id))
-            except Exception as exc:  # noqa: BLE001 - 停止路径尽力而为
-                import logging
-                logging.getLogger(__name__).warning(
-                    'abort operation %s failed: %s', operation_id,
-                    type(exc).__name__)
-            finally:
-                self._open_operations.discard(operation_id)
+        # The worker thread owns the asyncio loop.  Only signal cancellation
+        # here; the worker loop will persist the terminal abort event.
+        self._kernel.cancel_open(tuple(self._open_operations))

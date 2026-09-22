@@ -28,9 +28,10 @@ def archive_name(relative: Path) -> Path:
     return relative.with_suffix('.pending') if relative == WEBENGINE_HELPER else relative
 
 
-def main(root: Path | None = None):
+def main(root: Path | None = None, *, source_root: Path | None = None):
     explicit_root = root is not None
     root = (root or Path(__file__).resolve().parents[1]).resolve()
+    source_root = (source_root or root).resolve()
     parent = root / 'dist/technical_platform'
     if explicit_root and not parent.exists():
         parent = root
@@ -44,7 +45,7 @@ def main(root: Path | None = None):
     if any(p.suffix in {'.db', '.sqlite', '.sqlite3', '.log'} or p.name.startswith('.env') for p in files):
         raise RuntimeError('Unexpected runtime data in package')
     rules = Path('asset_based_agent/technical_platform/review_rules.txt')
-    assert (folder / '_internal' / rules).read_bytes() == (root / 'src' / rules).read_bytes()
+    assert (folder / '_internal' / rules).read_bytes() == (source_root / 'src' / rules).read_bytes()
     for skill in ('valuation-detail-workbook-fill', 'gongshang-change-history-docx',
                   'financial-brief-docx'):
         bundle = folder / '_internal/builtin_skills' / skill
@@ -115,4 +116,8 @@ def main(root: Path | None = None):
 
 
 if __name__ == '__main__':
-    main()
+    import os
+    package_root = os.environ.get('TP_PACKAGE_ROOT')
+    source_root = os.environ.get('TP_SOURCE_ROOT')
+    main(Path(package_root) if package_root else None,
+         source_root=Path(source_root) if source_root else None)

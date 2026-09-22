@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 
 def _version(db):
@@ -343,6 +343,40 @@ def apply_v14(db):
     _backfill_run_message_links(db)
 
 
+def apply_v15(db):
+    """Repair lane leaves after the session-scoping fix (S17).
+
+    Older builds updated ``agent_lanes`` by lane id only.  Because ``main``
+    exists in every session, a later write could leave a lane pointing at an
+    entry from another session.  Rebuild each leaf from the newest entry in
+    its own (session_id, lane_id) partition; empty lanes retain their anchor.
+    """
+    tables = {row[0] for row in db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    # Some pre-lane databases legitimately reached v15 through the generic
+    # migration runner.  v15 is a repair-only migration; it must be a no-op
+    # when the lane tables were never created, rather than making startup fail.
+    if not {'agent_lanes', 'conversation_entries'} <= tables:
+        return
+    lanes = db.execute(
+        'SELECT session_id, id, anchor_entry_id FROM agent_lanes'
+    ).fetchall()
+    for session_id, lane_id, anchor_entry_id in lanes:
+        latest = db.execute(
+            'SELECT id FROM conversation_entries '
+            'WHERE session_id=? AND lane_id=? '
+            'ORDER BY sequence DESC, id DESC LIMIT 1',
+            (session_id, lane_id),
+        ).fetchone()
+        leaf_entry_id = latest[0] if latest is not None else anchor_entry_id
+        db.execute(
+            'UPDATE agent_lanes SET leaf_entry_id=?, updated_at=? '
+            'WHERE session_id=? AND id=?',
+            (leaf_entry_id, datetime.now(timezone.utc).isoformat(),
+             session_id, lane_id),
+        )
+
+
 def _backfill_run_message_links(db):
     """历史 run 归属回填：顺序 + 唯一性同时成立才标 legacy_inferred。
 
@@ -452,6 +486,8 @@ def migrate_database(path: Path) -> Path | None:
                 apply_v13(db)
             if previous_version < 14:
                 apply_v14(db)
+            if previous_version < 15:
+                apply_v15(db)
             db.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
             db.commit()
             return backup

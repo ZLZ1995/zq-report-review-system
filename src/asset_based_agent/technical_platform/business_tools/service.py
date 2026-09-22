@@ -82,6 +82,66 @@ class BusinessRunService:
              'role': classify_file_role(Path(rows[fid]['path'])).value}
             for fid in file_ids]}
 
+    def read_file_content(self, file_id, *, max_chars=12000, sheet=None):
+        """Read a bounded, project-scoped preview for model reasoning."""
+        try:
+            max_chars = max(1, min(int(max_chars), 20000))
+        except (TypeError, ValueError):
+            raise ToolInvalidArguments('max_chars 必须是 1-20000 的整数') from None
+        row = self._file_rows([str(file_id)])[str(file_id)]
+        path = Path(row['path']).resolve()
+        if not path.is_file():
+            raise ToolFailed('项目文件副本不存在，无法读取')
+        suffix = path.suffix.lower()
+        if suffix in {'.txt', '.md', '.csv', '.json', '.xml', '.log'}:
+            text = path.read_text(encoding='utf-8', errors='replace')
+            return {'file_id': str(file_id), 'name': row['name'],
+                    'content': text[:max_chars], 'truncated': len(text) > max_chars}
+        if suffix in {'.xlsx', '.xlsm'}:
+            try:
+                import openpyxl
+                workbook = openpyxl.load_workbook(path, read_only=True,
+                                                  data_only=True)
+            except Exception as exc:  # noqa: BLE001
+                raise ToolFailed(f'表格读取失败：{type(exc).__name__}') from None
+            names = workbook.sheetnames
+            selected = [sheet] if sheet else names
+            if any(name not in names for name in selected):
+                raise ToolInvalidArguments('指定工作表不存在')
+            lines = []
+            for name in selected:
+                lines.append(f'[sheet] {name}')
+                for row_values in workbook[name].iter_rows(max_row=200,
+                                                            max_col=40,
+                                                            values_only=True):
+                    values = ['' if value is None else str(value)
+                              for value in row_values]
+                    if any(values):
+                        lines.append('\t'.join(values).rstrip())
+                    if len('\n'.join(lines)) >= max_chars:
+                        break
+            text = '\n'.join(lines)
+            workbook.close()
+            return {'file_id': str(file_id), 'name': row['name'],
+                    'content': text[:max_chars], 'truncated': len(text) > max_chars,
+                    'sheets': names}
+        if suffix == '.docx':
+            try:
+                from docx import Document
+                document = Document(path)
+                lines = [p.text for p in document.paragraphs if p.text]
+                for table in document.tables:
+                    lines.extend(' | '.join(cell.text for cell in row.cells)
+                                 for row in table.rows)
+            except Exception as exc:  # noqa: BLE001
+                raise ToolFailed(f'Word 文件读取失败：{type(exc).__name__}') from None
+            text = '\n'.join(lines)
+            return {'file_id': str(file_id), 'name': row['name'],
+                    'content': text[:max_chars], 'truncated': len(text) > max_chars}
+        return {'file_id': str(file_id), 'name': row['name'], 'content': '',
+                'truncated': False,
+                'diagnostic': f'暂不支持读取 {suffix or "无扩展名"} 的正文内容'}
+
     # ----------------------------------------------------------- execute
 
     def queue_skill_plan(self, *, skill_id, skill_version, skill_hash,

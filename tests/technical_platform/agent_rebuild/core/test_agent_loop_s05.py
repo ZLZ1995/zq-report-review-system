@@ -261,6 +261,19 @@ def test_model_failure_commits_error_entry_and_failed_turn():
     assert turns[0].status == 'failed'
 
 
+def test_model_stream_without_terminal_message_is_protocol_failure():
+    from asset_based_agent.technical_platform.agent_core.contracts import ModelEvent
+
+    async def factory(request, cancel):
+        yield ModelEvent('message_start', {})
+        yield ModelEvent('text_delta', {'text': 'partial'})
+
+    kernel, repo, _ = make_kernel(stream_factory=factory)
+    accepted = run(kernel.submit('s1', 'main', {'text': 'partial'}))
+    assert repo.get_operation(accepted.operation_id).status == 'failed'
+    assert repo.get_operation(accepted.operation_id).error_code == 'model.protocol_error'
+
+
 def test_abort_mid_stream_and_late_deltas_do_not_change_tree():
     from asset_based_agent.technical_platform.agent_core.contracts import (
         ModelEvent,

@@ -171,6 +171,9 @@ class InMemorySessionRepo:
             'binding_kind': binding_kind, 'source_entry_id': source_entry_id,
             'role': role, 'sha256': sha256}
 
+    def set_file_scope_snapshot(self, operation_id, snapshot):
+        self._operations[operation_id].file_scope_snapshot = dict(snapshot or {})
+
     def operation_files(self, operation_id, kinds=None):
         wanted = EXPLICIT_BINDING_KINDS if kinds is None else frozenset(kinds)
         return [dict(b) for key, b in self._bindings.items()
