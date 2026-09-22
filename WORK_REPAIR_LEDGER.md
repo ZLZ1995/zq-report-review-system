@@ -130,3 +130,4 @@ CI 基线: technical-platform-client / report-review-server 在 879a4aa 均 succ
 
 阶段结论（续）：
 - S14 已完成（2026-09-22）：对比度/间距/卡片层级/最大内容宽度/系统日志压缩/当前选中状态/运行中状态色/错误警告成功色全部落地，10 项验收测试全绿；阶段报告见 remediation/s14/STAGE_REPORT.md
+- 最终交付（2026-09-22）：分支 kimi/work-repair-s1-s14 已推送 origin（db05139）；S8-06 main 分支保护已生效（需 PR + 1 review + client-regression/client-build/server-tests/server-image 四个 status check 严格最新、禁 force push、禁删除、会话需解决）；release-assets.yml 增加"源 CI run 必须在 exact SHA 上成功"校验步骤
