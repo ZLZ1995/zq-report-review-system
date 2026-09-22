@@ -19,10 +19,10 @@ CI 基线: technical-platform-client / report-review-server 在 879a4aa 均 succ
 - [x] S2-03 客户端/服务端请求对账接口（agent_core/reconciliation.py；服务端 GET /completions/{id} 与 /replay；ServerModelPort.reconcile_request/replay_request；gateway recover 后对账）
 
 ## S3 服务端计费与流式一致性
-- [ ] S3-01 AgentCompletionService terminal guard
-- [ ] S3-02 canonical replay payload（修复 2000 事件截断）
-- [ ] S3-03 ReviewJob 与 Hold 一致性
-- [ ] S3-04 Provider SSE 严格协议校验
+- [x] S3-01 AgentCompletionService terminal guard（provider_started/usage/settled 阶段分类；非协议异常落 failed/uncertain/disconnected，绝不永久 streaming）
+- [x] S3-02 canonical replay payload（CanonicalReplayBuilder 保序折叠 + encode_canonical_replay 重编码；删除 2000 事件截断；旧格式存量行兼容）
+- [x] S3-03 ReviewJob 与 Hold 一致性（settle_terminal_jobs 幂等补结算；recover_interrupted 启动先对账）
+- [x] S3-04 Provider SSE 严格协议校验（全类型显式检查；非法结构→ProviderCallError；无 [DONE]/无 finish_reason 不发 message_complete）
 
 ## S4 不可信输入与本地安全边界
 - [ ] S4-01 Skill ZIP 安全重写
@@ -70,8 +70,11 @@ CI 基线: technical-platform-client / report-review-server 在 879a4aa 均 succ
 - S1 回归：agent_rebuild 419 passed/9 xfailed；technical_platform 顶层分块 1398 passed；report_review_server 228 passed/1 skipped；report_review_app+agent_acceptance+platform_update 352 passed
 - S2 定向：修复前 19 failed（5 文件）→ 修复后 26 passed
 - S2 回归：agent_rebuild 437 passed/9 xfailed；report_review_server 236 passed/1 skipped；technical_platform 顶层分块 92+136+260+509+753 全绿；report_review_app+agent_acceptance+platform_update 352 passed
-- 存量问题：根目录 3 个 test_detail_*.py 缺 test_detail_workbook_pipeline_guards 模块，HEAD 即无法收集（留 S8）
+- S3 定向：修复前 24 failed / 3 passed（3 个通过项为既有行为守护用例）→ 修复后 27 passed
+- S3 回归：report_review_server 263 passed/1 skipped；agent_rebuild 437 passed/9 xfailed；technical_platform 顶层分块 84+8+136+260+509+401=1398 全绿；report_review_app+agent_acceptance+platform_update+test_detail_scope_first 352 passed
+- 存量问题：根目录 3 个 test_detail_*.py 缺 test_detail_workbook_pipeline_guards 模块，HEAD 即无法收集（留 S8）；services 层 browser_step/client_release_service/task_planning/task_understanding 存量 I001（留 S8）
 
 阶段结论：
 - S1 已完成（2026-09-22）：17 项验收测试全绿，全量回归无新增失败；阶段报告见 remediation/s1/STAGE_REPORT.md
 - S2 已完成（2026-09-22）：lease/恢复策略/对账接口全部落地，26 项验收测试全绿，全量回归无新增失败；阶段报告见 remediation/s2/STAGE_REPORT.md
+- S3 已完成（2026-09-22）：terminal guard/canonical replay/hold 对账/SSE 严格校验全部落地，27 项验收测试全绿，全量回归无新增失败；阶段报告见 remediation/s3/STAGE_REPORT.md
