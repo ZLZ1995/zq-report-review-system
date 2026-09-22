@@ -37,7 +37,7 @@ from asset_based_agent.technical_platform.store import PlatformStore
 class ErrorClassificationTest(unittest.TestCase):
     def setUp(self):
         import tempfile
-        self.tmp = tempfile.TemporaryDirectory(dir=r'D:\ZQ-Acceptance\tmp-pytest-basetemp')
+        self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)
         from PySide6.QtWidgets import QApplication
         self.app = QApplication.instance() or QApplication([])
