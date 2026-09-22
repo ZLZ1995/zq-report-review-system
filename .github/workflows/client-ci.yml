@@ -28,7 +28,7 @@ jobs:
         run: >-
           python -m pip install -r deploy\report_review_server\requirements.txt
           pytest cryptography httpx pyyaml PySide6 pywin32 python-docx openpyxl pdfplumber
-          ruff pyinstaller
+          xlrd xlwt ruff pyinstaller
       - name: Run client static and security checks
         shell: cmd
         run: >-
@@ -67,7 +67,7 @@ jobs:
         shell: cmd
         run: >-
           python -m pip install -r deploy\report_review_server\requirements.txt
-          PySide6 pywin32 python-docx openpyxl pdfplumber pyyaml pyinstaller packaging
+          PySide6 pywin32 python-docx openpyxl pdfplumber pyyaml xlrd pyinstaller packaging
       - name: Build and package immutable Windows candidate
         shell: cmd
         run: >-
