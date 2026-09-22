@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import ClassVar
 
 from PySide6.QtCore import (
     QEvent,
@@ -32,6 +33,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -48,6 +50,7 @@ from PySide6.QtWidgets import (
 from .agent_controller import ClarificationContextLimit
 from .composer import ChatComposer
 from .execution import execute_task
+from .file_panel import build_file_rows, file_detail_text, filter_rows, row_label
 from .project_catalog import ProjectCatalog
 from .release_info import CLIENT_VERSION, inspect_server, local_release, release_details
 from .skills import BUILTINS, GENERATORS, REVIEW, SkillRegistry, digest
@@ -216,6 +219,8 @@ class PlatformWindow(QMainWindow):
         self._agent_operation_id = None
         self._agent_user_message_id = None
         self._agent_user_text = ''
+        self._file_rows = []
+        self._file_records = {}
         self._approval_requested.connect(self._handle_approval_request)
         self.network_state = "connected"
         self.setWindowTitle(
@@ -776,8 +781,32 @@ class PlatformWindow(QMainWindow):
         caption = QLabel("资料仅在本地读取\n隐藏工作表会自动排除")
         caption.setObjectName("muted")
         file_layout.addWidget(caption)
+        self.file_search = QLineEdit()
+        self.file_search.setObjectName("fileSearch")
+        self.file_search.setPlaceholderText("搜索文件名")
+        self.file_search.setClearButtonEnabled(True)
+        file_layout.addWidget(self.file_search)
+        self.file_filter = QComboBox()
+        self.file_filter.setObjectName("fileFilter")
+        self.file_filter.addItems(["全部文件", "本轮已选", "未使用", "已用于任务"])
+        file_layout.addWidget(self.file_filter)
+        batch_row = QHBoxLayout()
+        self.file_select_visible = QPushButton("全选可见")
+        self.file_clear_visible = QPushButton("取消可见")
+        batch_row.addWidget(self.file_select_visible)
+        batch_row.addWidget(self.file_clear_visible)
+        file_layout.addLayout(batch_row)
         file_layout.addWidget(self.files, 1)
+        self.file_detail = QLabel("双击文件查看详情")
+        self.file_detail.setObjectName("muted")
+        self.file_detail.setWordWrap(True)
+        file_layout.addWidget(self.file_detail)
         self.details.addTab(file_page, "文件")
+        self.file_search.textChanged.connect(self._apply_file_filter)
+        self.file_filter.currentIndexChanged.connect(self._apply_file_filter)
+        self.file_select_visible.clicked.connect(self.select_visible_files)
+        self.file_clear_visible.clicked.connect(self.clear_visible_files)
+        self.files.itemDoubleClicked.connect(self.show_file_detail)
         memory_page = QWidget()
         memory_layout = QVBoxLayout(memory_page)
         memory_layout.addWidget(
@@ -1750,17 +1779,21 @@ class PlatformWindow(QMainWindow):
         self.files.clear()
         self.memories.clear()
         if not self.project_id:
+            self._file_rows = []
+            self._file_records = {}
             return
         files = self.store.files(self.project_id)
-        for item in files:
-            row = QListWidgetItem(
-                f"{item['name']}\n{item['size']:,} bytes · {item['sha256'][:10]}"
-            )
-            row.setData(Qt.ItemDataRole.UserRole, item["id"])
+        self._file_records = {item['id']: item for item in files}
+        self._file_rows = build_file_rows(
+            files, selected_ids=set(selected_ids),
+            used_ids=self._used_file_ids())
+        for view in self._file_rows:
+            row = QListWidgetItem(row_label(view, files_map={}))
+            row.setData(Qt.ItemDataRole.UserRole, view.file_id)
             row.setFlags(row.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             row.setCheckState(
                 Qt.CheckState.Checked
-                if item["id"] in selected_ids
+                if view.selected
                 else Qt.CheckState.Unchecked
             )
             self.files.addItem(row)
@@ -1775,7 +1808,66 @@ class PlatformWindow(QMainWindow):
                 row.setFlags(row.flags() & ~Qt.ItemFlag.ItemIsEnabled)
             self.memories.addItem(row)
         del blocker
+        self._apply_file_filter()
         self.save_current_draft()
+
+    def _used_file_ids(self):
+        """历史任务快照中真实使用过的文件 id 集合。"""
+        used = set()
+        if not self.project_id:
+            return used
+        for session in self.store.sessions(self.project_id):
+            for run in self.store.runs(session['id']):
+                try:
+                    snapshot = json.loads(run.get('snapshot') or '{}')
+                except (TypeError, ValueError):
+                    continue
+                for entry in snapshot.get('selected_files') or []:
+                    file_id = entry.get('id') if isinstance(entry, dict) else None
+                    if file_id:
+                        used.add(file_id)
+        return used
+
+    _FILE_FILTER_KINDS: ClassVar = {
+        '全部文件': 'all',
+        '本轮已选': 'selected',
+        '未使用': 'unused',
+        '已用于任务': 'used',
+    }
+
+    def _apply_file_filter(self, *_args):
+        kind = self._FILE_FILTER_KINDS.get(self.file_filter.currentText(), 'all')
+        visible = {
+            row.file_id
+            for row in filter_rows(self._file_rows, self.file_search.text(), kind)
+        }
+        for i in range(self.files.count()):
+            item = self.files.item(i)
+            item.setHidden(item.data(Qt.ItemDataRole.UserRole) not in visible)
+
+    def _set_visible_check_state(self, state):
+        blocker = QSignalBlocker(self.files)
+        for i in range(self.files.count()):
+            item = self.files.item(i)
+            if not item.isHidden():
+                item.setCheckState(state)
+        del blocker
+        self.save_current_draft()
+
+    def select_visible_files(self):
+        self._set_visible_check_state(Qt.CheckState.Checked)
+
+    def clear_visible_files(self):
+        self._set_visible_check_state(Qt.CheckState.Unchecked)
+
+    def show_file_detail(self, item):
+        file_id = item.data(Qt.ItemDataRole.UserRole)
+        record = self._file_records.get(file_id)
+        view = next((r for r in self._file_rows if r.file_id == file_id), None)
+        if record is None or view is None:
+            return
+        self.file_detail.setText(file_detail_text(
+            view, sha256=record['sha256'], path=record.get('path', '')))
 
     def add_files(self):
         if not self.project_id or not self.attach.isEnabled():

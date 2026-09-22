@@ -106,3 +106,9 @@ CI 基线: technical-platform-client / report-review-server 在 879a4aa 均 succ
 阶段结论（续）：
 - S9 已完成（2026-09-22）：运行状态卡/计时/stepper/stopping/waiting_user/终态摘要/按钮原因全部落地，12 项验收测试全绿；阶段报告见 remediation/s9/STAGE_REPORT.md
 - S10 已完成（2026-09-22）：消息层级卡片化/执行记录折叠/Error detail/diagnostics copy 全部落地，10 项验收测试全绿；阶段报告见 remediation/s10/STAGE_REPORT.md
+- S11 定向：先红（file_panel 模块不存在，收集错误）→ 实现后 1 failed（'未使用'过滤语义校准：fixture 补真实任务快照使用证据）→ 10 passed（tmp-pytest-s11h）
+- S11 回归：agent_rebuild 475 passed/9 xfailed；report_review_server+fault_injection 322 passed/1 skipped；technical_platform 顶层 92+136+260+509+509+429（[p-z] 块含 S11 新增 10）全绿；app/acceptance/update/detail 块 364 passed
+- S11 落地：file_panel.py（角色识别/期间识别 YYYY年度·YYYYQn·YYYYMM/FileRowView/row_label 隐藏 hash/format_size/filter_rows/file_detail_text）；app.py 文件 tab 新增搜索框/过滤器（全部文件·本轮已选·未使用·已用于任务）/全选可见·取消可见批量操作/双击文件详情；勾选契约不变（UserRole=file id + checkState，搜索过滤只 setHidden 不重建 item）
+
+阶段结论（续）：
+- S11 已完成（2026-09-22）：文件角色/期间识别/本轮使用状态/搜索/过滤/批量选择/隐藏 hash/文件详情全部落地，10 项验收测试全绿；阶段报告见 remediation/s11/STAGE_REPORT.md
