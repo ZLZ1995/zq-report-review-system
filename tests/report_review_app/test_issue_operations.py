@@ -6,7 +6,9 @@ import pytest
 
 from asset_based_agent.report_review_app.domain.enums import IssueStatus, RiskLevel
 from asset_based_agent.report_review_app.domain.models import IssueLocation, ReviewIssue
-from asset_based_agent.report_review_app.repositories.issue_repository import IssueRepository
+from asset_based_agent.report_review_app.repositories.issue_repository import (
+    IssueRepository,
+)
 from asset_based_agent.report_review_app.services.advice_service import AdviceService
 from asset_based_agent.report_review_app.services.agent_gateway import AdviceResult
 from asset_based_agent.report_review_app.services.issue_service import (

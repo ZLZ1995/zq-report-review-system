@@ -1,5 +1,5 @@
-from asset_based_agent.technical_platform.agent_core.runtime import AgentKernel
 from asset_based_agent.technical_platform.agent_core.cancellation import CancelToken
+from asset_based_agent.technical_platform.agent_core.runtime import AgentKernel
 
 
 def test_kernel_cancel_open_tokens_is_synchronous():

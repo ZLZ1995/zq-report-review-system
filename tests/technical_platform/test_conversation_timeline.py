@@ -7,11 +7,12 @@
 - 不可唯一归属的 legacy run 进入独立旧成果区域，不挂在最新回复下；
 - live 状态插在对应用户消息之后，完成后消失。
 """
+from types import SimpleNamespace
+
 from asset_based_agent.technical_platform.conversation_timeline import (
     TimelineItem,
     project_timeline,
 )
-from types import SimpleNamespace
 
 
 def msg(mid, role, text, created='2026-09-01T09:00:00+00:00'):

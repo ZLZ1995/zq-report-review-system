@@ -1,4 +1,6 @@
-from asset_based_agent.technical_platform.business_tools.service import BusinessRunService
+from asset_based_agent.technical_platform.business_tools.service import (
+    BusinessRunService,
+)
 from asset_based_agent.technical_platform.business_tools.tools import business_tools
 from asset_based_agent.technical_platform.store import PlatformStore
 

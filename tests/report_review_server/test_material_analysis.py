@@ -4,7 +4,10 @@ from types import SimpleNamespace
 import pytest
 
 from asset_based_agent.report_review_server.services.auth_service import ServiceError
-from asset_based_agent.report_review_server.services.material_analysis import MaterialRequest, analyze_materials
+from asset_based_agent.report_review_server.services.material_analysis import (
+    MaterialRequest,
+    analyze_materials,
+)
 
 
 def test_material_analysis_uses_metering_and_returns_no_costs():

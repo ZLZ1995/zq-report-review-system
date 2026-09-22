@@ -18,7 +18,10 @@ def _manifest(sequence: int = 1) -> dict[str, object]:
 
 def test_release_registry_requires_signed_manifest_and_audits_transitions(client, monkeypatch):
     from asset_based_agent.report_review_server.services import client_release_service
-    from asset_based_agent.report_review_server.services.client_release_service import DOMAIN, canonical_payload
+    from asset_based_agent.report_review_server.services.client_release_service import (
+        DOMAIN,
+        canonical_payload,
+    )
     private_key = Ed25519PrivateKey.generate()
     key_id = "test-release-key"
     monkeypatch.setattr(client_release_service, "PUBLIC_KEYS", {key_id: private_key.public_key().public_bytes_raw()})

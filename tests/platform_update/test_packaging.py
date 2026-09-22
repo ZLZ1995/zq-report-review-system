@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-
 PLATFORM_DIR = 'ZQ\u6280\u672f\u5e73\u53f0'
 UPDATER = f'{PLATFORM_DIR}\u66f4\u65b0\u5668.exe'
 LAUNCHER = f'{PLATFORM_DIR}\u542f\u52a8\u5668.exe'

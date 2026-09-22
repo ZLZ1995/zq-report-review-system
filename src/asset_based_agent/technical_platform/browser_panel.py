@@ -1,10 +1,9 @@
 """Standalone, lazily opened browser panel; no site is privileged or preloaded."""
 import sqlite3
+import threading
 from typing import cast
 
-import threading
-
-from PySide6.QtCore import QThread, QTimer, QUrl, Qt, Signal
+from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWebEngineCore import QWebEngineNewWindowRequest
 from PySide6.QtWebEngineWidgets import QWebEngineView

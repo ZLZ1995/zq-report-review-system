@@ -4,8 +4,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
-from openpyxl import Workbook
 import pytest
+from openpyxl import Workbook
 
 
 def load_pipeline_module():

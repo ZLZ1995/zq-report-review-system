@@ -97,7 +97,7 @@ def test_admin_adjustment_allows_negative_balance(client: TestClient) -> None:
     assert result.json()["balance"] == "-15.50"
     with client.app.state.session_factory() as db:
         entries = list(db.scalars(select(WalletLedger).where(WalletLedger.user_id == user_id)))
-    assert sum((entry.amount for entry in entries), Decimal("0")) == Decimal("-15.50000000")
+    assert sum((entry.amount for entry in entries), Decimal(0)) == Decimal("-15.50000000")
 
 
 def test_public_model_list_does_not_disclose_prices_or_multipliers(

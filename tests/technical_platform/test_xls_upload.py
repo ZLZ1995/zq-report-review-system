@@ -200,7 +200,9 @@ def make_statement_xls(path):
 
 
 def test_statement_metadata_reads_xls_headers(tmp_path):
-    from asset_based_agent.technical_platform.material_analysis import statement_metadata
+    from asset_based_agent.technical_platform.material_analysis import (
+        statement_metadata,
+    )
     source = tmp_path / 'A8T-BS202607.xls'
     make_statement_xls(source)
     entity, period, evidence = statement_metadata(source)

@@ -11,7 +11,6 @@ never tokens, cookies, absolute paths, or business content.
 """
 import json
 import sys
-import time
 import unittest
 from pathlib import Path
 

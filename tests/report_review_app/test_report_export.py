@@ -16,7 +16,9 @@ from asset_based_agent.report_review_app.domain.models import (
     IssueLocation,
     ReviewIssue,
 )
-from asset_based_agent.report_review_app.repositories.issue_repository import IssueRepository
+from asset_based_agent.report_review_app.repositories.issue_repository import (
+    IssueRepository,
+)
 from asset_based_agent.report_review_app.repositories.project_repository import (
     ProjectRepository,
 )

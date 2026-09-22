@@ -1,10 +1,11 @@
 """Model-assisted inventory; model output never authorizes arbitrary files or writes."""
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
-from typing import Literal, Mapping
+from typing import Literal
 
 from .material_summary import summarize_file
 from .skills import digest
@@ -280,7 +281,7 @@ def resolve_roles(plan, files):
     """Compatibility wrapper: single-value role mapping for legacy callers."""
     resolution = resolve_materials(plan, files)
     if resolution.status != 'resolved':
-        raise ValueError('存在多份同类资料，需要先确认本轮使用的主体和期间')  # noqa: TRY004
+        raise ValueError('存在多份同类资料，需要先确认本轮使用的主体和期间')
     return dict(resolution.selected)
 
 

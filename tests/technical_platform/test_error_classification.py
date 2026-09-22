@@ -5,7 +5,6 @@ errors must never masquerade as network failures; understanding-stage
 failures must state that the Skill never started; 422/409/5xx keep distinct
 safe codes; diagnostics log stage/class/code/ids and scrub secrets.
 """
-import json
 import logging
 import sys
 import unittest

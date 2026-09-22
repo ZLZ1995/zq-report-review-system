@@ -5,7 +5,11 @@ from pathlib import Path
 try:
     from ...agent_contracts import PlanningRequest, PlanProposal, validate_proposal
 except ModuleNotFoundError:  # pragma: no cover - legacy Zeabur build context
-    from ..compat_agent_contracts import PlanningRequest, PlanProposal, validate_proposal
+    from ..compat_agent_contracts import (
+        PlanningRequest,
+        PlanProposal,
+        validate_proposal,
+    )
 from .auth_service import ServiceError
 from .provider_gateway import NormalizedUsage
 

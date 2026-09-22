@@ -24,8 +24,8 @@ from .flags import FEATURE_FLAG_ORDER
 from .policies.engine import RuleBasedPolicyEngine
 from .policies.file_scope import project_file_scope
 from .sessions.sqlite_repository import SQLiteSessionRepo
-from .tools.browser_tools import BrowserToolError, build_browser_tools
 from .tools.assembly import CompositeToolResolver
+from .tools.browser_tools import BrowserToolError, build_browser_tools
 
 MODE_MAP = {'request': 'request', 'risk': 'assisted', 'full': 'full'}
 
@@ -133,9 +133,7 @@ class AgentGateway:
         active = []
         for tool in business_tools(service):
             category = _BUSINESS_TOOL_CATEGORY.get(tool.descriptor.name)
-            if category is not None and self._enabled(category):
-                active.append(tool)
-            elif (category is None and skill_enabled
+            if category is not None and self._enabled(category) or (category is None and skill_enabled
                   and tool.descriptor.name in _SKILL_TOOL_NAMES):
                 active.append(tool)
         return active

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 import httpx
 
@@ -194,7 +194,7 @@ def iter_openai_stream_events(
     """
     started = False
     done_seen = False
-    tool_buffers: dict[int, dict[str, object]] = {}
+    tool_buffers: dict[int, dict[str, Any]] = {}
     finish_reason: str | None = None
     usage: dict[str, int] | None = None
     for raw in lines:

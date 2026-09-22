@@ -10,12 +10,13 @@ import re
 import uuid
 from collections.abc import Mapping
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from ..models import ClientRelease, ClientReleaseAudit
+
 DOMAIN = b'ZQ-CLIENT-RELEASE-v1\x00'
 PUBLIC_KEYS = {'zq-release-20260917': base64.b64decode('GwMV2oe4mWUq9MQDsfkeGLRMGWFoMhTiAngTSUrsqlU=')}
 

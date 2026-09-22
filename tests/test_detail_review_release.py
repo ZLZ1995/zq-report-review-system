@@ -3,7 +3,6 @@ import json
 
 import pytest
 from openpyxl import Workbook
-
 from test_detail_workbook_pipeline_guards import load_pipeline_module
 
 
@@ -198,8 +197,9 @@ def test_cli_failure_always_emits_user_feedback(tmp_path):
 @pytest.mark.parametrize('source_account', ['应付账款', '无法识别的往来'])
 def test_pipeline_review_reopens_actual_counterparty_source(tmp_path, source_account):
     from types import SimpleNamespace
-    from test_detail_cover_metadata import statement
+
     from openpyxl import load_workbook
+    from test_detail_cover_metadata import statement
     p = load_pipeline_module()
     m = review_module()
     bs = statement(tmp_path / 'bs.xlsx', '2026年3月31日')

@@ -3,9 +3,17 @@ import json
 from pathlib import Path
 
 try:
-    from ...browser_contracts import BrowserStepProposal, BrowserStepRequest, validate_browser_step
+    from ...browser_contracts import (
+        BrowserStepProposal,
+        BrowserStepRequest,
+        validate_browser_step,
+    )
 except ModuleNotFoundError:  # pragma: no cover - legacy Zeabur build context
-    from ..compat_browser_contracts import BrowserStepProposal, BrowserStepRequest, validate_browser_step
+    from ..compat_browser_contracts import (
+        BrowserStepProposal,
+        BrowserStepRequest,
+        validate_browser_step,
+    )
 from .auth_service import ServiceError
 from .provider_gateway import NormalizedUsage
 

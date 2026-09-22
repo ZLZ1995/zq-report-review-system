@@ -3,7 +3,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from asset_based_agent.report_review_server.services.skill_routing import RouteRequest, route_skill
+from asset_based_agent.report_review_server.services.skill_routing import (
+    RouteRequest,
+    route_skill,
+)
 
 
 @pytest.mark.parametrize('identity', ['report.review', 'valuation-detail-workbook-fill', 'external.review', None])

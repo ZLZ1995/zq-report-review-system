@@ -148,7 +148,7 @@ class TaskWorker(QThread):
                 client=self.client,
             )
             self.completed.emit(result)
-        except Exception as exc:  # noqa: BLE001 - worker boundary records failure and reports to UI
+        except Exception as exc:
             # The harness owns state transitions; a rejected duplicate owns no run.
             self.failed.emit(str(exc))
 

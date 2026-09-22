@@ -24,7 +24,9 @@ from asset_based_agent.report_review_app.services.document_extraction_service im
     ExtractedDocument,
 )
 from asset_based_agent.report_review_app.services.file_service import FileImportService
-from asset_based_agent.report_review_app.services.privacy_filter import PrivacyChunkSelector
+from asset_based_agent.report_review_app.services.privacy_filter import (
+    PrivacyChunkSelector,
+)
 from asset_based_agent.report_review_app.services.review_llm_client import (
     OpenAICompatibleReviewLlm,
     ReviewNetworkError,

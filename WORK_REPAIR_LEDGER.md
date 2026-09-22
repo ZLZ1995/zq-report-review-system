@@ -90,3 +90,9 @@ CI 基线: technical-platform-client / report-review-server 在 879a4aa 均 succ
 - S5 已完成（2026-09-22）：导入事务化/凭据库并发/损坏项目可见/interrupted 状态收束全部落地，20 项验收测试全绿，全量回归无新增失败；阶段报告见 remediation/s5/STAGE_REPORT.md
 - S6 已完成（2026-09-22）：每会话独立 live render/executor 优雅关闭/客户端关闭 durable 检查点全部落地，9 项验收测试全绿，全量回归无新增失败；阶段报告见 remediation/s6/STAGE_REPORT.md
 - S7 已完成（2026-09-22）：登录失败锁定+递增延迟/refresh 重用检测撤销 family/实例绑定全部落地，9 项验收测试全绿，全量回归无新增失败；阶段报告见 remediation/s7/STAGE_REPORT.md
+- S8 定向：fault_injection 初跑 6 failed（语义校准）→ 12 passed；状态机属性初跑 6 failed → 15 passed；全仓 ruff 192 errors → baseline 冻结 133 + 自动修复 62 → 0 errors；mypy 优先模块 4 errors → 0；pip-audit 1 漏洞（cryptography PYSEC-2026-3552）→ 升 50.0.1 → 0
+- S8 回归：agent_rebuild 453 passed/9 xfailed；report_review_server+fault_injection 322 passed/1 skipped；technical_platform 顶层 92+136+260+509+419（含 S8 新增 10）全绿；app/acceptance/update/detail 块 364 passed
+- S8 新增门禁：client/server CI ruff 全仓化；server-ci 增 mypy 优先模块步骤；新增 security-ci.yml（pip-audit+bandit 高危门禁+gitleaks+requirements lock 检查，周一定时）；dependabot.yml（pip+github-actions）；pyproject.toml 冻结存量违规 per-file-ignores
+
+阶段结论（续）：
+- S8 已完成（2026-09-22）：全仓 Ruff baseline/类型检查/安全检查/故障注入 11 场景/七套状态机属性测试全部落地，27 项新用例全绿，全量回归无新增失败；阶段报告见 remediation/s8/STAGE_REPORT.md；S8-06 main 保护随最终推送执行

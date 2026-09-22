@@ -4,7 +4,11 @@ import json
 
 import pytest
 
-from asset_based_agent.report_review_app.domain.enums import FileRole, IssueStatus, RiskLevel
+from asset_based_agent.report_review_app.domain.enums import (
+    FileRole,
+    IssueStatus,
+    RiskLevel,
+)
 from asset_based_agent.report_review_app.domain.models import IssueLocation, ReviewIssue
 from asset_based_agent.report_review_app.services.agent_gateway import (
     AdviceRequest,

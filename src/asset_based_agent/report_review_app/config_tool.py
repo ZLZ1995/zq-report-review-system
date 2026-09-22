@@ -368,7 +368,7 @@ class ConfigToolWindow(QMainWindow):
         self.api_base_input.setText(status.api_base)
         provider_index = self.api_provider_input.findData(status.provider)
         self.api_provider_input.setCurrentIndex(
-            provider_index if provider_index >= 0 else 0
+            max(provider_index, 0)
         )
         self.api_wire_input.setCurrentText(status.wire_api)
         self.api_wire_input.setEnabled(status.provider != "deepseek")

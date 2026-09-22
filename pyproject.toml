@@ -1,0 +1,48 @@
+# S8-01 全仓 Ruff 基线配置
+# 策略：不 pin select，保持 ruff 工具链默认规则集；
+# 133 处存量违规按文件冻结在 per-file-ignores 中，新增文件必须零告警。
+[tool.ruff]
+target-version = "py310"
+
+# S8-02 mypy 类型检查：优先覆盖 agent_core / server billing / provider gateway /
+# review job / browser runtime / updates。宽松基线，禁止隐式 Any 扩散以外的存量逐一清理。
+[tool.mypy]
+python_version = "3.10"
+mypy_path = "src"
+ignore_missing_imports = true
+follow_imports = "silent"
+warn_unused_ignores = false
+warn_redundant_casts = true
+strict_optional = true
+show_error_codes = true
+
+[tool.ruff.lint.per-file-ignores]
+"src/asset_based_agent/llm/config.py" = ["BLE001"]
+"src/asset_based_agent/report_review_app/app.py" = ["ISC004"]
+"src/asset_based_agent/report_review_app/config_tool.py" = ["BLE001"]
+"src/asset_based_agent/report_review_app/services/audit_orchestrator.py" = ["FLY002"]
+"src/asset_based_agent/report_review_app/services/conversation_service.py" = ["FLY002"]
+"src/asset_based_agent/report_review_app/services/document_extraction_service.py" = ["BLE001", "PIE810"]
+"src/asset_based_agent/report_review_app/services/remote_auth_service.py" = ["BLE001", "S110"]
+"src/asset_based_agent/report_review_app/services/review_llm_client.py" = ["TRY004"]
+"src/asset_based_agent/report_review_app/services/workbook_dependency_service.py" = ["BLE001"]
+"src/asset_based_agent/report_review_app/ui/workbench_window.py" = ["BLE001"]
+"src/asset_based_agent/report_review_app/workers/function_worker.py" = ["BLE001"]
+"src/asset_based_agent/report_review_server/api.py" = ["B008", "S102"]
+"src/asset_based_agent/report_review_server/main.py" = ["S102"]
+"src/asset_based_agent/reporting/valuation_report_structure.py" = ["F841"]
+"src/asset_based_agent/technical_platform/app.py" = ["BLE001", "S112"]
+"src/asset_based_agent/technical_platform/material_summary.py" = ["BLE001"]
+"src/asset_based_agent/technical_platform/xls_support.py" = ["BLE001"]
+"tests/report_review_app/test_config_tool_window.py" = ["RUF007"]
+"tests/report_review_server/test_metered_model_service.py" = ["SIM117"]
+"tests/technical_platform/agent_rebuild/acceptance/test_gateway_production_wiring.py" = ["RUF059"]
+"tests/technical_platform/agent_rebuild/core/test_agent_core_contracts.py" = ["B017"]
+"tests/technical_platform/test_a8t_validation_consistency.py" = ["DTZ001"]
+"tests/technical_platform/test_delivery_presentation.py" = ["RUF059"]
+"tests/technical_platform/test_journal_candidate_unification.py" = ["DTZ001"]
+"tests/technical_platform/test_material_multiperiod.py" = ["RUF059"]
+"tests/technical_platform/test_payroll_advance_ar_page_fix.py" = ["DTZ001"]
+"tests/test_detail_cover_metadata.py" = ["DTZ001"]
+"tests/test_detail_review_release.py" = ["C408", "DTZ001", "PLW1510"]
+"tests/test_detail_scope_first.py" = ["DTZ001"]

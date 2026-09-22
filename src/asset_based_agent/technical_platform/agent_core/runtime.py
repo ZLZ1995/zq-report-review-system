@@ -328,14 +328,14 @@ class AgentKernel:
                 if policy not in AUTO_RESUME_POLICIES:
                     blocking.append((call.tool_name, policy))
             if blocking:
-                exc = ToolUnknownOutcome(
+                failure = ToolUnknownOutcome(
                     '存在不可判定副作用的工具调用，需人工核对后才能继续')
                 self.repo.fail_operation(
-                    operation_id, code=exc.code, summary=str(exc), turn_id=None)
+                    operation_id, code=failure.code, summary=str(failure), turn_id=None)
                 self._emit('operation_failed', session_id=operation.session_id,
                            lane_id=operation.lane_id, operation_id=operation_id,
-                           payload={'error_code': exc.code})
-                raise exc
+                           payload={'error_code': failure.code})
+                raise failure
         self.repo.resume_operation(operation_id)
         # 恢复即认领 lease：本进程成为新的执行 owner
         self.repo.heartbeat_operation(

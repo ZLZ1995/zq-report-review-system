@@ -8,7 +8,9 @@ from asset_based_agent.report_review_app.domain.models import AuditRound
 from asset_based_agent.report_review_app.repositories.project_repository import (
     ProjectRepository,
 )
-from asset_based_agent.report_review_app.services.recovery_service import RecoveryService
+from asset_based_agent.report_review_app.services.recovery_service import (
+    RecoveryService,
+)
 
 
 def test_network_paused_round_is_recoverable(tmp_path: Path) -> None:

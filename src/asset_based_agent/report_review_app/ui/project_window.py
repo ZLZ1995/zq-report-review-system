@@ -16,8 +16,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..services.project_service import ProjectDeletionError, ProjectService
 from ..branding import APPLICATION_NAME
+from ..services.project_service import ProjectDeletionError, ProjectService
 
 
 class ProjectWindow(QMainWindow):

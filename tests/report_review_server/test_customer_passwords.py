@@ -38,7 +38,10 @@ def test_change_reset_and_case_sensitive_login(client):
 
 
 def test_admin_policy_unchanged_and_legacy_hashes_still_verify():
-    from asset_based_agent.report_review_server.security import hash_password, verify_password
+    from asset_based_agent.report_review_server.security import (
+        hash_password,
+        verify_password,
+    )
     with pytest.raises(ValueError):
         hash_password("12345678")
     legacy = hash_password("LegacyPassword123!")
