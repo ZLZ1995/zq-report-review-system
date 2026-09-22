@@ -4,10 +4,24 @@ from __future__ import annotations
 
 import shutil
 import uuid
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from ..atomic_json import write_json_atomic
 from ..domain.models import AuditProject, utc_now
+
+
+@dataclass(frozen=True)
+class CorruptedProjectEntry:
+    """S5-03：损坏项目在列表中可见，而不是被静默吞掉。"""
+
+    project_id: str
+    name: str
+    path: str
+    error: str
+    updated_at: datetime
+    status: str = "corrupted"
 
 
 class ProjectRepository:
@@ -48,15 +62,26 @@ class ProjectRepository:
             raise FileNotFoundError(f"project not found: {project_id}")
         return AuditProject.model_validate_json(manifest.read_text(encoding="utf-8"))
 
-    def list(self) -> list[AuditProject]:
-        projects: list[AuditProject] = []
+    def list(self) -> list[AuditProject | CorruptedProjectEntry]:
+        """列出全部项目；损坏项目以 CorruptedProjectEntry 形式保留（S5-03）。"""
+        projects: list[AuditProject | CorruptedProjectEntry] = []
         for manifest in self.projects_root.glob(f"*/{self.MANIFEST_NAME}"):
             try:
                 projects.append(
                     AuditProject.model_validate_json(manifest.read_text(encoding="utf-8"))
                 )
             except (OSError, ValueError):
-                continue
+                try:
+                    mtime = manifest.stat().st_mtime
+                except OSError:
+                    mtime = 0.0
+                projects.append(CorruptedProjectEntry(
+                    project_id=manifest.parent.name,
+                    name=manifest.parent.name,
+                    path=str(manifest.parent),
+                    error="manifest_invalid",
+                    updated_at=datetime.fromtimestamp(mtime).astimezone(),
+                ))
         return sorted(projects, key=lambda item: item.updated_at, reverse=True)
 
     def delete(self, project_id: str) -> None:

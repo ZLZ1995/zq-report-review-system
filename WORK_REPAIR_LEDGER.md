@@ -30,10 +30,10 @@ CI 基线: technical-platform-client / report-review-server 在 879a4aa 均 succ
 - [x] S4-03 Tool Schema 限制（16KB 大小/16 深度/128 单对象 properties/512 总预算/required 必须对应 property/关键字白名单拒 $ref 递归爆炸）
 
 ## S5 本地文件与数据库一致性
-- [ ] S5-01 文件导入事务化
-- [ ] S5-02 CredentialVault 并发修复
-- [ ] S5-03 损坏项目可见
-- [ ] S5-04 统一旧 Task interrupted 状态
+- [x] S5-01 文件导入事务化（file_service.import_files 重写：预校验→digest 全算+批内重复检测→`.staging-<uuid>` 暂存→暂存 hash 复核→逐文件 os.replace→manifest 落库；任何一步失败回滚已移动文件并清理 staging；_unique_destination 加批内占位防同名冲突）
+- [x] S5-02 CredentialVault 并发修复（WAL + busy_timeout=5000 + BEGIN IMMEDIATE 升级写事务 + locked 重试 3 次；读路径不再升级锁；另修复并发安全检查两个 TOCTOU 瞬态误报：delete-pending 的 `$Extend\$Deleted` resolve 结果跳过、`\\?\` 扩展长度前缀规范化、stat FileNotFoundError 跳过）
+- [x] S5-03 损坏项目可见（CorruptedProjectEntry：manifest 解析失败项目以 status='corrupted' 出现在列表，UI 显示〈项目损坏/不可访问〉且禁止继续/删除误操作）
+- [x] S5-04 统一旧 Task interrupted 状态（状态机补 interrupted→{failed,running,cancelled}；claim_run 收紧为仅 queued/waiting_user 可领取，interrupted 须经对账后由恢复路径显式放行，保持 test_harness "不确定结果绝不继续" 语义）
 
 ## S6 客户端 UI / 多会话稳定性
 - [ ] S6-01 每会话独立 live render state
@@ -74,10 +74,13 @@ CI 基线: technical-platform-client / report-review-server 在 879a4aa 均 succ
 - S3 回归：report_review_server 263 passed/1 skipped；agent_rebuild 437 passed/9 xfailed；technical_platform 顶层分块 84+8+136+260+509+401=1398 全绿；report_review_app+agent_acceptance+platform_update+test_detail_scope_first 352 passed
 - S4 定向：修复前 25 failed + 1 收集错误（5 个通过项为合法用例守护）→ 修复后 40 passed
 - S4 回归：report_review_server 293 passed/1 skipped；agent_rebuild 447 passed/9 xfailed；technical_platform 顶层 92+136+260+509+401=1398 全绿；app/acceptance/update 块 352 passed
-- 存量问题：根目录 3 个 test_detail_*.py 缺 test_detail_workbook_pipeline_guards 模块，HEAD 即无法收集（留 S8）；services 层 browser_step/client_release_service/task_planning/task_understanding 存量 I001（留 S8）；api.py 67 处 B008（FastAPI 惯例，改动前后均为 67，零新增）
+- S5 定向：修复前 15 failed / 5 passed → 修复后 20 passed（并发用例连跑 3 遍稳定全绿）
+- S5 回归：agent_rebuild 447 passed/9 xfailed；report_review_server 293 passed/1 skipped；technical_platform 顶层 92+136+260+509+409（含 S5 新增 8）全绿；app/acceptance/update/detail 块 364 passed（含 S5 新增 12）
+- 存量问题：根目录 3 个 test_detail_*.py 缺 test_detail_workbook_pipeline_guards 模块，HEAD 即无法收集（留 S8）；services 层 browser_step/client_release_service/task_planning/task_understanding 存量 I001（留 S8）；ui/project_window.py 存量 I001（S5 改动该文件但 I001 为 HEAD 既有，留 S8 统一处理）；api.py 67 处 B008（FastAPI 惯例，改动前后均为 67，零新增）
 
 阶段结论：
 - S1 已完成（2026-09-22）：17 项验收测试全绿，全量回归无新增失败；阶段报告见 remediation/s1/STAGE_REPORT.md
 - S2 已完成（2026-09-22）：lease/恢复策略/对账接口全部落地，26 项验收测试全绿，全量回归无新增失败；阶段报告见 remediation/s2/STAGE_REPORT.md
 - S3 已完成（2026-09-22）：terminal guard/canonical replay/hold 对账/SSE 严格校验全部落地，27 项验收测试全绿，全量回归无新增失败；阶段报告见 remediation/s3/STAGE_REPORT.md
 - S4 已完成（2026-09-22）：ZIP 安全/SSRF/Tool Schema 全部落地，40 项验收测试全绿，全量回归无新增失败；阶段报告见 remediation/s4/STAGE_REPORT.md
+- S5 已完成（2026-09-22）：导入事务化/凭据库并发/损坏项目可见/interrupted 状态收束全部落地，20 项验收测试全绿，全量回归无新增失败；阶段报告见 remediation/s5/STAGE_REPORT.md

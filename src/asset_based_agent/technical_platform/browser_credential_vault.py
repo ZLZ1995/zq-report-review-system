@@ -2,9 +2,14 @@
 
 UI/trusted-fill code must supply real consent and verified page context. Boolean
 arguments here are defensive checks, not substitutes for Harness authorization.
+
+并发规则（S5-02）：纯读走普通读事务；写走 BEGIN IMMEDIATE；连接带
+busy_timeout，短暂锁冲突有限重试——不再 timeout=0 一刀切。
 """
 import json
 import sqlite3
+import stat
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from hashlib import sha256
@@ -14,6 +19,10 @@ from uuid import uuid4
 from .browser_policy import credential_origin
 from .browser_secrets import protect, unprotect
 from .storage_preferences import StoragePreferences
+
+_BUSY_TIMEOUT_MS = 5000
+_LOCK_RETRIES = 3
+_LOCK_RETRY_SLEEP = 0.05
 
 
 @dataclass(frozen=True)
@@ -53,23 +62,63 @@ class CredentialVault:
             return layout.credentials / f'{self.environment}.sqlite'
 
     @contextmanager
-    def _database(self):
+    def _database(self, *, write: bool = False):
         with self.preferences.use(self.owner) as layout:
             directory = layout.credentials
             directory.mkdir(parents=True, exist_ok=True)
             path = directory / f'{self.environment}.sqlite'
             for item in (path, Path(str(path)+'-journal'), Path(str(path)+'-wal'), Path(str(path)+'-shm')):
-                if (item.resolve() != item or item.is_symlink()
-                        or (item.exists() and (not item.is_file() or item.stat().st_nlink != 1))):
+                resolved = item.resolve()
+                # 并发下 WAL/journal 可能处于 delete-pending（回收中）：
+                # resolve() 会返回 NT 内部 $Extend\$Deleted 路径，属无害瞬态，跳过
+                if '$Deleted' in resolved.parts:
+                    continue
+                # resolve() 对已存在文件可能返回 \\?\ 扩展长度前缀形式，
+                # 与词法路径仅前缀不同，规范化后再比较
+                resolved_str = str(resolved)
+                if resolved_str.startswith('\\\\?\\UNC\\'):
+                    resolved = Path('\\\\' + resolved_str[8:])
+                elif resolved_str.startswith('\\\\?\\'):
+                    resolved = Path(resolved_str[4:])
+                if resolved != item or item.is_symlink():
                     raise ValueError('Credential storage path is unsafe')
-            db = sqlite3.connect(path, timeout=0)
+                try:
+                    item_stat = item.stat()
+                except FileNotFoundError:
+                    continue  # 并发下 WAL/journal 文件可能刚被回收
+                if not stat.S_ISREG(item_stat.st_mode) or item_stat.st_nlink != 1:
+                    raise ValueError('Credential storage path is unsafe')
+            db = sqlite3.connect(path, timeout=_BUSY_TIMEOUT_MS / 1000)
             try:
                 db.execute('PRAGMA foreign_keys=ON')
-                with db:
+                db.execute(f'PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}')
+                db.execute('PRAGMA journal_mode=WAL')
+                write = self._open(db, write=write)
+                yield db
+                if write:
+                    db.commit()
+            except BaseException:
+                db.rollback()
+                raise
+            finally:
+                db.close()
+
+    @staticmethod
+    def _open(db: sqlite3.Connection, *, write: bool) -> bool:
+        """打开事务并完成 schema 引导；返回最终是否为写事务。
+
+        写请求与未初始化库的读请求都会升级为 BEGIN IMMEDIATE；
+        短暂锁冲突按 _LOCK_RETRIES 重试。
+        """
+        attempts = _LOCK_RETRIES
+        while True:
+            try:
+                version = db.execute('PRAGMA user_version').fetchone()[0]
+                if version not in (0, 1, 2):
+                    raise ValueError('Unknown credential schema')
+                if write or version != 2:
                     db.execute('BEGIN IMMEDIATE')
-                    version = db.execute('PRAGMA user_version').fetchone()[0]
-                    if version not in (0, 1, 2):
-                        raise ValueError('Unknown credential schema')
+                    write = True
                     db.execute('PRAGMA secure_delete=ON')
                     db.execute('CREATE TABLE IF NOT EXISTS credentials '
                                '(key TEXT PRIMARY KEY, origin TEXT NOT NULL, sealed BLOB NOT NULL)')
@@ -77,9 +126,14 @@ class CredentialVault:
                     db.execute('CREATE TABLE IF NOT EXISTS agent_access '
                                '(key TEXT PRIMARY KEY REFERENCES credentials(key) ON DELETE CASCADE, sealed BLOB NOT NULL)')
                     db.execute('PRAGMA user_version=2')
-                    yield db
-            finally:
-                db.close()
+                return write
+            except sqlite3.OperationalError as exc:
+                if 'locked' in str(exc).lower() and attempts > 1:
+                    attempts -= 1
+                    db.rollback()
+                    time.sleep(_LOCK_RETRY_SLEEP)
+                    continue
+                raise
 
     def _context(self, key: str, origin: str) -> bytes:
         return json.dumps([self.owner, self.environment, origin, key], ensure_ascii=True).encode('utf-8')
@@ -95,7 +149,7 @@ class CredentialVault:
             raise ValueError('Saved website credential is unavailable') from None
 
     def entries(self) -> list[CredentialSummary]:
-        with self._database() as db:
+        with self._database(write=False) as db:
             return [CredentialSummary(key, origin, self._decode(key, origin, sealed).username,
                                       self._agent_allowed(db, key, origin, sealed), sha256(sealed).hexdigest())
                     for key, origin, sealed in db.execute('SELECT key,origin,sealed FROM credentials ORDER BY origin,key')]
@@ -108,7 +162,7 @@ class CredentialVault:
         if (not username or len(username) > 2048 or not password or len(password) > 8192
                 or '\x00' in username or '\x00' in password):
             raise ValueError('Invalid credential fields')
-        with self._database() as db:
+        with self._database(write=True) as db:
             row = db.execute('SELECT policy FROM prompts WHERE origin=?', (origin,)).fetchone()
             if row and row[0] == 'never':
                 raise PermissionError('Saving disabled for this website')
@@ -143,7 +197,7 @@ class CredentialVault:
             raise PermissionError('Agent access requires explicit local confirmation')
         if not isinstance(allowed, bool):
             raise TypeError('Invalid Agent access setting')
-        with self._database() as db:
+        with self._database(write=True) as db:
             row = db.execute('SELECT origin,sealed FROM credentials WHERE key=?', (key,)).fetchone()
             if row is None:
                 raise ValueError('Credential missing')
@@ -161,7 +215,7 @@ class CredentialVault:
     def agent_accounts(self, url: str) -> list[AgentAccount]:
         """Only already-authorized references; callers still enforce task scope."""
         origin = credential_origin(url)
-        with self._database() as db:
+        with self._database(write=False) as db:
             accounts = []
             for key, sealed in db.execute('SELECT key,sealed FROM credentials WHERE origin=? ORDER BY key', (origin,)):
                 if self._agent_allowed(db, key, origin, sealed):
@@ -174,7 +228,7 @@ class CredentialVault:
     def _for_agent_fill(self, key: str, page_url: str) -> LocalLogin:
         """Trusted caller only; task/tab authority must ALSO be checked by Harness."""
         origin = credential_origin(page_url)
-        with self._database() as db:
+        with self._database(write=False) as db:
             row = db.execute('SELECT sealed FROM credentials WHERE key=? AND origin=?', (key, origin)).fetchone()
             if row is None or not self._agent_allowed(db, key, origin, row[0]):
                 raise PermissionError('Agent use is not authorized for this website account')
@@ -185,7 +239,7 @@ class CredentialVault:
         if authorized is not True:
             raise PermissionError('Credential use requires authorization')
         origin = credential_origin(page_url)
-        with self._database() as db:
+        with self._database(write=False) as db:
             row = db.execute('SELECT sealed FROM credentials WHERE key=? AND origin=?', (key, origin)).fetchone()
             if row is None:
                 raise PermissionError('Credential does not match the website')
@@ -194,7 +248,7 @@ class CredentialVault:
     def delete(self, key: str, *, confirmed: bool) -> None:
         if confirmed is not True:
             raise PermissionError('Credential deletion requires confirmation')
-        with self._database() as db:
+        with self._database(write=True) as db:
             db.execute('DELETE FROM credentials WHERE key=?', (key,))
 
     def set_prompt(self, url: str, policy: str, *, confirmed: bool) -> None:
@@ -203,17 +257,17 @@ class CredentialVault:
         if policy not in {'ask', 'never'}:
             raise ValueError('Unknown prompt policy')
         origin = credential_origin(url)
-        with self._database() as db:
+        with self._database(write=True) as db:
             db.execute('INSERT INTO prompts VALUES(?,?) ON CONFLICT(origin) DO UPDATE SET policy=excluded.policy',
                        (origin, policy))
 
     def prompt_policy(self, url: str) -> str:
         origin = credential_origin(url)
-        with self._database() as db:
+        with self._database(write=False) as db:
             row = db.execute('SELECT policy FROM prompts WHERE origin=?', (origin,)).fetchone()
             return row[0] if row else 'ask'
 
     def blocked_sites(self) -> list[str]:
-        with self._database() as db:
+        with self._database(write=False) as db:
             return [credential_origin(row[0]) for row in db.execute(
                 "SELECT origin FROM prompts WHERE policy='never' ORDER BY origin")]
