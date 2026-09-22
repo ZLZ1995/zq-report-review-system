@@ -11,6 +11,10 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import logging
+
+logger = logging.getLogger(__name__)
 
 from .agent_core.context_builder import ContextBuilder
 from .agent_core.runtime import AgentKernel
@@ -248,6 +252,9 @@ class AgentGateway:
             # Reconcile those durable open operations before admitting a new
             # turn; otherwise the stale lane remains busy forever.
             asyncio.run(kernel.recover(self._session_id))
+            # S2-03：recover 收束出的 unknown operation 按服务端真实状态对账
+            # （succeeded→replay / failed→本地 fail / uncertain→人工对账）。
+            self._reconcile_unknown(kernel)
             asyncio.run(kernel.submit(
                 self._session_id, 'main',
                 {'text': text, 'model_id': self._model_id,
@@ -281,6 +288,35 @@ class AgentGateway:
                      and not e.payload.get('intermediate')
                      and (operation_id is None or e.operation_id == operation_id)]
         return assistant[-1].payload.get('text', '') if assistant else ''
+
+    # ------------------------------------------------------------ 对账
+
+    @staticmethod
+    def _sync_awaitable(value):
+        if inspect.isawaitable(value):
+            return asyncio.run(value)
+        return value
+
+    def _reconcile_unknown(self, kernel) -> None:
+        """S2-03：对账 unknown operation。ModelPort 无对账能力（如测试替身）
+        时安全跳过；单个 operation 对账失败不影响其余与新轮次。"""
+        from .agent_core.reconciliation import reconcile_unknown_operation
+
+        port = kernel.model
+        query_fn = getattr(port, 'reconcile_request', None)
+        if query_fn is None:
+            return
+        replay_fn = getattr(port, 'replay_request', None)
+        for operation in self.repo.unknown_operations(self._session_id):
+            try:
+                reconcile_unknown_operation(
+                    self.repo, operation.id,
+                    query=lambda rid: self._sync_awaitable(query_fn(rid)),
+                    replay=(lambda rid: self._sync_awaitable(replay_fn(rid))
+                            if replay_fn is not None else None))
+            except Exception:  # 对账失败保留 unknown 待下轮
+                logger.warning('operation 对账失败，保留 unknown: %s',
+                               operation.id, exc_info=True)
 
     def stop(self) -> None:
         """中止本网关全部活动 operation；无活动时安全返回。"""

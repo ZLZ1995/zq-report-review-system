@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
 from uuid import uuid4
@@ -37,6 +37,13 @@ _EMPTY_SHA = sha256(b'{}').hexdigest()
 
 def _now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def _lease_expiry(lease_seconds):
+    if lease_seconds is None:
+        return None
+    return (datetime.now(timezone.utc)
+            + timedelta(seconds=float(lease_seconds))).isoformat()
 
 
 class SQLiteSessionRepo:
@@ -258,10 +265,13 @@ class SQLiteSessionRepo:
     # ---------------------------------------------------------- operations
 
     def begin_operation(self, session_id, lane_id, *, user_text, request_id,
-                        kind='consult', model_id=None):
+                        kind='consult', model_id=None, executor_id=None,
+                        lease_seconds=None):
         if kind not in OPERATION_KINDS:
             raise ValueError(f'非法 operation 类型: {kind}')
         now = _now()
+        lease_expires_at = _lease_expiry(lease_seconds) if executor_id else None
+        last_heartbeat_at = now if executor_id else None
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             lane = self._lane(db, session_id, lane_id)
@@ -283,11 +293,13 @@ class SQLiteSessionRepo:
                     '(id,session_id,lane_id,kind,status,request_id,source_entry_id,'
                     'accepted_context_sha256,model_id,permission_snapshot_json,'
                     'file_scope_snapshot_json,resource_snapshot_json,recovery_policy,'
-                    'accepted_at,started_at,schema_version) '
-                    'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                    'accepted_at,started_at,schema_version,'
+                    'executor_id,lease_expires_at,last_heartbeat_at) '
+                    'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                     (operation_id, session_id, lane_id, kind, 'running', request_id,
                      source.id, _EMPTY_SHA, model_id, '{}', '{}', '{}', 'manual', now, now,
-                     SESSION_SCHEMA_VERSION))
+                     SESSION_SCHEMA_VERSION,
+                     executor_id, lease_expires_at, last_heartbeat_at))
             except sqlite3.IntegrityError as exc:
                 if 'one_open_operation_per_lane' in str(exc):
                     raise OperationBusy('本会话分支正在处理上一条消息') from exc
@@ -299,7 +311,9 @@ class SQLiteSessionRepo:
                              lane_id=lane_id, request_id=request_id,
                              source_entry_id=source.id, kind=kind,
                              status='running', accepted_at=now, started_at=now,
-                             model_id=model_id)
+                             model_id=model_id, executor_id=executor_id,
+                             lease_expires_at=lease_expires_at,
+                             last_heartbeat_at=last_heartbeat_at)
 
     def _operation_row(self, db, operation_id):
         row = db.execute(
@@ -321,7 +335,10 @@ class SQLiteSessionRepo:
             current_turn_id=row['current_turn_id'], error_code=row['error_code'],
             error_summary=row['error_summary'], accepted_at=row['accepted_at'],
             started_at=row['started_at'], finished_at=row['finished_at'],
-            recovery_policy=row['recovery_policy'])
+            recovery_policy=row['recovery_policy'],
+            executor_id=row['executor_id'],
+            lease_expires_at=row['lease_expires_at'],
+            last_heartbeat_at=row['last_heartbeat_at'])
 
     def open_operations(self, session_id=None):
         query = ('SELECT o.id FROM agent_operations o '
@@ -329,6 +346,33 @@ class SQLiteSessionRepo:
                  f"WHERE o.status IN ({','.join('?' * len(OPEN_STATUSES))}) "
                  'AND s.owner_id=?')
         params = [*sorted(OPEN_STATUSES), self.owner]
+        if session_id is not None:
+            query += ' AND o.session_id=?'
+            params.append(session_id)
+        with self.connect() as db:
+            rows = db.execute(query, params).fetchall()
+        return [self.get_operation(row['id']) for row in rows]
+
+    def heartbeat_operation(self, operation_id, executor_id, lease_seconds):
+        """S2-01：刷新执行 lease；非 open 状态安全返回 False。"""
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = self._operation_row(db, operation_id)
+            if row['status'] not in OPEN_STATUSES:
+                db.rollback()
+                return False
+            db.execute(
+                'UPDATE agent_operations SET executor_id=?, '
+                'last_heartbeat_at=?, lease_expires_at=? WHERE id=?',
+                (executor_id, _now(), _lease_expiry(lease_seconds),
+                 operation_id))
+        return True
+
+    def unknown_operations(self, session_id=None):
+        query = ('SELECT o.id FROM agent_operations o '
+                 'JOIN agent_sessions s ON s.id=o.session_id '
+                 "WHERE o.status='unknown' AND s.owner_id=?")
+        params = [self.owner]
         if session_id is not None:
             query += ' AND o.session_id=?'
             params.append(session_id)

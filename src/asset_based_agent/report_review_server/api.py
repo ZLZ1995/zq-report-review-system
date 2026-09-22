@@ -527,6 +527,41 @@ def create_app(
             headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
         )
 
+    @app.get('/api/v1/agent/completions/{client_request_id}')
+    def agent_completion_reconcile(client_request_id: str,
+                                   request: Request,
+                                   context: AuthContext = Depends(get_context),
+                                   db: Session = Depends(get_db)):
+        """S2-03：客户端断线/崩溃后按 client_request_id 对账请求状态。"""
+        service = AgentCompletionService(
+            request.app.state.review_job_service.metered,
+            request.app.state.session_factory,
+        )
+        result = service.reconcile(
+            db, user_id=context.user.user_id,
+            client_request_id=client_request_id)
+        if result is None:
+            raise ServiceError(
+                'completion_not_found', '没有该请求的记录。', 404)
+        return result
+
+    @app.get('/api/v1/agent/completions/{client_request_id}/replay')
+    def agent_completion_replay(client_request_id: str,
+                                request: Request,
+                                context: AuthContext = Depends(get_context),
+                                db: Session = Depends(get_db)):
+        """S2-03：对账回放——按 client_request_id 取回已存储的事件流。"""
+        service = AgentCompletionService(
+            request.app.state.review_job_service.metered,
+            request.app.state.session_factory,
+        )
+        replay = service.replay_by_request_id(
+            db, user_id=context.user.user_id,
+            client_request_id=client_request_id)
+        return {'events': replay.events,
+                'billing_request_id': replay.billing_request_id,
+                'charged_amount': str(replay.charged_amount)}
+
     @app.post('/api/v1/skill-route', response_model=RoutePlan)
     def skill_route(payload: RouteRequest, request: Request,
                     context: AuthContext = Depends(get_context), db: Session = Depends(get_db)):

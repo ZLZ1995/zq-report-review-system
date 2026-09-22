@@ -83,7 +83,8 @@ class Operation:
                  kind='consult', status='running', current_turn_id=None,
                  error_code=None, error_summary=None, accepted_at=None,
                  started_at=None, finished_at=None, recovery_policy='manual',
-                 model_id=None):
+                 model_id=None, executor_id=None, lease_expires_at=None,
+                 last_heartbeat_at=None):
         self.id = id
         self.session_id = session_id
         self.lane_id = lane_id
@@ -99,3 +100,6 @@ class Operation:
         self.started_at = started_at
         self.finished_at = finished_at
         self.recovery_policy = recovery_policy
+        self.executor_id = executor_id
+        self.lease_expires_at = lease_expires_at
+        self.last_heartbeat_at = last_heartbeat_at

@@ -35,7 +35,7 @@ def test_fresh_store_is_v13_with_agent_tables(tmp_path):
     from asset_based_agent.technical_platform.store import PlatformStore
     store = PlatformStore(tmp_path / 'db.sqlite', 'alice')
     with sqlite3.connect(store.path) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 15
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 16
         tables = {row[0] for row in db.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
     assert AGENT_TABLES <= tables
@@ -50,7 +50,7 @@ def test_v12_database_migrates_with_verified_backup_and_preserves_rows(tmp_path)
     backup = migrate_database(path)
     assert backup is not None and backup.is_file(), '迁移必须返回一致性备份'
     with sqlite3.connect(path) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 15
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 16
         assert db.execute('PRAGMA quick_check').fetchone()[0] == 'ok'
         tables = {row[0] for row in db.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}

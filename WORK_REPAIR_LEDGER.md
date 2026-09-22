@@ -14,9 +14,9 @@ CI 基线: technical-platform-client / report-review-server 在 879a4aa 均 succ
 - [x] S1-05 registry cleanup（kernel._tasks done-callback 清理；gateway open 集合 unknown 清理）
 
 ## S2 Recovery / Reconciliation
-- [ ] S2-01 执行 Lease
-- [ ] S2-02 Tool Recovery Policy
-- [ ] S2-03 客户端/服务端请求对账接口
+- [x] S2-01 执行 Lease（SCHEMA_VERSION 16：agent_operations 加 executor_id/lease_expires_at/last_heartbeat_at；kernel 心跳 + recover 跳活 lease + resume 认领）
+- [x] S2-02 Tool Recovery Policy（contracts 策略表 + ToolDescriptor.recovery_policy；resume 对 open/unknown 工具按策略放行或 tool.unknown_outcome 拒绝）
+- [x] S2-03 客户端/服务端请求对账接口（agent_core/reconciliation.py；服务端 GET /completions/{id} 与 /replay；ServerModelPort.reconcile_request/replay_request；gateway recover 后对账）
 
 ## S3 服务端计费与流式一致性
 - [ ] S3-01 AgentCompletionService terminal guard
@@ -68,8 +68,10 @@ CI 基线: technical-platform-client / report-review-server 在 879a4aa 均 succ
 测试：
 - S1 定向：修复前 16 failed/1 passed（tmp-pytest-s1red）→ 修复后 17 passed
 - S1 回归：agent_rebuild 419 passed/9 xfailed；technical_platform 顶层分块 1398 passed；report_review_server 228 passed/1 skipped；report_review_app+agent_acceptance+platform_update 352 passed
+- S2 定向：修复前 19 failed（5 文件）→ 修复后 26 passed
+- S2 回归：agent_rebuild 437 passed/9 xfailed；report_review_server 236 passed/1 skipped；technical_platform 顶层分块 92+136+260+509+753 全绿；report_review_app+agent_acceptance+platform_update 352 passed
 - 存量问题：根目录 3 个 test_detail_*.py 缺 test_detail_workbook_pipeline_guards 模块，HEAD 即无法收集（留 S8）
 
 阶段结论：
 - S1 已完成（2026-09-22）：17 项验收测试全绿，全量回归无新增失败；阶段报告见 remediation/s1/STAGE_REPORT.md
-- S2 待开始
+- S2 已完成（2026-09-22）：lease/恢复策略/对账接口全部落地，26 项验收测试全绿，全量回归无新增失败；阶段报告见 remediation/s2/STAGE_REPORT.md

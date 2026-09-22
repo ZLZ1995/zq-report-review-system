@@ -13,8 +13,9 @@ def test_release_identity_tracks_current_schema_for_next_release():
 
     # The next release carries the current local schema.  The online
     # 0.2.10 release is schema 11, so this candidate must not claim 12.
+    # S2-01 起 schema 升至 16（agent_operations 执行 lease 三列）。
     assert CLIENT_VERSION == '0.2.11'
-    assert SCHEMA_VERSION == 15
+    assert SCHEMA_VERSION == 16
 
 
 def test_local_release_contains_actual_rule_hash():

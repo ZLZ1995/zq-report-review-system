@@ -4,7 +4,7 @@ FakeModelPort / FakeTool / InMemorySessionRepo 实现与生产相同的契约，
 供单元测试、contract tests 和 S13 Shadow Mode 复用。
 """
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from uuid import uuid4
 
@@ -36,6 +36,14 @@ FACT_STATUS_TRANSITIONS = {
 
 def _now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def _lease_expiry(lease_seconds):
+    """lease 过期时间；None/非数值表示不带 lease（无 owner）。"""
+    if lease_seconds is None:
+        return None
+    return (datetime.now(timezone.utc)
+            + timedelta(seconds=float(lease_seconds))).isoformat()
 
 
 TURN_OPEN_STATUSES = frozenset(
@@ -94,6 +102,9 @@ class Operation:
         self.resource_snapshot = []
         self.accepted_at = _now()
         self.finished_at = None
+        self.executor_id = None
+        self.lease_expires_at = None
+        self.last_heartbeat_at = None
 
 
 class InMemorySessionRepo:
@@ -302,7 +313,7 @@ class InMemorySessionRepo:
     # ---------------------------------------------------------- operations
 
     def begin_operation(self, session_id, lane_id, *, user_text, request_id,
-                        kind='consult'):
+                        kind='consult', executor_id=None, lease_seconds=None):
         if kind not in OPERATION_KINDS:
             raise ValueError(f'非法 operation 类型: {kind}')
         if (session_id, lane_id) not in self._lanes:
@@ -318,11 +329,30 @@ class InMemorySessionRepo:
         operation = Operation(id=uuid4().hex, session_id=session_id,
                               lane_id=lane_id, request_id=request_id,
                               source_entry_id=source.id, kind=kind)
+        if executor_id:
+            operation.executor_id = executor_id
+            operation.last_heartbeat_at = _now()
+            operation.lease_expires_at = _lease_expiry(lease_seconds)
         self._operations[operation.id] = operation
         self.record_event(session_id, lane_id, 'operation_accepted',
                           operation_id=operation.id,
                           payload={'request_id': request_id})
         return operation
+
+    def heartbeat_operation(self, operation_id, executor_id, lease_seconds):
+        """S2-01：刷新执行 lease；非 open 状态安全返回 False。"""
+        operation = self._operations.get(operation_id)
+        if operation is None or operation.status not in OPEN_STATUSES:
+            return False
+        operation.executor_id = executor_id
+        operation.last_heartbeat_at = _now()
+        operation.lease_expires_at = _lease_expiry(lease_seconds)
+        return True
+
+    def unknown_operations(self, session_id=None):
+        return [op for op in self._operations.values()
+                if op.status == 'unknown'
+                and (session_id is None or op.session_id == session_id)]
 
     def get_operation(self, operation_id):
         return self._operations[operation_id]
@@ -540,10 +570,12 @@ class FakeModelPort:
 
 class FakeTool:
     def __init__(self, name, *, handler, input_schema=None,
-                 description='fake tool', risk='local_readonly'):
+                 description='fake tool', risk='local_readonly',
+                 recovery_policy=''):
         self.descriptor = ToolDescriptor(
             name=name, description=description,
-            input_schema=input_schema or {}, risk=risk)
+            input_schema=input_schema or {}, risk=risk,
+            recovery_policy=recovery_policy)
         self._handler = handler
         self.calls = []
 

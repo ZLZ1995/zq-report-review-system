@@ -177,6 +177,30 @@ class AgentCompletionService:
         if existing.request_hash != request_hash:
             raise ServiceError(
                 'idempotency_conflict', '相同请求编号对应了不同内容。', 409)
+        return self._replay_stored(existing)
+
+    def replay_by_request_id(
+        self,
+        db: Session,
+        *,
+        user_id: str,
+        client_request_id: str,
+    ) -> ReplayResult:
+        """S2-03：对账回放——按 client_request_id 取回已存储的事件流。
+
+        与 _replay 的差异：调用方是断线恢复的客户端，手里没有原始 payload，
+        因此跳过 request_hash 校验；其余状态门禁完全一致。
+        """
+        billing = db.scalar(
+            select(BillingRequest).where(
+                BillingRequest.user_id == user_id,
+                BillingRequest.client_request_id == client_request_id,
+            ))
+        if billing is None:
+            raise ServiceError('completion_not_found', '没有该请求的记录。', 404)
+        return self._replay_stored(billing)
+
+    def _replay_stored(self, existing: BillingRequest) -> ReplayResult:
         if existing.status == 'streaming':
             raise ServiceError('request_in_progress', '请求仍在处理中。', 409)
         if existing.status in ('uncertain', 'disconnected'):
@@ -201,6 +225,38 @@ class AgentCompletionService:
             events=events,
             charged_amount=money(existing.charged_amount),
             billing_request_id=existing.billing_request_id)
+
+    # --------------------------------------------------------------- 对账
+
+    def reconcile(
+        self,
+        db: Session,
+        *,
+        user_id: str,
+        client_request_id: str,
+    ) -> dict[str, object] | None:
+        """S2-03：按 client_request_id 返回可对账状态；无记录返回 None。
+
+        只读查询：不触碰计费、不触发回放、不改任何状态。
+        """
+        billing = db.scalar(
+            select(BillingRequest).where(
+                BillingRequest.user_id == user_id,
+                BillingRequest.client_request_id == client_request_id,
+            ))
+        if billing is None:
+            return None
+        replay_available = bool(
+            billing.status == 'succeeded'
+            and billing.response_ciphertext
+            and billing.response_expires_at is not None
+            and not is_expired(billing.response_expires_at))
+        return {
+            'status': billing.status,
+            'billing_request_id': billing.billing_request_id,
+            'replay_available': replay_available,
+            'error_code': billing.error_code or '',
+        }
 
     # --------------------------------------------------------------- 流式
 

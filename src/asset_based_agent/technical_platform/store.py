@@ -35,6 +35,8 @@ class PlatformStore:
             apply_v12,
             apply_v13,
             apply_v14,
+            apply_v15,
+            apply_v16,
             migrate_database,
         )
 
@@ -97,6 +99,8 @@ class PlatformStore:
                 apply_v12(db)
                 apply_v13(db)
                 apply_v14(db)
+                apply_v15(db)
+                apply_v16(db)
                 db.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
         # Creation is allowed only during explicit initialization. Later requests
         # must fail closed if a disk disappears or the database is moved.

@@ -11,8 +11,16 @@ from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
+# S2-01：进程级执行者标识。同一进程内多个 kernel 共享，跨进程必然不同，
+# 使 recover() 能区分"别的进程还活着"与"残留任务"。
+_PROCESS_EXECUTOR_ID = uuid4().hex
+
 from .cancellation import CancelToken
-from .contracts import OperationAccepted
+from .contracts import (
+    AUTO_RESUME_POLICIES,
+    DEFAULT_RECOVERY_POLICY_BY_RISK,
+    OperationAccepted,
+)
 from .errors import (
     AgentCancelled,
     AgentError,
@@ -50,7 +58,9 @@ def _sanitize_summary(message):
 class AgentKernel:
     def __init__(self, *, repo, model, tools=(), max_turns=8,
                  tool_resolver=None, policy=None, approver=None,
-                 file_scope=None, context_builder=None):
+                 file_scope=None, context_builder=None,
+                 executor_id=None, lease_seconds=15.0,
+                 heartbeat_interval=5.0):
         self.repo = repo
         self._model = model
         self.tools = list(tools)
@@ -60,6 +70,10 @@ class AgentKernel:
         self._approver = approver
         self._file_scope = file_scope
         self._context_builder = context_builder
+        # S2-01 执行 lease：executor 默认进程级标识，可注入以便测试双进程语义
+        self.executor_id = executor_id or _PROCESS_EXECUTOR_ID
+        self.lease_seconds = lease_seconds
+        self.heartbeat_interval = heartbeat_interval
         self._listeners = []
         self._sequence = 0
         self._tasks = {}
@@ -138,6 +152,11 @@ class AgentKernel:
         except Exception:
             logger.exception('终态兜底收束失败: %s', operation.id)
 
+    @property
+    def model(self):
+        """S2-03 对账接线用：当前 ModelPort（可能具备 reconcile/replay）。"""
+        return self._model
+
     async def submit(self, session_id, lane_id, request, *, wait=True):
         if not isinstance(request, dict) or not str(request.get('text', '')).strip():
             from .errors import InvalidRequest
@@ -151,6 +170,9 @@ class AgentKernel:
         operation_args = {
             'user_text': request['text'].strip(),
             'request_id': uuid4().hex,
+            # S2-01：operation 从创建起就携带执行 lease
+            'executor_id': self.executor_id,
+            'lease_seconds': self.lease_seconds,
         }
         if request.get('model_id'):
             operation_args['model_id'] = request['model_id']
@@ -205,6 +227,19 @@ class AgentKernel:
         await self._drive(operation, tools, wait=wait)
         return accepted
 
+    async def _heartbeat_loop(self, operation_id):
+        """S2-01：驱动期间周期刷新 lease；repo 异常只告警不穿透。"""
+        while True:
+            await asyncio.sleep(self.heartbeat_interval)
+            try:
+                if not self.repo.heartbeat_operation(
+                        operation_id, self.executor_id, self.lease_seconds):
+                    return  # operation 已终态，停止心跳
+            except Exception:
+                logger.warning('lease 心跳失败: %s', operation_id,
+                               exc_info=True)
+                return
+
     async def _drive(self, operation, tools, *, wait):
         session_id, lane_id = operation.session_id, operation.lane_id
         cancel = CancelToken()
@@ -212,6 +247,8 @@ class AgentKernel:
         self._steers[operation.id] = deque()
 
         async def drive():
+            heartbeat = asyncio.ensure_future(
+                self._heartbeat_loop(operation.id))
             try:
                 await run_agent_loop(
                     repo=self.repo, model=self._model, tools=tools,
@@ -227,6 +264,8 @@ class AgentKernel:
             except Exception as exc:  # noqa: BLE001 - S1-01 终态兜底
                 self._ensure_terminal(operation, exc)
             finally:
+                heartbeat.cancel()
+                await asyncio.gather(heartbeat, return_exceptions=True)
                 self._steers.pop(operation.id, None)
                 self._cancels.pop(operation.id, None)
                 await self._drain_followups(session_id, lane_id)
@@ -258,20 +297,6 @@ class AgentKernel:
             raise ValueError('只有中断（unknown）的 operation 可以恢复')
         if self._tool_resolver is None:
             raise ValueError('未配置资源解析器，无法按原版本恢复')
-        # S1-02：中断时存在 open/unknown ToolCall 的 operation 副作用不可判定，
-        # 必须先按 Tool Recovery Policy 收束，不能直接继续跑模型。
-        pending = [c for c in self.repo.tool_calls(operation_id)
-                   if c.status in TOOL_CALL_OPEN_STATUSES
-                   or c.status == 'unknown']
-        if pending:
-            exc = ToolUnknownOutcome(
-                '存在不可判定副作用的工具调用，需人工核对后才能继续')
-            self.repo.fail_operation(
-                operation_id, code=exc.code, summary=str(exc), turn_id=None)
-            self._emit('operation_failed', session_id=operation.session_id,
-                       lane_id=operation.lane_id, operation_id=operation_id,
-                       payload={'error_code': exc.code})
-            raise exc
         snapshot = self.repo.resource_snapshot(operation_id)
         try:
             tools = self._tool_resolver.resolve_pinned(snapshot)
@@ -282,7 +307,39 @@ class AgentKernel:
                        lane_id=operation.lane_id, operation_id=operation_id,
                        payload={'error_code': exc.code})
             raise
+        # S1-02/S2-02：中断时存在 open/unknown ToolCall 的 operation 按
+        # Tool Recovery Policy 判定——safe_replay/idempotent_retry 才允许
+        # 自动续跑；query_before_retry/manual_reconcile/never_retry 一律
+        # 收束为 tool.unknown_outcome，绝不自动再次执行。
+        pending = [c for c in self.repo.tool_calls(operation_id)
+                   if c.status in TOOL_CALL_OPEN_STATUSES
+                   or c.status == 'unknown']
+        if pending:
+            descriptors = {tool.descriptor.name: tool.descriptor
+                           for tool in tools}
+            blocking = []
+            for call in pending:
+                descriptor = descriptors.get(call.tool_name)
+                if descriptor is not None:
+                    policy = descriptor.effective_recovery_policy
+                else:
+                    policy = DEFAULT_RECOVERY_POLICY_BY_RISK.get(
+                        call.risk_level, 'manual_reconcile')
+                if policy not in AUTO_RESUME_POLICIES:
+                    blocking.append((call.tool_name, policy))
+            if blocking:
+                exc = ToolUnknownOutcome(
+                    '存在不可判定副作用的工具调用，需人工核对后才能继续')
+                self.repo.fail_operation(
+                    operation_id, code=exc.code, summary=str(exc), turn_id=None)
+                self._emit('operation_failed', session_id=operation.session_id,
+                           lane_id=operation.lane_id, operation_id=operation_id,
+                           payload={'error_code': exc.code})
+                raise exc
         self.repo.resume_operation(operation_id)
+        # 恢复即认领 lease：本进程成为新的执行 owner
+        self.repo.heartbeat_operation(
+            operation_id, self.executor_id, self.lease_seconds)
         operation = self.repo.get_operation(operation_id)
         self._emit('operation_resumed', session_id=operation.session_id,
                    lane_id=operation.lane_id, operation_id=operation_id)
@@ -359,9 +416,15 @@ class AgentKernel:
     # -------------------------------------------------------------- recovery
 
     async def recover(self, session_id=None):
-        """启动恢复：开放 operation 收束为 unknown 并给出用户可见错误。"""
+        """启动恢复：开放 operation 收束为 unknown 并给出用户可见错误。
+
+        S2-01：lease 未过期的 operation 属于仍在执行的进程，recover 不得
+        收束（双开客户端不得误杀对方任务）；只处理无 owner / lease 已过期的。
+        """
         interrupted = []
         for operation in self.repo.open_operations(session_id):
+            if self._lease_alive(operation):
+                continue
             self.repo.interrupt_operation(
                 operation.id, code='agent.interrupted',
                 summary='进程中断，等待对账')
@@ -373,3 +436,14 @@ class AgentKernel:
                        payload={'reason': 'agent.interrupted'})
             interrupted.append(operation.id)
         return {'interrupted': interrupted}
+
+    @staticmethod
+    def _lease_alive(operation):
+        """lease 未过期视为活任务；缺失/损坏时间戳一律按可恢复处理。"""
+        expires = getattr(operation, 'lease_expires_at', None)
+        if not expires:
+            return False
+        try:
+            return datetime.fromisoformat(expires) > datetime.now(timezone.utc)
+        except (TypeError, ValueError):
+            return False
