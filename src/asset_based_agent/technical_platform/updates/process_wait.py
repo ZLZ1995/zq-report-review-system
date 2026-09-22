@@ -10,10 +10,10 @@ from collections.abc import Callable
 
 def process_running(process_id: int) -> bool:
     if os.name == 'nt':
-        kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)  # type: ignore[attr-defined]
         handle = kernel32.OpenProcess(0x00100000, False, process_id)
         if not handle:
-            return ctypes.get_last_error() == 5
+            return ctypes.get_last_error() == 5  # type: ignore[attr-defined]
         try:
             return kernel32.WaitForSingleObject(handle, 0) == 0x00000102
         finally:
