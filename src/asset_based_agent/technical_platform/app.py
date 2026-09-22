@@ -48,6 +48,12 @@ from PySide6.QtWidgets import (
 )
 
 from .agent_controller import ClarificationContextLimit
+from .artifact_panel import (
+    artifact_row_text,
+    collect_artifacts,
+    task_detail_text,
+    task_row_text,
+)
 from .composer import ChatComposer
 from .execution import execute_task
 from .file_panel import build_file_rows, file_detail_text, filter_rows, row_label
@@ -221,6 +227,8 @@ class PlatformWindow(QMainWindow):
         self._agent_user_text = ''
         self._file_rows = []
         self._file_records = {}
+        self._artifact_entries = []
+        self._task_records = []
         self._approval_requested.connect(self._handle_approval_request)
         self.network_state = "connected"
         self.setWindowTitle(
@@ -817,7 +825,44 @@ class PlatformWindow(QMainWindow):
         self.button("添加已确认偏好", self.add_memory, memory_layout)
         self.button("删除选中记忆", self.delete_memory, memory_layout)
         self.details.addTab(memory_page, "记忆")
+        artifacts_page = QWidget()
+        artifacts_layout = QVBoxLayout(artifacts_page)
+        artifacts_layout.setContentsMargins(18, 22, 18, 16)
+        artifacts_layout.setSpacing(12)
+        artifacts_title = QLabel("成果交付")
+        artifacts_title.setObjectName("detailTitle")
+        artifacts_layout.addWidget(artifacts_title)
+        self.artifacts_list = QListWidget()
+        self.artifacts_list.setObjectName("artifactsList")
+        artifacts_layout.addWidget(self.artifacts_list, 1)
+        artifact_buttons = QHBoxLayout()
+        self.artifact_open = QPushButton("打开成果")
+        self.artifact_save = QPushButton("另存为…")
+        artifact_buttons.addWidget(self.artifact_open)
+        artifact_buttons.addWidget(self.artifact_save)
+        artifacts_layout.addLayout(artifact_buttons)
+        self.details.addTab(artifacts_page, "成果")
+        tasks_page = QWidget()
+        tasks_layout = QVBoxLayout(tasks_page)
+        tasks_layout.setContentsMargins(18, 22, 18, 16)
+        tasks_layout.setSpacing(12)
+        tasks_title = QLabel("任务历史")
+        tasks_title.setObjectName("detailTitle")
+        tasks_layout.addWidget(tasks_title)
+        self.tasks_list = QListWidget()
+        self.tasks_list.setObjectName("tasksList")
+        tasks_layout.addWidget(self.tasks_list, 1)
+        self.task_detail = QLabel("双击任务查看详情")
+        self.task_detail.setObjectName("muted")
+        self.task_detail.setWordWrap(True)
+        tasks_layout.addWidget(self.task_detail)
+        self.details.addTab(tasks_page, "任务")
         splitter.addWidget(self.details)
+        self.artifact_open.clicked.connect(self.open_selected_artifact)
+        self.artifact_save.clicked.connect(self.save_artifact_as)
+        self.artifacts_list.itemDoubleClicked.connect(
+            lambda _item: self.open_selected_artifact())
+        self.tasks_list.itemDoubleClicked.connect(self.show_task_detail)
         splitter.setSizes([242, 886, 312])
         splitter.setCollapsible(1, False)
         self.setStyleSheet("""
@@ -1781,6 +1826,11 @@ class PlatformWindow(QMainWindow):
         if not self.project_id:
             self._file_rows = []
             self._file_records = {}
+            self._artifact_entries = []
+            self._task_records = []
+            self.artifacts_list.clear()
+            self.tasks_list.clear()
+            self.task_detail.setText("双击任务查看详情")
             return
         files = self.store.files(self.project_id)
         self._file_records = {item['id']: item for item in files}
@@ -1809,7 +1859,97 @@ class PlatformWindow(QMainWindow):
             self.memories.addItem(row)
         del blocker
         self._apply_file_filter()
+        self._refresh_artifacts_and_tasks()
         self.save_current_draft()
+
+    def _refresh_artifacts_and_tasks(self):
+        """成果 Tab 与任务 Tab：数据全部来自 store 真实 runs 记录。"""
+        self._artifact_entries = collect_artifacts(self.store, self.project_id)
+        self.artifacts_list.clear()
+        for index, entry in enumerate(self._artifact_entries):
+            row = QListWidgetItem(artifact_row_text(entry))
+            row.setData(Qt.ItemDataRole.UserRole, index)
+            self.artifacts_list.addItem(row)
+        self._task_records = []
+        self.tasks_list.clear()
+        for session in self.store.sessions(self.project_id):
+            for run in self.store.runs(session['id']):
+                try:
+                    snapshot = json.loads(run.get('snapshot') or '{}')
+                except (TypeError, ValueError):
+                    snapshot = {}
+                self._task_records.append((run, snapshot))
+                row = QListWidgetItem(task_row_text(run, snapshot))
+                row.setData(Qt.ItemDataRole.UserRole,
+                            len(self._task_records) - 1)
+                self.tasks_list.addItem(row)
+
+    def _selected_artifact_entry(self):
+        row = self.artifacts_list.currentRow()
+        if row < 0 and self.artifacts_list.count():
+            row = 0
+        if not 0 <= row < len(self._artifact_entries):
+            return None
+        return self._artifact_entries[row]
+
+    def _resolve_artifact_path(self, entry):
+        """generation 成果走带范围校验的 artifact_path；其余校验文件存在。"""
+        if entry.kind == 'generation' and entry.index is not None:
+            from .generation import artifact_path
+            return artifact_path(self.store, entry.session_id,
+                                 entry.run_id, entry.index)
+        path = Path(entry.path)
+        if not path.is_file():
+            raise ValueError('成果文件已移动或删除，请在项目目录核对。')
+        return path
+
+    def open_selected_artifact(self):
+        entry = self._selected_artifact_entry()
+        if entry is None:
+            return
+        try:
+            path = self._resolve_artifact_path(entry)
+            if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+                raise ValueError('无法打开文件，请检查默认应用')
+        except (ValueError, OSError, PermissionError) as exc:
+            QMessageBox.warning(self, '成果', str(exc))
+
+    def save_artifact_as(self):
+        entry = self._selected_artifact_entry()
+        if entry is None:
+            return
+        try:
+            source = self._resolve_artifact_path(entry)
+        except (ValueError, OSError, PermissionError) as exc:
+            QMessageBox.warning(self, '成果', str(exc))
+            return
+        target, _ = QFileDialog.getSaveFileName(self, '另存为', entry.name)
+        if not target:
+            return
+        destination = Path(target)
+        staging = destination.with_name(destination.name + '.part')
+        try:
+            shutil.copy2(source, staging)
+            os.replace(staging, destination)
+        except OSError as exc:
+            try:
+                staging.unlink(missing_ok=True)
+            except OSError:
+                staging = None
+            QMessageBox.warning(self, '成果', f'另存为失败：{exc}')
+            return
+        self.status.setText(f'成果已另存为：{destination.name}')
+
+    def show_task_detail(self, item):
+        index = item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(index, int) or not 0 <= index < len(self._task_records):
+            return
+        run, snapshot = self._task_records[index]
+        try:
+            result = json.loads(run.get('result') or '{}')
+        except (TypeError, ValueError):
+            result = {}
+        self.task_detail.setText(task_detail_text(run, snapshot, result))
 
     def _used_file_ids(self):
         """历史任务快照中真实使用过的文件 id 集合。"""

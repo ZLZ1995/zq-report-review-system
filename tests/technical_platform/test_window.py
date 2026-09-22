@@ -49,7 +49,7 @@ def test_project_chat_preflight_and_result_restore(tmp_path):
                           (window.run_id,)).fetchone()[0] == 1
     assert "原文件未变化" in window.transcript.toPlainText()
     assert "detail.xlsx" in window.transcript.toPlainText()
-    assert [window.details.tabText(i) for i in range(window.details.count())] == ["文件", "记忆"]
+    assert [window.details.tabText(i) for i in range(window.details.count())] == ["文件", "记忆", "成果", "任务"]
     window.close()
     reopened = PlatformWindow(store)
     reopened.reload_projects(project)

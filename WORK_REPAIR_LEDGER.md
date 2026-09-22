@@ -112,3 +112,9 @@ CI 基线: technical-platform-client / report-review-server 在 879a4aa 均 succ
 
 阶段结论（续）：
 - S11 已完成（2026-09-22）：文件角色/期间识别/本轮使用状态/搜索/过滤/批量选择/隐藏 hash/文件详情全部落地，10 项验收测试全绿；阶段报告见 remediation/s11/STAGE_REPORT.md
+- S12 定向：先红（artifact_panel 模块不存在，收集错误）→ 实现后一次转绿 10 passed（tmp-pytest-s12b 联合 S11 20 passed）
+- S12 回归：agent_rebuild 475 passed/9 xfailed；report_review_server+fault_injection 322 passed/1 skipped；technical_platform 顶层 92+136+260+509+439（[p-z] 块 429+10 含 S12 新增；test_window 冻结断言按任务书 S12 新增 Tab 校准为 [文件,记忆,成果,任务]）+509 全绿；app/acceptance/update/detail 块 364 passed
+- S12 落地：artifact_panel.py（ArtifactEntry/collect_artifacts 跨会话历史成果/state_label unknown=状态待核对/artifact_row_text 生成说明/task_row_text/task_detail_text 完整任务 ID+operation ID）；app.py 新增"成果"Tab（打开成果经 artifact_path 范围校验+另存为 staging+os.replace）与"任务"Tab（双击看完整 ID 详情）
+
+阶段结论（续）：
+- S12 已完成（2026-09-22）：ArtifactCard 行卡/成果 Tab/任务 Tab/历史成果可访问/打开/另存为/生成说明/任务 ID·operation ID 详情全部落地，10 项验收测试全绿；阶段报告见 remediation/s12/STAGE_REPORT.md
