@@ -58,6 +58,13 @@ def project_agent_timeline(entries, *, live_status=None) -> list[TimelineItem]:
                 'text': str(payload.get('text', '')),
                 **({'_legacy_message_id': str(payload['_legacy_message_id'])}
                    if payload.get('_legacy_message_id') else {}),
+                # S10：错误/告警严重级与安全错误码透传（kind 冻结不变）
+                **({'severity': 'error',
+                    'error_code': str(payload.get('error_code', '') or '')}
+                   if entry_type == 'error_message' else {}),
+                **({'severity': 'warning'}
+                   if str(payload.get('level', '') or '') == 'warning'
+                   else {}),
             },
         ))
     if live_status:

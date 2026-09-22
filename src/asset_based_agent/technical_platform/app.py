@@ -205,6 +205,9 @@ class PlatformWindow(QMainWindow):
         self._status_timer = QTimer(self)
         self._status_timer.setInterval(1000)
         self._status_timer.timeout.connect(self._tick_run_status)
+        # S10：执行记录折叠展开状态（内存态，随会话切换自然隔离）
+        self._expanded_event_groups: set = set()
+        self._last_event_group_keys: list = []
         self._feature_flags_cache = None
         # S16：会话/轮次状态控制器 + 当前轮次锚点（替代固定状态栏）
         from .conversation_status import ConversationStatusController
@@ -1215,38 +1218,33 @@ class PlatformWindow(QMainWindow):
         return True
 
     def _render_timeline_item(self, item) -> list:
-        """把 TimelineItem 渲染成 HTML 片段（S16：渲染只认 ViewModel）。"""
+        """把 TimelineItem 渲染成 HTML 片段（S16：渲染只认 ViewModel；
+        S10：卡片化层级 + 错误/警告严重级路由）。"""
+        from .message_cards import (
+            assistant_card_html,
+            error_card_html,
+            system_event_card_html,
+            user_card_html,
+            warning_card_html,
+        )
         text = html.escape(item.payload.get('text', '')).replace("\n", "<br>")
+        raw_text = item.payload.get('text', '')
         if item.kind == 'user':
-            return [(
-                '<table width="100%" cellspacing="0" cellpadding="16">'
-                '<tr><td width="12%"></td><td bgcolor="#f3f4f7">'
-                '<span style="color:#9399a6;font-size:11px">你</span>'
-                f'<p style="line-height:160%;font-size:14px">{text}</p>'
-                '</td></tr></table><p style="font-size:8px">&nbsp;</p>'
-            )]
+            return [user_card_html(raw_text)]
         if item.kind == 'live_user':
-            return [(
-                '<table width="100%" cellspacing="0" cellpadding="16">'
-                '<tr><td width="12%"></td><td bgcolor="#f3f4f7">'
-                '<span style="color:#9399a6;font-size:11px">你 · 发送中</span>'
-                f'<p style="line-height:160%;font-size:14px">{text}</p>'
-                '</td></tr></table><p style="font-size:8px">&nbsp;</p>'
-            )]
+            return [user_card_html(raw_text, live=True)]
         if item.kind == 'event':
-            return [(
-                '<table width="100%" cellpadding="12"><tr>'
-                '<td bgcolor="#fafbfc"><span style="color:#758399;font-size:11px">'
-                "●  执行记录</span>"
-                f'<p style="color:#858d9b;font-size:12px;line-height:150%">{text}</p>'
-                '</td></tr></table><p style="font-size:8px">&nbsp;</p>'
-            )]
+            severity = item.payload.get('severity')
+            if severity == 'error':
+                return [error_card_html(
+                    raw_text,
+                    error_code=item.payload.get('error_code', ''),
+                    operation_id=item.operation_id or '')]
+            if severity == 'warning':
+                return [warning_card_html(raw_text)]
+            return [system_event_card_html(raw_text)]
         if item.kind == 'assistant':
-            return [(
-                '<p style="font-size:13px;color:#3e4c66"><b>ZQ</b>'
-                ' <span style="font-size:10px;color:#a0a6b1"> / ASSISTANT</span></p>'
-                f'<p style="font-size:14px;line-height:170%;margin-bottom:28px">{text}</p>'
-            )]
+            return [assistant_card_html(raw_text)]
         if item.kind == 'live_status':
             view = item.payload.get('view')
             if view is not None:
@@ -1351,6 +1349,44 @@ class PlatformWindow(QMainWindow):
         return content
 
     # ------------------------------------------------------- S9 运行状态卡
+
+    @staticmethod
+    def _is_foldable_event(item) -> bool:
+        """只有中性执行记录参与折叠；错误/警告卡必须始终可见。"""
+        return item.kind == 'event' and not item.payload.get('severity')
+
+    def _fold_execution_groups(self, items) -> list:
+        """连续 ≥3 条中性执行记录折叠为一组；返回 item 或 (key, events)。"""
+        blocks: list = []
+        group_keys: list = []
+        index = 0
+        while index < len(items):
+            item = items[index]
+            if not self._is_foldable_event(item) or item.message_id is None:
+                blocks.append(item)
+                index += 1
+                continue
+            group = [item]
+            index += 1
+            while (index < len(items)
+                   and self._is_foldable_event(items[index])
+                   and items[index].message_id is not None):
+                group.append(items[index])
+                index += 1
+            if len(group) >= 3:
+                key = f'{self.session_id}:{group[0].message_id}'
+                group_keys.append(key)
+                blocks.append((key, [g.payload.get('text', '')
+                                     for g in group]))
+            else:
+                blocks.extend(group)
+        self._last_event_group_keys = group_keys
+        return blocks
+
+    def _expanded_event_groups_snapshot(self) -> list:
+        """当前渲染出的折叠组 key 列表（测试与调试入口）。"""
+        return list(self._last_event_group_keys)
+
 
     def _live_status_view(self, job):
         """从真实 job 记账 + durable operation 推导状态卡视图。"""
@@ -1460,8 +1496,15 @@ class PlatformWindow(QMainWindow):
             content.append(
                 '<p style="color:#858d9b;font-size:14px;line-height:180%">'
                 '添加本轮资料，用自然语言描述任务。原始文件只读。</p>')
-        for item in items:
-            content.extend(self._render_timeline_item(item))
+        for block in self._fold_execution_groups(items):
+            if isinstance(block, tuple):
+                key, events = block
+                from .message_cards import execution_group_html
+                content.append(execution_group_html(
+                    events, group_id=key,
+                    collapsed=key not in self._expanded_event_groups))
+            else:
+                content.extend(self._render_timeline_item(block))
         if live is None and self.session_id:
             # S9：临时状态卡被终态摘要行替换（内存态，重开会话不残留）
             terminal_html = self._terminal_status_line()
@@ -1521,6 +1564,40 @@ class PlatformWindow(QMainWindow):
     def handle_report_link(self, url):
         from .report_export import export_review
         action = url.scheme()
+        if action == 'zq-events':
+            # S10：执行记录折叠组展开/收起（仅允许当前渲染出的组 key）
+            key = url.path()
+            if not key or url.hasQuery() or url.hasFragment() or url.host():
+                return
+            if key not in self._last_event_group_keys:
+                return
+            if key in self._expanded_event_groups:
+                self._expanded_event_groups.discard(key)
+            else:
+                self._expanded_event_groups.add(key)
+            self.render_messages()
+            return
+        if action == 'zq-diagnostics':
+            # S10：复制诊断信息——只含公开字段，不含 traceback/凭据
+            if url.hasQuery() or url.hasFragment() or url.host():
+                return
+            parts = url.path().split('/')
+            operation_id = parts[0] if parts and parts[0] else ''
+            if not operation_id:
+                return
+            error_code = parts[1] if len(parts) > 1 else ''
+            summary = ''
+            status = self.status_controller.turn_phase(
+                self.session_id, operation_id)
+            if status is not None:
+                summary = status.text
+            from PySide6.QtGui import QGuiApplication
+
+            from .message_cards import diagnostics_text
+            QGuiApplication.clipboard().setText(diagnostics_text(
+                operation_id=operation_id, error_code=error_code,
+                summary=summary, client_version=CLIENT_VERSION))
+            return
         if action == 'zq-download-folder':
             from .browser_download_delivery import download_folder
             try:

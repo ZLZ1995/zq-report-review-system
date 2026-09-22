@@ -99,3 +99,10 @@ CI 基线: technical-platform-client / report-review-server 在 879a4aa 均 succ
 - S9 定向：先红（模块不存在）→ 实现后 4 failed（短 id 规则/测试时序校准）→ 12 passed（tmp-pytest-s9g7）
 - S9 回归：agent_rebuild 465 passed/9 xfailed（含 S9 新增 12）；report_review_server+fault_injection 322 passed/1 skipped；technical_platform 顶层 92+136+260+509+419 全绿；app/acceptance/update/detail 块 364 passed
 - S9 落地：run_status.py 状态卡视图模型（无伪造百分比）；控制器新增 stopping/waiting_user 活动相位与 started_at/last_activity_at；cancel_run 接入 stopping；终态摘要行替换临时卡；按钮禁用全部带 tooltip 原因
+- S10 定向：先红（模块不存在）→ 实现后一次转绿 10 passed；与 S9 联合 22 passed
+- S10 回归：agent_rebuild 475 passed/9 xfailed（含 S10 新增 10）；report_review_server+fault_injection 322 passed/1 skipped；technical_platform 顶层 92+136+260+509+419 全绿；app/acceptance/update/detail 块 364 passed
+- S10 落地：message_cards.py 六类卡片；error_message 透传 severity/error_code（kind 冻结不变）；连续 ≥3 条中性执行记录折叠（zq-events 展开/收起）；ErrorCard 带错误码+任务 id+zq-diagnostics 剪贴板复制（无 traceback/凭据）
+
+阶段结论（续）：
+- S9 已完成（2026-09-22）：运行状态卡/计时/stepper/stopping/waiting_user/终态摘要/按钮原因全部落地，12 项验收测试全绿；阶段报告见 remediation/s9/STAGE_REPORT.md
+- S10 已完成（2026-09-22）：消息层级卡片化/执行记录折叠/Error detail/diagnostics copy 全部落地，10 项验收测试全绿；阶段报告见 remediation/s10/STAGE_REPORT.md
