@@ -8,6 +8,22 @@ from __future__ import annotations
 import html
 from datetime import datetime, timezone
 
+from .ui_theme import (
+    CARD_BG_ERROR,
+    CARD_BG_NEUTRAL,
+    CARD_BG_WARNING,
+    ERROR,
+    ERROR_TEXT,
+    LOG,
+    LOG_FONT_SIZE,
+    LOG_LINE_HEIGHT,
+    LOG_TEXT,
+    MUTED,
+    USER_CARD_BG,
+    WARNING,
+    WARNING_TEXT,
+)
+
 _GAP = '<p style="font-size:8px">&nbsp;</p>'
 
 
@@ -20,8 +36,8 @@ def user_card_html(text: str, *, live: bool = False) -> str:
     label = '你 · 发送中' if live else '你'
     return (
         '<table width="100%" cellspacing="0" cellpadding="16">'
-        '<tr><td width="12%"></td><td bgcolor="#f3f4f7">'
-        f'<span style="color:#9399a6;font-size:11px">{label}</span>'
+        f'<tr><td width="12%"></td><td bgcolor="{USER_CARD_BG}">'
+        f'<span style="color:{LOG};font-size:11px">{label}</span>'
         f'<p style="line-height:160%;font-size:14px">{_escape(text)}</p>'
         '</td></tr></table>' + _GAP
     )
@@ -31,7 +47,7 @@ def assistant_card_html(text: str) -> str:
     """AssistantMessageCard：助手正式回复。"""
     return (
         '<p style="font-size:13px;color:#3e4c66"><b>ZQ</b>'
-        ' <span style="font-size:10px;color:#a0a6b1"> / ASSISTANT</span></p>'
+        f' <span style="font-size:10px;color:{MUTED}"> / ASSISTANT</span></p>'
         f'<p style="font-size:14px;line-height:170%;margin-bottom:28px">'
         f'{_escape(text)}</p>'
     )
@@ -41,9 +57,9 @@ def system_event_card_html(text: str) -> str:
     """SystemEventCard：中性系统事件（执行记录单条）。"""
     return (
         '<table width="100%" cellpadding="12"><tr>'
-        '<td bgcolor="#fafbfc"><span style="color:#758399;font-size:11px">'
+        f'<td bgcolor="{CARD_BG_NEUTRAL}"><span style="color:{LOG};font-size:{LOG_FONT_SIZE}px">'
         '●  执行记录</span>'
-        f'<p style="color:#858d9b;font-size:12px;line-height:150%">'
+        f'<p style="color:{LOG_TEXT};font-size:{LOG_FONT_SIZE}px;line-height:{LOG_LINE_HEIGHT}%">'
         f'{_escape(text)}</p>'
         '</td></tr></table>' + _GAP
     )
@@ -53,9 +69,9 @@ def warning_card_html(text: str) -> str:
     """WarningCard：需要用户注意但不阻断的告警。"""
     return (
         '<table width="100%" cellpadding="12"><tr>'
-        '<td bgcolor="#fdf8ec"><span style="color:#b7791f;font-size:11px">'
+        f'<td bgcolor="{CARD_BG_WARNING}"><span style="color:{WARNING};font-size:11px">'
         '▲  警告</span>'
-        f'<p style="color:#8a6d1f;font-size:12px;line-height:150%">'
+        f'<p style="color:{WARNING_TEXT};font-size:12px;line-height:150%">'
         f'{_escape(text)}</p>'
         '</td></tr></table>' + _GAP
     )
@@ -77,13 +93,13 @@ def error_card_html(text: str, *, error_code: str = '',
         if operation_id:
             link = (f'　<a href="zq-diagnostics:{operation_id}'
                     f'/{html.escape(error_code)}">复制诊断信息</a>')
-        detail = (f'<p style="color:#a8adb8;font-size:10px">{chip}{sep}{task}'
+        detail = (f'<p style="color:{MUTED};font-size:10px">{chip}{sep}{task}'
                   f'{link}</p>')
     return (
         '<table width="100%" cellpadding="12"><tr>'
-        '<td bgcolor="#fdf1f0"><span style="color:#c6463d;font-size:11px">'
+        f'<td bgcolor="{CARD_BG_ERROR}"><span style="color:{ERROR};font-size:11px">'
         '✕  失败</span>'
-        f'<p style="color:#9a3f38;font-size:12px;line-height:150%">'
+        f'<p style="color:{ERROR_TEXT};font-size:12px;line-height:150%">'
         f'{_escape(text)}</p>'
         + detail +
         '</td></tr></table>' + _GAP
@@ -112,22 +128,22 @@ def execution_group_html(events: list[str], *, group_id: str,
         latest = _escape(events[-1]) if events else ''
         return (
             '<table width="100%" cellpadding="12"><tr>'
-            '<td bgcolor="#fafbfc"><span style="color:#758399;font-size:11px">'
+            f'<td bgcolor="{CARD_BG_NEUTRAL}"><span style="color:{LOG};font-size:{LOG_FONT_SIZE}px">'
             f'●  执行记录（{len(events)} 条）</span>'
-            f'<p style="color:#858d9b;font-size:12px;line-height:150%">'
+            f'<p style="color:{LOG_TEXT};font-size:{LOG_FONT_SIZE}px;line-height:{LOG_LINE_HEIGHT}%">'
             f'最近：{latest}　'
             f'<a href="zq-events:{safe_id}">展开全部</a></p>'
             '</td></tr></table>' + _GAP
         )
     rows = ''.join(
-        f'<p style="color:#858d9b;font-size:12px;line-height:150%">'
+        f'<p style="color:{LOG_TEXT};font-size:{LOG_FONT_SIZE}px;line-height:{LOG_LINE_HEIGHT}%">'
         f'{_escape(event)}</p>'
         for event in events)
     return (
         '<table width="100%" cellpadding="12"><tr>'
-        '<td bgcolor="#fafbfc"><span style="color:#758399;font-size:11px">'
+        f'<td bgcolor="{CARD_BG_NEUTRAL}"><span style="color:{LOG};font-size:{LOG_FONT_SIZE}px">'
         f'●  执行记录（{len(events)} 条）</span>'
         + rows
-        + f'<p style="font-size:11px"><a href="zq-events:{safe_id}">收起</a></p>'
+        + f'<p style="font-size:{LOG_FONT_SIZE}px"><a href="zq-events:{safe_id}">收起</a></p>'
         '</td></tr></table>' + _GAP
     )

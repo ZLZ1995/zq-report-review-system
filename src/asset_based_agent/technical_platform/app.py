@@ -64,6 +64,7 @@ from .store import PlatformStore
 from .task_events import CompletionEventRelay, TaskDestination, TaskEventRelay
 from .task_manager import TaskBinding, TaskManager
 from .task_spec import build_task_spec
+from .ui_theme import MAX_CONTENT_WIDTH, qss_overrides
 
 SERVER_URL = "https://zq-report-review.zeabur.app/api/v1"
 
@@ -919,6 +920,10 @@ class PlatformWindow(QMainWindow):
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }
             QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background:transparent; }
         """)
+        # S14：主题覆盖层（对比度/选中态/运行中状态色）+ 最大内容宽度
+        self.setStyleSheet(self.styleSheet() + qss_overrides())
+        self.transcript.setMaximumWidth(MAX_CONTENT_WIDTH)
+        composer_card.setMaximumWidth(MAX_CONTENT_WIDTH)
 
     def reload_projects(self, selected=None):
         self.projects.clear()

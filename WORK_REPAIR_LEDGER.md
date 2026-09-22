@@ -124,3 +124,9 @@ CI 基线: technical-platform-client / report-review-server 在 879a4aa 均 succ
 
 阶段结论（续）：
 - S13 已完成（2026-09-22）：侧栏可调宽（验证锁定）/完整标题/更多菜单/权限改名/Skill 文案统一/顶部导航提示/动态项目摘要全部落地，6 项验收测试全绿；阶段报告见 remediation/s13/STAGE_REPORT.md
+- S14 定向：先红（ui_theme 模块不存在，收集错误）→ 实现后一次转绿 10 passed；S9/S10 UI 联合 44 passed（tmp-pytest-s14d）
+- S14 回归：agent_rebuild 475 passed/9 xfailed；report_review_server+fault_injection 322 passed/1 skipped；technical_platform 顶层 92+136+260+509+509+455（[p-z] 块 445+10 含 S14 新增）全绿；app/acceptance/update/detail 块 364 passed
+- S14 落地：ui_theme.py 单一事实源（调色板/间距刻度/最大内容宽度 1080/日志 11px·140%）；14 组文字-背景对比度全部 ≥4.5（WCAG AA，测试锁定阈值）；run_status/message_cards 全部改用主题常量；选中态底色+左侧运行中色条；transcript/composer 最大内容宽度；系统日志压缩
+
+阶段结论（续）：
+- S14 已完成（2026-09-22）：对比度/间距/卡片层级/最大内容宽度/系统日志压缩/当前选中状态/运行中状态色/错误警告成功色全部落地，10 项验收测试全绿；阶段报告见 remediation/s14/STAGE_REPORT.md

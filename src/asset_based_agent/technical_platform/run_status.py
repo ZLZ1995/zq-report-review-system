@@ -11,6 +11,17 @@ from __future__ import annotations
 import html
 from dataclasses import dataclass
 
+from .ui_theme import (
+    CARD_BG_STATUS,
+    ERROR,
+    LOG,
+    MUTED,
+    RUNNING,
+    SUCCESS,
+    UNKNOWN,
+    WARNING,
+)
+
 RUN_STEPS = ('提交任务', '模型生成', '工具执行', '汇总结果')
 
 RUN_STATES = frozenset({
@@ -30,14 +41,14 @@ RUN_STATE_LABELS = {
 }
 
 _STATE_COLORS = {
-    'queued': '#758399',
-    'running': '#3e6fd9',
-    'waiting_user': '#b7791f',
-    'stopping': '#b7791f',
-    'completed': '#2f9e63',
-    'failed': '#c6463d',
-    'cancelled': '#758399',
-    'unknown': '#8b5cf6',
+    'queued': LOG,
+    'running': RUNNING,
+    'waiting_user': WARNING,
+    'stopping': WARNING,
+    'completed': SUCCESS,
+    'failed': ERROR,
+    'cancelled': LOG,
+    'unknown': UNKNOWN,
 }
 
 _WAITING_OPERATION_STATUSES = frozenset({'waiting_approval', 'waiting_input'})
@@ -117,8 +128,8 @@ def _stepper_html(step_index: int) -> str:
     parts = []
     for index, label in enumerate(RUN_STEPS):
         mark = '●' if index == step_index else ('✓' if index < step_index else '○')
-        color = '#3e6fd9' if index == step_index else (
-            '#2f9e63' if index < step_index else '#a7adb9')
+        color = RUNNING if index == step_index else (
+            SUCCESS if index < step_index else MUTED)
         parts.append(f'<span style="color:{color}">{mark} {label}</span>')
     return '<span style="color:#c9cdd6"> ─ </span>'.join(parts)
 
@@ -128,7 +139,7 @@ def _meta_html(view: RunStatusView) -> str:
     bits = [f'任务 {short_id}', f'用时 {format_duration(view.elapsed_seconds)}']
     if view.state not in _TERMINAL_PHASES:
         bits.append(f'最后活动 {format_last_activity(view.last_activity_seconds)}')
-    return ('<span style="color:#9399a6;font-size:10px"> · '
+    return (f'<span style="color:{LOG};font-size:10px"> · '
             + ' · '.join(bits) + '</span>')
 
 
@@ -139,7 +150,7 @@ def status_card_html(view: RunStatusView) -> str:
     text = html.escape(view.text).replace('\n', '<br>')
     body = f'<p style="font-size:14px;line-height:170%">{text}</p>' if text else ''
     return (
-        '<table width="100%" cellpadding="12"><tr><td bgcolor="#f7f9fc">'
+        f'<table width="100%" cellpadding="12"><tr><td bgcolor="{CARD_BG_STATUS}">'
         f'<span style="color:{color};font-size:11px">● {label}</span>'
         + _meta_html(view) + '<br>'
         f'<span style="font-size:10px">{_stepper_html(view.step_index)}</span>'
@@ -156,7 +167,7 @@ def terminal_line_html(view: RunStatusView) -> str:
             'unknown': '?'}.get(view.state, '●')
     return (
         f'<p style="color:{color};font-size:11px">{mark} {label}'
-        f'<span style="color:#9399a6;font-size:10px"> · '
+        f'<span style="color:{LOG};font-size:10px"> · '
         f'任务 {html.escape(view.operation_id[:9])} · '
         f'用时 {format_duration(view.elapsed_seconds)}</span></p>'
     )
