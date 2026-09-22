@@ -35,6 +35,17 @@ jobs:
           [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]]
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+      - name: Verify source run succeeded on the exact SHA
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          gh run view "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --json conclusion,headSha,status --jq '.conclusion' | grep -qx success
+          gh run view "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --json headSha --jq '.headSha' | grep -qx "$SOURCE_SHA"
       - name: Download exact Windows build artifact
         shell: bash
         env:
