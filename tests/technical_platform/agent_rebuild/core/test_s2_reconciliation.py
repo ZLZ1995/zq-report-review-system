@@ -112,12 +112,35 @@ def test_streaming_server_request_keeps_busy_without_touch():
 
     def query(_request_id):
         return {'status': 'streaming', 'billing_request_id': 'b1',
-                'replay_available': False, 'error_code': ''}
+                'replay_available': False, 'error_code': '',
+                'lease_live': True}
 
     result = reconcile_unknown_operation(repo, operation.id, query=query,
                                          replay=None)
     assert result == 'busy'
     assert repo.get_operation(operation.id).status == 'unknown'
+
+
+def test_client_reconciliation_does_not_return_busy_for_stale_stream():
+    """二次整改项2：stale lease 的 streaming 不得返回 busy，必须人工对账。"""
+    from asset_based_agent.technical_platform.agent_core.reconciliation import (
+        reconcile_unknown_operation,
+    )
+    repo = make_repo()
+    operation = unknown_op_with_stale_turn(repo)
+
+    def query(_request_id):
+        return {'status': 'streaming', 'billing_request_id': 'b1',
+                'replay_available': False, 'error_code': 'stream_lease_expired',
+                'lease_live': False}
+
+    result = reconcile_unknown_operation(repo, operation.id, query=query,
+                                         replay=None)
+    assert result == 'reconciliation_required'
+    assert repo.get_operation(operation.id).status == 'unknown'
+    payloads = [e.payload for e in repo.entries('s1', 'main')
+                if e.entry_type == 'error_message']
+    assert any(p.get('reconciliation_required') for p in payloads)
 
 
 def test_unknown_server_request_fails_locally():

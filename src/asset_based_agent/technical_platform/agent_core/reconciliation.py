@@ -74,8 +74,11 @@ def reconcile_unknown_operation(repo, operation_id, *, query, replay=None):
             turn_id=turn.id if turn is not None else None)
         return 'failed'
     if status == 'streaming':
-        # 服务端仍在执行（live lease）：保持现状，不做任何本地改写
-        return 'busy'
+        # 二次整改项2：仅当服务端证明 lease 仍活才保持 busy；
+        # stale lease 的 streaming 必须进入人工对账，绝不永久 busy
+        if result.get('lease_live'):
+            return 'busy'
+        return _mark_reconciliation_required(repo, operation, turn, result)
     # uncertain / disconnected / 其他：绝不自动重放，也不得直接改写成失败
     return _mark_reconciliation_required(repo, operation, turn, result)
 
