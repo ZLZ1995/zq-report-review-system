@@ -107,16 +107,19 @@ def test_requeue_for_shutdown_only_touches_own_running_jobs(client):
                 (db.get(ReviewJob, done.job_id), 'succeeded', 'proc-a')):
             row.status = status
             row.worker_id = worker
+            row.claim_token = f'token-{worker}'
             row.started_at = utc_now()
         db.commit()
         service.requeue_for_shutdown(
             db, worker_id='proc-a', job_ids=(mine.job_id, done.job_id),
             error_code='shutdown_grace_expired')
+        # 二次整改项1：shutdown 兜底只剥夺 ownership，不把 live job 回 queued
         mine_row = db.get(ReviewJob, mine.job_id)
-        assert mine_row.status == 'queued'
+        assert mine_row.status == 'running'
         assert mine_row.error_code == 'shutdown_grace_expired'
-        assert mine_row.worker_id is None
-        assert mine_row.started_at is None
+        assert mine_row.worker_id == 'proc-a'
+        assert mine_row.claim_token is None
+        assert mine_row.started_at is not None
         # 其他 worker 的 running job 不动
         other_row = db.get(ReviewJob, other.job_id)
         assert other_row.status == 'running'

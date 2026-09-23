@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from datetime import timedelta
 
 from sqlalchemy import select, update
@@ -24,6 +25,12 @@ from .auth_service import ServiceError, is_expired
 from .metered_model_service import BillingReconciliationRequired, MeteredModelService
 from .provider_gateway import NormalizedUsage, ProviderClient
 from .server_review_agent import ServerReviewAgent, ServerReviewBatch
+
+
+class OwnershipLost(Exception):
+    """ReviewJob 执行权已丢失：旧 worker 的所有后续写必须被拒绝。"""
+
+    code = "review_job_ownership_lost"
 
 
 class ReviewJobService:
@@ -145,6 +152,7 @@ class ReviewJobService:
         model = db.get(ModelDefinition, job.model_id)
         if model is None:
             raise ServiceError("model_unavailable", "模型当前不可用。", 409)
+        claim_token = uuid.uuid4().hex
         claimed_job_id = db.scalar(
             update(ReviewJob)
             .where(
@@ -158,6 +166,7 @@ class ReviewJobService:
                 started_at=utc_now(),
                 error_code=None,
                 worker_id=worker_id,
+                claim_token=claim_token,
                 lease_expires_at=utc_now() + timedelta(minutes=15),
             )
             .returning(ReviewJob.job_id)
@@ -174,9 +183,12 @@ class ReviewJobService:
             for index, batch in enumerate(batches, start=1):
                 db.refresh(job)
                 if job.error_code == 'cancel_requested':
-                    return self._finish_cancel(db, job)
-                job.lease_expires_at = utc_now() + timedelta(minutes=15)
-                db.commit()
+                    return self._finish_cancel(
+                        db, job, worker_id=worker_id, claim_token=claim_token)
+                # ownership fence：续租即校验归属，丢权立即拒写
+                self._fence(
+                    db, job_id=job.job_id, worker_id=worker_id,
+                    claim_token=claim_token)
                 request_payload = self.agent.request_payload(batch)
                 metered_result = self.metered.execute(
                     db,
@@ -190,10 +202,15 @@ class ReviewJobService:
                 )
                 db.refresh(job)
                 if job.error_code == 'cancel_requested':
-                    return self._finish_cancel(db, job)
+                    return self._finish_cancel(
+                        db, job, worker_id=worker_id, claim_token=claim_token)
                 issues.extend(
                     self.agent.parse_issues(metered_result.payload, batch=batch)
                 )
+                # 副作用调用完成后、写进度前再过一次 fence
+                self._fence(
+                    db, job_id=job.job_id, worker_id=worker_id,
+                    claim_token=claim_token)
                 job.completed_batches = index
                 job.progress_percent = int(index * 100 / len(batches))
                 # Publish validated batch output under the same encrypted TTL
@@ -205,11 +222,19 @@ class ReviewJobService:
                 job.result_expires_at = utc_now() + timedelta(hours=24)
                 self._record_event(db, job, "progress")
                 db.commit()
+        except OwnershipLost:
+            db.rollback()
+            raise
         except Exception as exc:
+            # 终态写同样走 fence：丢权后不得写 failed，也不得结算 hold
+            self._fence(
+                db, job_id=job.job_id, worker_id=worker_id,
+                claim_token=claim_token)
             job.status = "failed"
             job.error_code = getattr(exc, "code", "review_execution_failed")
             job.completed_at = utc_now()
             job.worker_id = None
+            job.claim_token = None
             job.lease_expires_at = None
             self._record_event(db, job, "failed")
             db.commit()
@@ -222,6 +247,9 @@ class ReviewJobService:
             )
             raise
 
+        # 成功终态写 + hold 结算前最后过一次 fence
+        self._fence(db, job_id=job.job_id, worker_id=worker_id,
+                    claim_token=claim_token)
         result_json = json.dumps(
             {"issues": issues}, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         )
@@ -234,6 +262,7 @@ class ReviewJobService:
         job.progress_percent = 100
         job.completed_at = utc_now()
         job.worker_id = None
+        job.claim_token = None
         job.lease_expires_at = None
         self._record_event(db, job, "succeeded")
         db.commit()
@@ -312,12 +341,19 @@ class ReviewJobService:
     def recover_interrupted(self, db: Session) -> list[tuple[str, str]]:
         # S3-03：先完成终态 job 的 settlement 对账，再重排被中断的任务
         self.settle_terminal_jobs(db)
-        interrupted = list(db.scalars(select(ReviewJob).where(ReviewJob.status == "running")))
+        # 二次整改项1：只重排 lease 已过期的 running job；lease 仍活的 job
+        # 可能仍有旧 worker 在执行，重排会造成双执行。
+        interrupted = list(db.scalars(select(ReviewJob).where(
+            ReviewJob.status == "running",
+            (ReviewJob.lease_expires_at.is_(None))
+            | (ReviewJob.lease_expires_at < utc_now()),
+        )))
         for job in interrupted:
             job.status = "queued"
             job.started_at = None
             job.error_code = "recovered_after_restart"
             job.worker_id = None
+            job.claim_token = None
             job.lease_expires_at = None
             self._record_event(db, job, "recovered")
         db.commit()
@@ -329,25 +365,24 @@ class ReviewJobService:
 
     def requeue_for_shutdown(self, db: Session, *, worker_id: str, job_ids,
                              error_code: str = "shutdown_grace_expired") -> int:
-        """S6-02：优雅关闭超时兜底——只把本 worker 仍在 running 的 job 重新排队。
+        """S6-02/二次整改项1：优雅关闭超时兜底——剥夺本 worker 的 ownership。
 
-        终态 job 与其他 worker 的 job 一律不动；被重排的 job 由下次启动的
-        recover_interrupted 重新调度。
+        live job 保持 running 且 lease 不动：新进程不得立即 claim（避免双执行）；
+        旧 worker 恢复后的所有写操作被 ownership fence 拒绝。lease 过期后由
+        下次启动的 recover_interrupted 统一重排。终态 job 与其他 worker 的
+        job 一律不动。
         """
-        requeued = 0
+        fenced = 0
         for job_id in job_ids:
             job = db.get(ReviewJob, job_id)
             if job is None or job.status != "running" or job.worker_id != worker_id:
                 continue
-            job.status = "queued"
-            job.started_at = None
-            job.worker_id = None
-            job.lease_expires_at = None
+            job.claim_token = None
             job.error_code = error_code
-            self._record_event(db, job, "shutdown_requeue")
-            requeued += 1
+            self._record_event(db, job, "shutdown_fence")
+            fenced += 1
         db.commit()
-        return requeued
+        return fenced
 
     def list_events(self, db: Session, *, user_id: str, job_id: str,
                     after_sequence: int = 0) -> list[ReviewJobEvent]:
@@ -357,10 +392,14 @@ class ReviewJobService:
             ReviewJobEvent.sequence > after_sequence,
         ).order_by(ReviewJobEvent.sequence)))
 
-    def _finish_cancel(self, db, job):
+    def _finish_cancel(self, db, job, *, worker_id, claim_token):
+        # cancel 收尾同样是 terminal 写：必须先过 ownership fence
+        self._fence(db, job_id=job.job_id, worker_id=worker_id,
+                    claim_token=claim_token)
         job.status = 'cancelled'
         job.completed_at = utc_now()
         job.worker_id = None
+        job.claim_token = None
         job.lease_expires_at = None
         self._record_event(db, job, 'cancelled')
         db.commit()
@@ -431,6 +470,28 @@ class ReviewJobService:
         if job is None or job.user_id != user_id:
             raise ServiceError("review_job_not_found", "审核任务不存在。", 404)
         return job
+
+    @staticmethod
+    def _fence(db: Session, *, job_id: str, worker_id: str, claim_token: str) -> None:
+        """Ownership fence：校验归属并续租；丢权立即回滚并拒绝后续写。"""
+        renewed = db.scalar(
+            update(ReviewJob)
+            .where(
+                ReviewJob.job_id == job_id,
+                ReviewJob.status == "running",
+                ReviewJob.worker_id == worker_id,
+                ReviewJob.claim_token == claim_token,
+                ReviewJob.lease_expires_at > utc_now(),
+            )
+            .values(lease_expires_at=utc_now() + timedelta(minutes=15))
+            .returning(ReviewJob.job_id)
+            # lease 比较必须在 SQL 侧完成：SQLite 读回的是 naive datetime，
+            # ORM evaluate 同步策略会在 Python 侧与 aware utc_now 比较而报错。
+            .execution_options(synchronize_session=False)
+        )
+        if renewed is None:
+            db.rollback()
+            raise OwnershipLost(f"review job ownership lost: {job_id}")
 
     @staticmethod
     def _record_event(db: Session, job: ReviewJob, kind: str) -> ReviewJobEvent:

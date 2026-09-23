@@ -65,3 +65,53 @@ def test_release_asset_workflow_only_promotes_an_exact_successful_ci_artifact():
     assert 'ZQ-Workspace-$VERSION-Managed-Windows.zip' in workflow
     assert 'ZQ-Workspace-0.2.7-Windows.zip' not in workflow
     assert '--clobber' in workflow
+
+
+def test_security_ci_workflow_is_valid_and_runs_both_security_jobs():
+    """二次整改项5：security-ci.yml 必须是合法 YAML 且两个安全 job 齐全。
+
+    旧配置在 gitleaks step 下写了两个 env 映射（重复键），GitHub 直接判定
+    workflow 无效——security-checks conclusion=failure 且 jobs=0。用严格
+    解析器拒绝重复键，防止回归。
+    """
+    root = Path(__file__).resolve().parents[2]
+    text = (root / '.github/workflows/security-ci.yml').read_text(
+        encoding='utf-8')
+    import yaml
+
+    class _StrictLoader(yaml.SafeLoader):
+        """拒绝重复键的 SafeLoader（pyyaml 默认静默取后者，掩盖配置错误）。"""
+
+    def _no_duplicates(loader, node, deep=False):
+        mapping = {}
+        for key_node, value_node in node.value:
+            key = loader.construct_object(key_node, deep=True)
+            if key in mapping:
+                raise ValueError(f'重复键: {key!r}')
+            mapping[key] = loader.construct_object(value_node, deep=deep)
+        return mapping
+
+    _StrictLoader.add_constructor(
+        yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _no_duplicates)
+    try:
+        doc = yaml.load(text, Loader=_StrictLoader)
+    except ValueError as exc:
+        raise AssertionError(
+            f'security-ci.yml 存在重复键，workflow 无法创建 job: {exc}'
+        ) from exc
+    jobs = doc['jobs']
+    assert 'dependency-audit' in jobs, 'dependency-audit job 必须存在'
+    assert 'secret-scan' in jobs, 'secret-scan job 必须存在'
+    gitleaks = next(
+        step for step in jobs['secret-scan']['steps']
+        if 'gitleaks' in str(step.get('uses', '')))
+    env = gitleaks.get('env') or {}
+    assert 'GITHUB_TOKEN' in env, 'gitleaks env 必须含 GITHUB_TOKEN'
+    assert 'GITLEAKS_LICENSE' in env, 'gitleaks env 必须含 GITLEAKS_LICENSE（允许空 secret）'
+    # 触发面：main push / PR / 定时（YAML 1.1 下 on 可能被解析为 True）
+    triggers = doc.get('on', doc.get(True))
+    assert triggers is not None, 'workflow 必须声明触发条件'
+    push = triggers.get('push') or {}
+    assert 'main' in (push.get('branches') or [])
+    assert 'pull_request' in triggers
+    assert 'schedule' in triggers

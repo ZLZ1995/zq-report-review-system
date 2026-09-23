@@ -7,12 +7,13 @@ configuration/_record_attempt），不绕开计费与安全体系。
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -38,6 +39,10 @@ if TYPE_CHECKING:
     from ..models import ModelDefinition, ProviderRoute, User
 
 SUPPORTED_PROTOCOL_VERSIONS = (1,)
+
+# 二次整改项2：streaming 租约——证明服务端 worker 仍活的唯一凭据
+STREAM_LEASE_TTL = timedelta(minutes=5)
+_STREAM_RENEW_MIN_INTERVAL_SECONDS = 1.0
 UNCERTAIN_PROVIDER_CODES = {
     'provider_usage_invalid', 'provider_usage_missing',
     'provider_network_error', 'provider_invalid_json',
@@ -364,7 +369,9 @@ class AgentCompletionService:
         billing = BillingRequest(
             user_id=user_id, model_id=model_id, hold_id=hold.hold_id,
             client_request_id=client_request_id, request_hash=request_hash,
-            status='streaming')
+            status='streaming', started_at=utc_now(),
+            last_activity_at=utc_now(),
+            lease_expires_at=utc_now() + STREAM_LEASE_TTL)
         db.add(billing)
         try:
             db.commit()
@@ -456,7 +463,8 @@ class AgentCompletionService:
     ) -> dict[str, object] | None:
         """S2-03：按 client_request_id 返回可对账状态；无记录返回 None。
 
-        只读查询：不触碰计费、不触发回放、不改任何状态。
+        二次整改项2：stale streaming（lease 过期）在此惰性清扫为 uncertain，
+        绝不向客户端返回永久 busy；live streaming 只读上报 lease_live。
         """
         billing = db.scalar(
             select(BillingRequest).where(
@@ -465,6 +473,15 @@ class AgentCompletionService:
             ))
         if billing is None:
             return None
+        if (billing.status == 'streaming'
+                and (billing.lease_expires_at is None
+                     or is_expired(billing.lease_expires_at))):
+            sweep_stale_streaming(db)
+            db.refresh(billing)
+        lease_live = bool(
+            billing.status == 'streaming'
+            and billing.lease_expires_at is not None
+            and not is_expired(billing.lease_expires_at))
         replay_available = bool(
             billing.status == 'succeeded'
             and billing.response_ciphertext
@@ -475,6 +492,7 @@ class AgentCompletionService:
             'billing_request_id': billing.billing_request_id,
             'replay_available': replay_available,
             'error_code': billing.error_code or '',
+            'lease_live': lease_live,
         }
 
     # --------------------------------------------------------------- 流式
@@ -505,12 +523,14 @@ class AgentCompletionService:
             replay.add(event)
             return event
 
+        last_renew = time.monotonic()
         try:
             for event in self.metered.provider_client.stream(
                     route, wire_payload):
                 provider_started = True
                 if event.get('kind') == 'usage':
                     usage = _usage_from_event(event)
+                last_renew = self._renew_stream_lease(db, billing, last_renew)
                 yield track(event)
             if usage is None:
                 raise ProviderCallError(
@@ -542,6 +562,31 @@ class AgentCompletionService:
                 db, billing=billing, hold=hold, route=route, user=user,
                 model=model, provider_started=provider_started,
                 usage=usage)})
+
+    def _renew_stream_lease(self, db: Session, billing,
+                            last_renew: float) -> float:
+        """二次整改项2：每个 chunk/usage/receipt 事件刷新活性与租约（限频）。
+
+        条件 UPDATE 只在仍为 streaming 时生效；终态已被其他路径写掉时静默
+        跳过。返回最近一次续租的 monotonic 时间。
+        """
+        now_mono = time.monotonic()
+        if now_mono - last_renew < _STREAM_RENEW_MIN_INTERVAL_SECONDS:
+            return last_renew
+        db.execute(
+            update(BillingRequest)
+            .where(
+                BillingRequest.billing_request_id == billing.billing_request_id,
+                BillingRequest.status == 'streaming',
+            )
+            .values(
+                last_activity_at=utc_now(),
+                lease_expires_at=utc_now() + STREAM_LEASE_TTL,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        db.commit()
+        return now_mono
 
     def _settle_success(self, db: Session, *, billing, hold, charge,
                         replay: CanonicalReplayBuilder):
@@ -682,6 +727,30 @@ class AgentCompletionService:
                 db.commit()
         except Exception:  # noqa: BLE001 - 兜底路径不再上抛
             return
+
+
+def sweep_stale_streaming(db: Session) -> int:
+    """二次整改项2：清扫 lease 过期的 streaming 请求为 uncertain。
+
+    服务进程在写入 streaming 后崩溃会留下永久 busy 的中间态；lease 过期即
+    证明无活 worker，必须进入可恢复（对账）状态。关联 active hold 一并标记
+    uncertain，等待人工/自动对账，绝不私自释放或扣费。幂等，返回清扫数量。
+    """
+    stale = list(db.scalars(select(BillingRequest).where(
+        BillingRequest.status == 'streaming',
+        (BillingRequest.lease_expires_at.is_(None))
+        | (BillingRequest.lease_expires_at < utc_now()),
+    )))
+    for billing in stale:
+        billing.status = 'uncertain'
+        billing.error_code = 'stream_lease_expired'
+        billing.completed_at = utc_now()
+        hold = db.get(BalanceHold, billing.hold_id)
+        if hold is not None and hold.status == 'active':
+            hold.status = 'uncertain'
+    if stale:
+        db.commit()
+    return len(stale)
 
 
 def replay_events(replay: ReplayResult) -> Iterator[dict[str, object]]:

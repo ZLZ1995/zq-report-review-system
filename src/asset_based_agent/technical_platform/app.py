@@ -11,6 +11,7 @@ import sqlite3
 import sys
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import ClassVar
 
@@ -1282,7 +1283,38 @@ class PlatformWindow(QMainWindow):
             self.refresh_session_badges()
             self.session_badge_timer.start()
 
+    def _sync_file_rows_selection(self):
+        """二次整改项4：checkbox 真实状态同步到 _file_rows 快照（单一事实源）。
+
+        _file_rows 只是 refresh_details 时的快照；手工勾选/批量选择/批量清空
+        只改 widget。任何 check state 变化（经 itemChanged→save_current_draft
+        或批量操作后的显式调用）都必须把真实勾选同步回 _file_rows，并刷新
+        行标签与"本轮已选"筛选，否则筛选/详情/标签全部停留在旧状态。
+        """
+        if not self._file_rows:
+            return
+        selected = self.selected_file_ids()
+        changed = any(
+            (row.file_id in selected) != row.selected for row in self._file_rows)
+        if not changed:
+            return
+        self._file_rows = [
+            replace(row, selected=row.file_id in selected)
+            for row in self._file_rows
+        ]
+        # 行标签同步刷新（阻断信号，避免 setText 触发 itemChanged 递归）
+        blocker = QSignalBlocker(self.files)
+        views = {row.file_id: row for row in self._file_rows}
+        for i in range(self.files.count()):
+            item = self.files.item(i)
+            view = views.get(item.data(Qt.ItemDataRole.UserRole))
+            if view is not None:
+                item.setText(row_label(view, files_map={}))
+        del blocker
+        self._apply_file_filter()
+
     def save_current_draft(self, *_args):
+        self._sync_file_rows_selection()
         if self._draft_binding is None:
             return
         service, identity = self._draft_binding

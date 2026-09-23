@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from decimal import Decimal
 
 from sqlalchemy import select
@@ -12,10 +13,12 @@ from asset_based_agent.report_review_server.models import (
     BillingRequest,
     ProviderAttempt,
     WalletLedger,
+    utc_now,
 )
 from asset_based_agent.report_review_server.services.agent_completion_service import (
     AgentCompletionService,
     PreparedStream,
+    sweep_stale_streaming,
 )
 from asset_based_agent.report_review_server.services.provider_gateway import (
     ProviderCallError,
@@ -434,3 +437,105 @@ def test_sampling_cannot_override_reserved_wire_keys(client):
         {'role': 'user', 'content': '你好'}]
     assert prepared.wire_payload['tools'][0]['function']['name'] == 'calc'
     assert prepared.wire_payload['temperature'] == 0.3
+
+
+# ------------------------------------------------------------------ 二次整改项2：stale streaming 租约
+
+def _completion_service(client):
+    return AgentCompletionService(
+        client.app.state.review_job_service.metered,
+        client.app.state.session_factory)
+
+
+def _insert_streaming_row(client, *, user_id, model_id, request_id,
+                          lease_delta_minutes):
+    """直接落一行 streaming 计费请求（模拟服务进程崩溃留下的中间态）。"""
+    with _db(client) as db:
+        hold = BalanceHold(
+            user_id=user_id, model_id=model_id,
+            client_request_id=f'hold:{request_id}',
+            reserved_amount=Decimal('1.00000000'),
+            expires_at=utc_now() + timedelta(hours=24))
+        db.add(hold)
+        db.flush()
+        billing = BillingRequest(
+            user_id=user_id, model_id=model_id, hold_id=hold.hold_id,
+            client_request_id=request_id, request_hash='x' * 64,
+            status='streaming', started_at=utc_now(),
+            last_activity_at=utc_now(),
+            lease_expires_at=utc_now() + timedelta(minutes=lease_delta_minutes))
+        db.add(billing)
+        db.commit()
+        return billing.billing_request_id, hold.hold_id
+
+
+def test_streaming_request_with_live_lease_reports_busy(client):
+    """live lease 的 streaming：对账返回 streaming + lease_live，不被清扫。"""
+    admin, user = _admin_and_user(client)
+    model = _setup_billable(client, admin, user)
+    user_id = user['user']['user_id']
+    _insert_streaming_row(client, user_id=user_id, model_id=model['model_id'],
+                          request_id='LIVE-1', lease_delta_minutes=5)
+    service = _completion_service(client)
+    with _db(client) as db:
+        result = service.reconcile(db, user_id=user_id,
+                                   client_request_id='LIVE-1')
+        assert result['status'] == 'streaming'
+        assert result['lease_live'] is True
+        row = db.scalar(select(BillingRequest).where(
+            BillingRequest.client_request_id == 'LIVE-1'))
+        assert row.status == 'streaming'  # live lease 不得被清扫
+
+
+def test_stale_streaming_request_becomes_uncertain(client):
+    """stale lease 的 streaming：对账惰性清扫为 uncertain，绝不永久 busy。"""
+    admin, user = _admin_and_user(client)
+    model = _setup_billable(client, admin, user)
+    user_id = user['user']['user_id']
+    _insert_streaming_row(client, user_id=user_id, model_id=model['model_id'],
+                          request_id='STALE-1', lease_delta_minutes=-1)
+    service = _completion_service(client)
+    with _db(client) as db:
+        result = service.reconcile(db, user_id=user_id,
+                                   client_request_id='STALE-1')
+        assert result['status'] == 'uncertain'
+        assert result['lease_live'] is False
+        row = db.scalar(select(BillingRequest).where(
+            BillingRequest.client_request_id == 'STALE-1'))
+        assert row.status == 'uncertain'
+        assert row.error_code == 'stream_lease_expired'
+
+
+def test_server_restart_sweeps_stale_streaming(client):
+    """启动清扫：过期 streaming → uncertain；live streaming 不动；幂等。"""
+    admin, user = _admin_and_user(client)
+    model = _setup_billable(client, admin, user)
+    user_id = user['user']['user_id']
+    _insert_streaming_row(client, user_id=user_id, model_id=model['model_id'],
+                          request_id='STALE-2', lease_delta_minutes=-1)
+    _insert_streaming_row(client, user_id=user_id, model_id=model['model_id'],
+                          request_id='LIVE-2', lease_delta_minutes=5)
+    with _db(client) as db:
+        assert sweep_stale_streaming(db) == 1
+        stale = db.scalar(select(BillingRequest).where(
+            BillingRequest.client_request_id == 'STALE-2'))
+        live = db.scalar(select(BillingRequest).where(
+            BillingRequest.client_request_id == 'LIVE-2'))
+        assert stale.status == 'uncertain'
+        assert stale.error_code == 'stream_lease_expired'
+        assert live.status == 'streaming'
+        assert sweep_stale_streaming(db) == 0  # 幂等
+
+
+def test_stale_streaming_releases_or_marks_hold_for_reconciliation(client):
+    """stale streaming 的 active hold 必须被标记为 uncertain 进入对账。"""
+    admin, user = _admin_and_user(client)
+    model = _setup_billable(client, admin, user)
+    user_id = user['user']['user_id']
+    _billing_id, hold_id = _insert_streaming_row(
+        client, user_id=user_id, model_id=model['model_id'],
+        request_id='STALE-3', lease_delta_minutes=-1)
+    with _db(client) as db:
+        assert sweep_stale_streaming(db) == 1
+        hold = db.get(BalanceHold, hold_id)
+        assert hold.status == 'uncertain'

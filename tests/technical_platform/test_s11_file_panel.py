@@ -206,3 +206,101 @@ def test_file_detail_panel_on_double_click(tmp_path):
     assert store.files(project)[0]['sha256'][:16] in detail, \
         '详情显示完整 hash'
     window.close()
+
+
+# ------------------------------------------------------------ 二次整改项4：选中态实时一致
+
+def _filter_visible_ids(window, kind_text):
+    window.file_filter.setCurrentIndex(window.file_filter.findText(kind_text))
+    QApplication.instance().processEvents()
+    return {window.files.item(i).data(Qt.ItemDataRole.UserRole)
+            for i in range(window.files.count())
+            if not window.files.item(i).isHidden()}
+
+
+def _set_checked(window, file_id, checked):
+    for i in range(window.files.count()):
+        item = window.files.item(i)
+        if item.data(Qt.ItemDataRole.UserRole) == file_id:
+            item.setCheckState(
+                Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+            return item
+    raise AssertionError(f'文件行不存在: {file_id}')
+
+
+def test_file_filter_reflects_manual_checkbox_change(tmp_path):
+    """手工勾选/取消后：本轮已选筛选与行标签必须立即反映真实 checkbox。"""
+    app, store, window, project = _make_window(tmp_path)
+    _add_file(store, project, tmp_path, '2024年度审核报告.docx')
+    f2 = _add_file(store, project, tmp_path, '往来明细202607.xlsx')
+    window.refresh_details(selected_ids=set())
+    app.processEvents()
+    assert _filter_visible_ids(window, '本轮已选') == set()
+
+    _set_checked(window, f2, True)
+    app.processEvents()
+    assert _filter_visible_ids(window, '本轮已选') == {f2}, \
+        '手工勾选后"本轮已选"筛选必须立即包含该行'
+    label = window.files.item(1).text()
+    assert '本轮已选' in label.splitlines()[-1], '行标签状态必须同步'
+    window.close()
+
+
+def test_file_filter_reflects_batch_select(tmp_path):
+    """批量选择后：本轮已选筛选立即包含全部勾选行。"""
+    app, store, window, project = _make_window(tmp_path)
+    ids = {_add_file(store, project, tmp_path, name)
+           for name in ('2024年度审核报告.docx', '往来明细202607.xlsx', '其它.zip')}
+    window.refresh_details(selected_ids=set())
+    app.processEvents()
+    window.select_visible_files()
+    app.processEvents()
+    assert _filter_visible_ids(window, '本轮已选') == ids
+    window.close()
+
+
+def test_file_filter_reflects_batch_clear(tmp_path):
+    """批量清空后：本轮已选筛选立即变空。"""
+    app, store, window, project = _make_window(tmp_path)
+    ids = {_add_file(store, project, tmp_path, name)
+           for name in ('2024年度审核报告.docx', '往来明细202607.xlsx')}
+    window.refresh_details(selected_ids=ids)
+    app.processEvents()
+    assert _filter_visible_ids(window, '本轮已选') == ids
+    window.file_filter.setCurrentIndex(window.file_filter.findText('全部文件'))
+    app.processEvents()
+    window.clear_visible_files()
+    app.processEvents()
+    assert _filter_visible_ids(window, '本轮已选') == set()
+    window.close()
+
+
+def test_file_detail_reflects_current_selection(tmp_path):
+    """文件详情中的"本轮状态"必须以当前 checkbox 为准。"""
+    app, store, window, project = _make_window(tmp_path)
+    f1 = _add_file(store, project, tmp_path, '2024年度审核报告.docx')
+    window.refresh_details(selected_ids=set())
+    app.processEvents()
+    item = _set_checked(window, f1, True)
+    app.processEvents()
+    window.show_file_detail(item)
+    assert '本轮状态：已选' in window.file_detail.text()
+    _set_checked(window, f1, False)
+    app.processEvents()
+    window.show_file_detail(item)
+    assert '本轮状态：未选' in window.file_detail.text()
+    window.close()
+
+
+def test_selected_filter_not_stale_after_draft_save(tmp_path):
+    """草稿保存路径同样同步选中态：保存后筛选不得停留在旧快照。"""
+    app, store, window, project = _make_window(tmp_path)
+    f1 = _add_file(store, project, tmp_path, '2024年度审核报告.docx')
+    window.refresh_details(selected_ids=set())
+    app.processEvents()
+    _set_checked(window, f1, True)
+    app.processEvents()
+    window.save_current_draft()  # 显式走草稿保存路径
+    app.processEvents()
+    assert _filter_visible_ids(window, '本轮已选') == {f1}
+    window.close()

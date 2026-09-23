@@ -79,6 +79,7 @@ from .services.agent_completion_service import (
     AgentCompletionService,
     ReplayResult,
     replay_events,
+    sweep_stale_streaming,
 )
 from .services.auth_service import AuthContext, AuthService, ServiceError
 from .services.browser_step import propose_browser_step
@@ -122,6 +123,7 @@ def create_app(
     async def lifespan(_app: FastAPI):
         with session_factory() as cleanup_db:
             cleanup_expired_temporary_data(cleanup_db)
+            sweep_stale_streaming(cleanup_db)  # 二次整改项2：启动清扫 stale streaming
         _app.state.review_job_executor.recover()
         cleanup_task = asyncio.create_task(_temporary_cleanup_loop(session_factory))
         try:

@@ -16,7 +16,8 @@ def run(coro):
 
 
 def make_kernel(repo, *, scripts=(), executor_id=None, lease_seconds=15.0,
-                heartbeat_interval=5.0, stream_factory=None):
+                heartbeat_interval=5.0, stream_factory=None,
+                heartbeat_max_failures=3):
     from asset_based_agent.technical_platform.agent_core.fakes import (
         FakeModelPort,
     )
@@ -29,7 +30,8 @@ def make_kernel(repo, *, scripts=(), executor_id=None, lease_seconds=15.0,
         model = FakeModelPort(list(scripts))
     return AgentKernel(repo=repo, model=model, executor_id=executor_id,
                        lease_seconds=lease_seconds,
-                       heartbeat_interval=heartbeat_interval)
+                       heartbeat_interval=heartbeat_interval,
+                       heartbeat_max_failures=heartbeat_max_failures)
 
 
 def memory_repo():
@@ -169,3 +171,129 @@ def test_v15_to_v16_migration_adds_lease_columns(tmp_path):
                 'last_heartbeat_at'} <= columns
         texts = [row[0] for row in db.execute('SELECT text FROM messages')]
     assert texts == ['历史消息'], '迁移不得改写旧消息'
+
+
+# ------------------------------------------------------------------ 二次整改项3：heartbeat 瞬时失败容错
+
+def test_single_heartbeat_failure_does_not_stop_renewal():
+    """一次瞬时 SQLite 故障不得让 heartbeat 永久退出。"""
+    repo = memory_repo()
+    heartbeats = []
+    original = repo.heartbeat_operation
+    state = {'failures_left': 1}
+
+    def flaky(operation_id, executor_id, lease_seconds):
+        heartbeats.append(operation_id)
+        if state['failures_left'] > 0:
+            state['failures_left'] -= 1
+            raise sqlite3.OperationalError('database is locked')
+        return original(operation_id, executor_id, lease_seconds)
+
+    repo.heartbeat_operation = flaky
+
+    async def slow_stream(_request, _cancel):
+        from asset_based_agent.technical_platform.agent_core.contracts import (
+            ModelEvent,
+        )
+        yield ModelEvent('message_start', {})
+        await asyncio.sleep(0.3)
+        yield ModelEvent('text_delta', {'text': '慢回答'})
+        yield ModelEvent('message_complete', {})
+
+    kernel = make_kernel(repo, executor_id='proc-a', lease_seconds=10,
+                         heartbeat_interval=0.05, stream_factory=slow_stream)
+    accepted = run(kernel.submit('s1', 'main', {'text': '问'}))
+    assert repo.get_operation(accepted.operation_id).status == 'completed'
+    assert len(heartbeats) >= 3, '一次瞬时失败后必须继续续租，不得停止心跳'
+
+
+def test_heartbeat_recovers_after_transient_sqlite_error():
+    """连续两次瞬时故障（未达容忍上限）后恢复，lease 继续刷新。"""
+    repo = memory_repo()
+    heartbeats = []
+    original = repo.heartbeat_operation
+    state = {'failures_left': 2}
+
+    def flaky(operation_id, executor_id, lease_seconds):
+        heartbeats.append(operation_id)
+        if state['failures_left'] > 0:
+            state['failures_left'] -= 1
+            raise sqlite3.OperationalError('database is locked')
+        return original(operation_id, executor_id, lease_seconds)
+
+    repo.heartbeat_operation = flaky
+
+    async def slow_stream(_request, _cancel):
+        from asset_based_agent.technical_platform.agent_core.contracts import (
+            ModelEvent,
+        )
+        yield ModelEvent('message_start', {})
+        await asyncio.sleep(0.4)
+        yield ModelEvent('text_delta', {'text': '慢回答'})
+        yield ModelEvent('message_complete', {})
+
+    kernel = make_kernel(repo, executor_id='proc-a', lease_seconds=10,
+                         heartbeat_interval=0.05, stream_factory=slow_stream)
+    accepted = run(kernel.submit('s1', 'main', {'text': '问'}))
+    record = repo.get_operation(accepted.operation_id)
+    assert record.status == 'completed'
+    assert len(heartbeats) >= 4, '两次瞬时故障后必须恢复续租'
+    assert record.lease_expires_at is not None, '恢复后 lease 必须被刷新'
+
+
+def test_repeated_heartbeat_failure_stops_operation_safely():
+    """连续失败达到容忍上限：停止心跳并主动取消执行（不静默失去 lease）。"""
+    import time
+
+    repo = memory_repo()
+    heartbeats = []
+
+    def always_fail(operation_id, executor_id, lease_seconds):
+        heartbeats.append(operation_id)
+        raise sqlite3.OperationalError('disk I/O error')
+
+    repo.heartbeat_operation = always_fail
+
+    async def cancellable_stream(_request, cancel):
+        from asset_based_agent.technical_platform.agent_core.contracts import (
+            ModelEvent,
+        )
+        yield ModelEvent('message_start', {})
+        deadline = time.monotonic() + 5  # 兜底：红阶段不得死等
+        while not cancel.cancelled and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+        yield ModelEvent('message_complete', {})
+
+    kernel = make_kernel(repo, executor_id='proc-a', lease_seconds=10,
+                         heartbeat_interval=0.05, heartbeat_max_failures=3,
+                         stream_factory=cancellable_stream)
+    accepted = run(kernel.submit('s1', 'main', {'text': '问'}))
+    status = repo.get_operation(accepted.operation_id).status
+    assert status in ('cancelled', 'failed', 'aborted'), \
+        f'连续心跳失败必须把 operation 收到安全终态，实际 {status}'
+    assert len(heartbeats) == 3, '达到最大容忍次数后心跳循环必须停止重试'
+
+
+def test_live_operation_not_recovered_after_one_transient_heartbeat_failure():
+    """一次瞬时心跳失败后 lease 仍活：其他进程不得 recover 该 operation。"""
+    repo = memory_repo()
+    operation = repo.begin_operation(
+        's1', 'main', user_text='问', request_id='r1',
+        executor_id='proc-a', lease_seconds=300)
+    original = repo.heartbeat_operation
+    state = {'failed': False}
+
+    def flaky(operation_id, executor_id, lease_seconds):
+        if not state['failed']:
+            state['failed'] = True
+            raise sqlite3.OperationalError('database is locked')
+        return original(operation_id, executor_id, lease_seconds)
+
+    repo.heartbeat_operation = flaky
+    with pytest.raises(sqlite3.OperationalError):
+        repo.heartbeat_operation(operation.id, 'proc-a', 300)
+    repo.heartbeat_operation(operation.id, 'proc-a', 300)  # 瞬时故障后恢复续租
+    kernel_b = make_kernel(repo, executor_id='proc-b')
+    result = run(kernel_b.recover('s1'))
+    assert result['interrupted'] == [], 'lease 仍活的 operation 不得被 recover'
+    assert repo.get_operation(operation.id).status == 'running'

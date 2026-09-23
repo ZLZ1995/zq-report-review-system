@@ -131,3 +131,13 @@ CI 基线: technical-platform-client / report-review-server 在 879a4aa 均 succ
 阶段结论（续）：
 - S14 已完成（2026-09-22）：对比度/间距/卡片层级/最大内容宽度/系统日志压缩/当前选中状态/运行中状态色/错误警告成功色全部落地，10 项验收测试全绿；阶段报告见 remediation/s14/STAGE_REPORT.md
 - 最终交付（2026-09-22）：分支 kimi/work-repair-s1-s14 已推送 origin（db05139）；S8-06 main 分支保护已生效（需 PR + 1 review + client-regression/client-build/server-tests/server-image 四个 status check 严格最新、禁 force push、禁删除、会话需解决）；release-assets.yml 增加"源 CI run 必须在 exact SHA 上成功"校验步骤
+
+
+阶段结论（续）：
+- R2-1 已完成（2026-09-23）：ReviewJob ownership fence——claim_token 列 + 迁移 0009；claim 写入 token；执行期所有写（续租/进度/结果/成功/失败/cancel 收尾）走条件 UPDATE fence（synchronize_session=False 规避 SQLite naive/aware 比较）；requeue_for_shutdown 改为只剥夺 ownership 不回 queued；recover_interrupted 只收 lease 过期/缺失的 running；executor 单独吞 OwnershipLost；5 个并发用例 + 迁移用例全绿；定向 36 passed，回归 328+1s
+- R2-2 已完成（2026-09-23）：stale streaming 租约——BillingRequest 增 started_at/last_activity_at/lease_expires_at + 迁移 0010；stream 每事件续租（1s 限频）；sweep_stale_streaming（启动 + reconcile 惰性双通道，stale→uncertain、hold→uncertain 不私自动钱）；客户端 reconciliation 仅 lease_live 才 busy；5 个用例全绿；回归 333+1s / 476+9xf
+- R2-3 已完成（2026-09-23）：heartbeat 容错——heartbeat_max_failures=3，连续失败计数 + 有界 backoff + 超限主动 cancel（不静默失去 lease）；4 个用例全绿；回归 480+9xf
+- R2-4 已完成（2026-09-23）：文件面板选中态——_sync_file_rows_selection（方案 B 单一事实源），任何 check state 变化同步 _file_rows + 行标签（QSignalBlocker 防递归）+ 筛选；5 个用例全绿；回归 92 + 509
+- R2-5 已完成（2026-09-23）：security-ci.yml 重复 env 键合并（旧配置 workflow 无效、jobs=0）；严格解析回归测试锁定；PR #12 真实触发 dependency-audit + secret-scan 双 job success；分支保护 required checks 增至 6 个（+dependency-audit/secret-scan）；场景 E fixture 分支验证 gitleaks 真实阻断（fake PAT → failure）后删除恢复 green
+- R2 全量回归（2026-09-23）：8 分块 2635 passed + 9 xfailed + 1 skipped 全绿；六项 CI（client-regression/client-build/server-tests/server-image/dependency-audit/secret-scan）在 PR #12 全部 success；Zeabur 生产部署（main de851be）success
+- R2 交付：分支 kimi/work-repair-round2（1d1fbdb），PR #12 待审，按清单要求不自动合并

@@ -60,7 +60,7 @@ class AgentKernel:
                  tool_resolver=None, policy=None, approver=None,
                  file_scope=None, context_builder=None,
                  executor_id=None, lease_seconds=15.0,
-                 heartbeat_interval=5.0):
+                 heartbeat_interval=5.0, heartbeat_max_failures=3):
         self.repo = repo
         self._model = model
         self.tools = list(tools)
@@ -74,6 +74,8 @@ class AgentKernel:
         self.executor_id = executor_id or _PROCESS_EXECUTOR_ID
         self.lease_seconds = lease_seconds
         self.heartbeat_interval = heartbeat_interval
+        # 二次整改项3：瞬时心跳故障容忍次数（连续达到才停止执行）
+        self.heartbeat_max_failures = heartbeat_max_failures
         self._listeners = []
         self._sequence = 0
         self._tasks = {}
@@ -228,7 +230,14 @@ class AgentKernel:
         return accepted
 
     async def _heartbeat_loop(self, operation_id):
-        """S2-01：驱动期间周期刷新 lease；repo 异常只告警不穿透。"""
+        """S2-01：驱动期间周期刷新 lease；repo 异常只告警不穿透。
+
+        二次整改项3：瞬时失败（SQLite/IO 抖动）不得立即放弃续租——连续失败
+        计数 + 递增 backoff；连续达到 heartbeat_max_failures 次才停止心跳，
+        并主动取消执行（无 lease 的副作用不得继续运行），由驱动循环的终态
+        兜底把 operation 收到安全终态。成功后失败计数清零。
+        """
+        consecutive_failures = 0
         while True:
             await asyncio.sleep(self.heartbeat_interval)
             try:
@@ -236,9 +245,25 @@ class AgentKernel:
                         operation_id, self.executor_id, self.lease_seconds):
                     return  # operation 已终态，停止心跳
             except Exception:
-                logger.warning('lease 心跳失败: %s', operation_id,
+                consecutive_failures += 1
+                logger.warning('lease 心跳失败(%d/%d): %s',
+                               consecutive_failures,
+                               self.heartbeat_max_failures, operation_id,
                                exc_info=True)
-                return
+                if consecutive_failures >= self.heartbeat_max_failures:
+                    logger.error(
+                        'lease 心跳连续失败 %d 次，主动停止执行: %s',
+                        consecutive_failures, operation_id)
+                    cancel = self._cancels.get(operation_id)
+                    if cancel is not None:
+                        cancel.cancel()
+                    return
+                # backoff：给瞬时故障恢复窗口，然后继续续租
+                await asyncio.sleep(min(
+                    self.heartbeat_interval * consecutive_failures,
+                    self.heartbeat_interval * 4))
+                continue
+            consecutive_failures = 0
 
     async def _drive(self, operation, tools, *, wait):
         session_id, lane_id = operation.session_id, operation.lane_id
