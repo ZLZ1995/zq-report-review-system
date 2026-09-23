@@ -12,6 +12,8 @@ import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 
+from .review_job_service import OwnershipLost
+
 logger = logging.getLogger(__name__)
 
 
@@ -67,6 +69,13 @@ class ReviewJobExecutor:
                     job_id=job_id,
                     worker_id=self.worker_id,
                 )
+            except OwnershipLost:
+                # 二次整改项1：ownership 被 shutdown 兜底剥夺后，旧 worker 的写
+                # 已被 fence 拒绝；此处只回滚，绝不调 fail_requested_job 改写状态。
+                db.rollback()
+                logger.info(
+                    'review job %s ownership lost, old worker stops writes', job_id)
+                return
             except Exception as exc:  # noqa: BLE001 - persist only a safe public code
                 # Provider-call failures are persisted inside execute_job. This
                 # fallback closes preflight failures that happen before the
@@ -102,8 +111,9 @@ class ReviewJobExecutor:
 
         1. 设置 shutdown 状态，停止接收新任务；
         2. 等待活跃 worker 到达安全检查点（自然完成）直到宽限期；
-        3. 超时后把仍 running 的 job 重新排队标记 shutdown_grace_expired，
-           留待下次启动 recover_interrupted 恢复；
+        3. 超时后剥夺仍 running job 的 ownership（标记 shutdown_grace_expired、
+           claim_token 置空、保持 running 与 lease），lease 过期后由下次启动的
+           recover_interrupted 重排，避免新旧进程双执行；
         4. 最后结束线程池（cancel_futures 取消未开始的排队任务——它们从未
            在库中认领，恢复流程会重新调度）。
         """

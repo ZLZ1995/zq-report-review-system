@@ -69,6 +69,23 @@ def test_reconciliation_migration_refuses_audit_loss(tmp_path):
         assert db.execute('SELECT COUNT(*) FROM report_review_billing_reconciliations').fetchone()[0] == 1
 
 
+def test_review_job_ownership_migration_adds_claim_token(tmp_path):
+    """二次整改项1：0009 迁移为 report_review_jobs 增加 claim_token 列。"""
+    path = tmp_path / 'ownership.db'
+    config = Config(str(ROOT / 'deploy' / 'report_review_server' / 'alembic.ini'))
+    config.set_main_option('sqlalchemy.url', f'sqlite+pysqlite:///{path.as_posix()}')
+    command.upgrade(config, 'head')
+    with sqlite3.connect(path) as db:
+        columns = {row[1] for row in db.execute('PRAGMA table_info(report_review_jobs)')}
+        assert 'claim_token' in columns
+        assert db.execute('SELECT version_num FROM alembic_version').fetchone()[0] == \
+            '0009_review_job_ownership'
+    command.downgrade(config, '0008_auth_refresh_rotation')
+    with sqlite3.connect(path) as db:
+        columns = {row[1] for row in db.execute('PRAGMA table_info(report_review_jobs)')}
+        assert 'claim_token' not in columns
+
+
 def test_skill_release_migration_is_head_and_contains_audit_tables(tmp_path):
     path = tmp_path / "skill-release.db"
     config = Config(str(ROOT / "deploy" / "report_review_server" / "alembic.ini"))
@@ -77,6 +94,6 @@ def test_skill_release_migration_is_head_and_contains_audit_tables(tmp_path):
     with sqlite3.connect(path) as db:
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert {"report_review_skill_releases", "report_review_skill_release_audits"} <= tables
-        assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0008_auth_refresh_rotation"
+        assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0009_review_job_ownership"
         columns = {row[1] for row in db.execute("PRAGMA table_info(report_review_sessions)")}
         assert {"previous_refresh_token_hash", "refresh_rotated_at"}.issubset(columns)

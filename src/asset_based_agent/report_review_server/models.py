@@ -362,6 +362,7 @@ class ReviewJob(Base):
         DateTime(timezone=True), nullable=True
     )
     worker_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    claim_token: Mapped[str | None] = mapped_column(String(36), nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
