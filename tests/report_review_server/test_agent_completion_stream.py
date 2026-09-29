@@ -441,6 +441,34 @@ def test_openai_sse_parser_tool_call_id_is_stable_when_provider_id_is_late():
     assert calls[2]['arguments'] == {'x': 2}
 
 
+def test_canonical_replay_preserves_tool_call_delta_id():
+    from asset_based_agent.report_review_server.services.agent_completion_service import (
+        CanonicalReplayBuilder,
+        encode_canonical_replay,
+    )
+
+    original = [
+        {'kind': 'message_start', 'data': {}},
+        {'kind': 'tool_call_delta', 'data': {
+            'index': 0, 'id': 'call_1', 'name': 'calc',
+            'arguments_fragment': '{"x": 2}',
+        }},
+        {'kind': 'tool_call_complete', 'data': {
+            'id': 'call_1', 'name': 'calc', 'arguments': {'x': 2},
+        }},
+        {'kind': 'message_complete', 'data': {'finish_reason': 'tool_calls'}},
+    ]
+    builder = CanonicalReplayBuilder()
+    for event in original:
+        builder.add(event)
+
+    assert encode_canonical_replay(builder.payload()) == original
+
+    legacy_payload = builder.payload()
+    legacy_payload['sequence'][0].pop('id')
+    assert encode_canonical_replay(legacy_payload) == original
+
+
 # ------------------------------------------------------------------ sampling 保留键
 
 def test_sampling_cannot_override_reserved_wire_keys(client):

@@ -89,6 +89,7 @@ class CanonicalReplayBuilder:
             self.sequence.append({
                 'kind': 'tool_call_delta',
                 'index': int(data.get('index', 0) or 0),
+                'id': str(data.get('id') or ''),
                 'name': str(data.get('name', '')),
                 'fragment': str(data.get('arguments_fragment', '')),
             })
@@ -132,14 +133,22 @@ def encode_canonical_replay(
     if payload.get('started', True):
         events.append({'kind': 'message_start', 'data': {}})
     sequence = payload.get('sequence') or []
+    completed_calls = payload.get('tool_calls') or []
     for item in sequence:  # type: ignore[union-attr]
         kind = item.get('kind')
         if kind == 'text_delta':
             events.append({'kind': 'text_delta',
                            'data': {'text': item.get('text', '')}})
         elif kind == 'tool_call_delta':
+            index = item.get('index', 0)
+            call_id = item.get('id')
+            if not call_id and isinstance(index, int) and index < len(completed_calls):
+                call_id = completed_calls[index].get('id')
+            if not call_id:
+                call_id = f'call-{index}'
             events.append({'kind': 'tool_call_delta', 'data': {
-                'index': item.get('index', 0),
+                'index': index,
+                'id': call_id,
                 'name': item.get('name', ''),
                 'arguments_fragment': item.get('fragment', ''),
             }})
