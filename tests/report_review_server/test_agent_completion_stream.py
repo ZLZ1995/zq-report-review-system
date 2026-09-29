@@ -407,11 +407,66 @@ def test_openai_sse_parser_handles_text_toolcalls_and_usage():
                      'tool_call_delta', 'tool_call_delta',
                      'tool_call_complete', 'usage', 'message_complete']
     assert events[2]['data'] == {'text': '好'}
+    assert events[3]['data']['id'] == 'call_1'
+    assert events[4]['data']['id'] == 'call_1'
     completed = events[5]['data']
+    assert completed['id'] == 'call_1'
     assert completed['name'] == 'calc'
     assert completed['arguments'] == {'x': 2}
     usage = events[6]['data']
     assert usage['input_tokens'] == 7 and usage['output_tokens'] == 3
+
+
+def test_openai_sse_parser_tool_call_id_is_stable_when_provider_id_is_late():
+    from asset_based_agent.report_review_server.services.provider_gateway import (
+        iter_openai_stream_events,
+    )
+    lines = [
+        ('data: {"choices":[{"delta":{"tool_calls":[{"index":0,'
+         '"function":{"name":"calc","arguments":"{\\"x\\":"}}]},"index":0}]}'),
+        '',
+        ('data: {"choices":[{"delta":{"tool_calls":[{"index":0,'
+         '"id":"late-id","function":{"arguments":"2}"}}]},"index":0}]}'),
+        '',
+        'data: {"choices":[{"delta":{},"finish_reason":"tool_calls","index":0}]}',
+        '',
+        'data: [DONE]',
+        '',
+    ]
+    calls = [event['data'] for event in iter_openai_stream_events(iter(lines))
+             if event['kind'] in ('tool_call_delta', 'tool_call_complete')]
+    assert len(calls) == 3
+    assert calls[0]['id']
+    assert calls[0]['id'] == calls[1]['id'] == calls[2]['id']
+    assert calls[2]['arguments'] == {'x': 2}
+
+
+def test_canonical_replay_preserves_tool_call_delta_id():
+    from asset_based_agent.report_review_server.services.agent_completion_service import (
+        CanonicalReplayBuilder,
+        encode_canonical_replay,
+    )
+
+    original = [
+        {'kind': 'message_start', 'data': {}},
+        {'kind': 'tool_call_delta', 'data': {
+            'index': 0, 'id': 'call_1', 'name': 'calc',
+            'arguments_fragment': '{"x": 2}',
+        }},
+        {'kind': 'tool_call_complete', 'data': {
+            'id': 'call_1', 'name': 'calc', 'arguments': {'x': 2},
+        }},
+        {'kind': 'message_complete', 'data': {'finish_reason': 'tool_calls'}},
+    ]
+    builder = CanonicalReplayBuilder()
+    for event in original:
+        builder.add(event)
+
+    assert encode_canonical_replay(builder.payload()) == original
+
+    legacy_payload = builder.payload()
+    legacy_payload['sequence'][0].pop('id')
+    assert encode_canonical_replay(legacy_payload) == original
 
 
 # ------------------------------------------------------------------ sampling 保留键

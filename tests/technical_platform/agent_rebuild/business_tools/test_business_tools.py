@@ -10,6 +10,7 @@ import json
 import threading
 from hashlib import sha256
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -32,6 +33,7 @@ from asset_based_agent.technical_platform.business_tools.service import (
 from asset_based_agent.technical_platform.skills import (
     HISTORY,
     PREFLIGHT,
+    REVIEW,
     digest,
 )
 from asset_based_agent.technical_platform.store import PlatformStore
@@ -128,6 +130,29 @@ def test_seven_tools_with_declared_risks(tmp_path):
     assert tools['annotate_reviewed_files'].descriptor.risk == 'copy_modify'
     for tool in tools.values():
         assert tool.descriptor.description.strip()
+
+
+def test_review_run_pins_selected_provider_model_in_task_snapshot(tmp_path):
+    store, project, session = make_store(tmp_path)
+    file_id = add_docx(store, project, tmp_path, 'review content')
+    service = BusinessRunService(
+        store, session,
+        provider_factory=lambda _skill_id, instructions: SimpleNamespace(
+            model_id='deepseek-flash', skill_instructions=instructions))
+    instructions = 'review instructions'
+
+    run_id = service.queue_skill_plan(
+        skill_id=REVIEW.id, skill_version=REVIEW.version,
+        skill_hash=sha256(instructions.encode('utf-8')).hexdigest(),
+        instructions=instructions,
+        target_file_ids=[file_id], reference_file_ids=[],
+        user_goal='review the selected report', confirmed_facts=[],
+        permission_receipt={'granted': ['read_selected_files', 'call_model']},
+        idempotency_key='review-model-pin')
+
+    snapshot = json.loads(store.run(run_id)['snapshot'])
+    assert snapshot['model'] == 'deepseek-flash'
+    assert store.run(run_id)['state'] == 'queued'
 
 
 # ------------------------------------------------------------ inspection

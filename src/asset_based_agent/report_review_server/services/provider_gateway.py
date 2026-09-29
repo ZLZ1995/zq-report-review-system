@@ -6,6 +6,7 @@ import json
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any, Protocol
+from uuid import uuid4
 
 import httpx
 
@@ -315,15 +316,18 @@ def iter_openai_stream_events(
                             "模型渠道 tool_call 参数片段无效。",
                             retryable=True,
                         )
-                    buffer = tool_buffers.setdefault(
-                        index, {"id": None, "name": "", "fragments": []})
-                    if tool_call_id:
-                        buffer["id"] = tool_call_id
+                    if index not in tool_buffers:
+                        tool_buffers[index] = {
+                            "id": tool_call_id or f"call-{uuid4().hex}",
+                            "name": "", "fragments": [],
+                        }
+                    buffer = tool_buffers[index]
                     if name:
                         buffer["name"] = name
                     buffer["fragments"].append(fragment)
                     yield {"kind": "tool_call_delta", "data": {
-                        "index": index, "name": buffer["name"],
+                        "index": index, "id": buffer["id"],
+                        "name": buffer["name"],
                         "arguments_fragment": fragment,
                     }}
             reason = choice.get("finish_reason")
