@@ -105,9 +105,11 @@ def test_tool_call_stream_replays_identically(client):
     script = [
         {'kind': 'message_start', 'data': {}},
         {'kind': 'tool_call_delta', 'data': {
-            'index': 0, 'name': 'calc', 'arguments_fragment': '{"x"'}},
+            'index': 0, 'id': 'call-0', 'name': 'calc',
+            'arguments_fragment': '{"x"'}},
         {'kind': 'tool_call_delta', 'data': {
-            'index': 0, 'name': 'calc', 'arguments_fragment': ': 2}'}},
+            'index': 0, 'id': 'call-0', 'name': 'calc',
+            'arguments_fragment': ': 2}'}},
         {'kind': 'tool_call_complete', 'data': {
             'id': 'call-0', 'name': 'calc', 'arguments': {'x': 2}}},
         {'kind': 'usage', 'data': {'input_tokens': 12, 'output_tokens': 7}},
