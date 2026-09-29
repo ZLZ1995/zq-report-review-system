@@ -186,7 +186,8 @@ class BusinessRunService:
         try:
             spec = build_task_spec(
                 self.store, self.session_id, user_goal, skill, files,
-                model=None, instructions=instructions, input_roles=input_roles,
+                model=provider.model_id if provider is not None else None,
+                instructions=instructions, input_roles=input_roles,
                 generation_confirmed=generation)
         except PermissionError as exc:
             raise ToolPermissionDenied(str(exc)) from None

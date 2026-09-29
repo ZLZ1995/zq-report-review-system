@@ -407,11 +407,38 @@ def test_openai_sse_parser_handles_text_toolcalls_and_usage():
                      'tool_call_delta', 'tool_call_delta',
                      'tool_call_complete', 'usage', 'message_complete']
     assert events[2]['data'] == {'text': '好'}
+    assert events[3]['data']['id'] == 'call_1'
+    assert events[4]['data']['id'] == 'call_1'
     completed = events[5]['data']
+    assert completed['id'] == 'call_1'
     assert completed['name'] == 'calc'
     assert completed['arguments'] == {'x': 2}
     usage = events[6]['data']
     assert usage['input_tokens'] == 7 and usage['output_tokens'] == 3
+
+
+def test_openai_sse_parser_tool_call_id_is_stable_when_provider_id_is_late():
+    from asset_based_agent.report_review_server.services.provider_gateway import (
+        iter_openai_stream_events,
+    )
+    lines = [
+        ('data: {"choices":[{"delta":{"tool_calls":[{"index":0,'
+         '"function":{"name":"calc","arguments":"{\\"x\\":"}}]},"index":0}]}'),
+        '',
+        ('data: {"choices":[{"delta":{"tool_calls":[{"index":0,'
+         '"id":"late-id","function":{"arguments":"2}"}}]},"index":0}]}'),
+        '',
+        'data: {"choices":[{"delta":{},"finish_reason":"tool_calls","index":0}]}',
+        '',
+        'data: [DONE]',
+        '',
+    ]
+    calls = [event['data'] for event in iter_openai_stream_events(iter(lines))
+             if event['kind'] in ('tool_call_delta', 'tool_call_complete')]
+    assert len(calls) == 3
+    assert calls[0]['id']
+    assert calls[0]['id'] == calls[1]['id'] == calls[2]['id']
+    assert calls[2]['arguments'] == {'x': 2}
 
 
 # ------------------------------------------------------------------ sampling 保留键
