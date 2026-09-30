@@ -64,7 +64,7 @@ jobs:
           python scripts\build_technical_platform.py &&
           python scripts\package_technical_platform.py
       - name: Upload unsigned Windows candidate
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: zq-workspace-windows-${{ github.sha }}
           path: |
