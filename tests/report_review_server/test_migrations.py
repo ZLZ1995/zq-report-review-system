@@ -116,6 +116,8 @@ def test_skill_release_migration_is_head_and_contains_audit_tables(tmp_path):
         assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0011_finance_data"
         columns = {row[1] for row in db.execute("PRAGMA table_info(report_review_sessions)")}
         assert {"previous_refresh_token_hash", "refresh_rotated_at"}.issubset(columns)
+        finance_columns = {row[1] for row in db.execute("PRAGMA table_info(report_review_finance_requests)")}
+        assert 'lease_expires_at' in finance_columns
 
 
 def test_finance_downgrade_refuses_to_discard_credential(tmp_path):

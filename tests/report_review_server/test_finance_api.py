@@ -165,3 +165,99 @@ def test_invalid_tool_plan_is_rejected_before_data_call(client):
     response = client.post('/api/v1/finance/ask', headers=headers, json={
         'request_id': uuid4().hex, 'model_id': 'm', 'prompt': '查询LPR'})
     assert response.status_code == 422
+
+
+def test_abandoned_finance_request_becomes_terminal_without_repeating_model(client):
+    import hashlib
+    from datetime import timedelta
+
+    from asset_based_agent.report_review_server.finance_api import FinanceAsk
+    from asset_based_agent.report_review_server.finance_models import FinanceRequest
+    from asset_based_agent.report_review_server.models import utc_now
+
+    identity = login(client, 'admin', 'AdminPassword123!', instance='interrupted-finance')
+    headers = bearer(identity['access_token'])
+    user_id, request_id = identity['user']['user_id'], uuid4().hex
+    payload = {'request_id': request_id, 'model_id': 'm', 'prompt': '查LPR'}
+    fingerprint = hashlib.sha256(FinanceAsk(**payload).model_dump_json().encode()).hexdigest()
+    with client.app.state.session_factory() as db:
+        row = FinanceRequest(user_id=user_id, request_id=request_id,
+                             request_hash=fingerprint, status='running',
+                             expires_at=utc_now() + timedelta(hours=24))
+        row.lease_expires_at = utc_now() - timedelta(seconds=1)
+        db.add(row)
+        db.commit()
+    def forbidden(*args, **kwargs):
+        raise AssertionError('interrupted request repeated a paid model call')
+    service = client.app.state.finance_service
+    service.metered = SimpleNamespace(execute=forbidden)
+    result = client.get(f'/api/v1/finance/requests/{request_id}', headers=headers)
+    assert result.status_code == 200
+    assert result.json()['status'] == 'failed'
+    assert result.json()['error_code'] == 'finance_interrupted'
+    replay = client.post('/api/v1/finance/ask', headers=headers, json=payload)
+    assert replay.json() == result.json()
+    import pytest
+
+    from asset_based_agent.report_review_server.services.auth_service import (
+        ServiceError,
+    )
+    with client.app.state.session_factory() as db:
+        with pytest.raises(ServiceError):
+            service._finish(db, user_id, request_id, {'status': 'succeeded'})
+        assert db.get(FinanceRequest, (user_id, request_id)).status == 'failed'
+
+
+def test_finance_cleanup_recovers_only_expired_execution_leases(client):
+    from datetime import timedelta
+
+    from asset_based_agent.report_review_server.finance_models import FinanceRequest
+    from asset_based_agent.report_review_server.models import utc_now
+    from asset_based_agent.report_review_server.services.temporary_data_cleanup import (
+        cleanup_expired_temporary_data,
+    )
+    identity = login(client, 'admin', 'AdminPassword123!', instance='finance-cleanup')
+    user_id, now = identity['user']['user_id'], utc_now()
+    stale, live = uuid4().hex, uuid4().hex
+    with client.app.state.session_factory() as db:
+        for request_id, seconds in [(stale, -1), (live, 900)]:
+            row = FinanceRequest(user_id=user_id, request_id=request_id,
+                                 request_hash='fixture', status='running',
+                                 expires_at=now + timedelta(hours=24))
+            row.lease_expires_at = now + timedelta(seconds=seconds)
+            db.add(row)
+        db.commit()
+        cleanup_expired_temporary_data(db, now=now)
+        db.expire_all()
+        assert db.get(FinanceRequest, (user_id, stale)).status == 'failed'
+        assert db.get(FinanceRequest, (user_id, live)).status == 'running'
+
+
+def test_finance_execution_checkpoint_renews_live_work_and_fences_expired_worker(client):
+    from datetime import timedelta
+
+    import pytest
+
+    from asset_based_agent.report_review_server.finance_models import FinanceRequest
+    from asset_based_agent.report_review_server.models import utc_now
+    from asset_based_agent.report_review_server.services.auth_service import (
+        ServiceError,
+    )
+
+    identity = login(client, 'admin', 'AdminPassword123!', instance='finance-checkpoint')
+    user_id, request_id, now = identity['user']['user_id'], uuid4().hex, utc_now()
+    service = client.app.state.finance_service
+    with client.app.state.session_factory() as db:
+        row = FinanceRequest(user_id=user_id, request_id=request_id, request_hash='fixture',
+                             status='running', expires_at=now + timedelta(hours=24),
+                             lease_expires_at=now + timedelta(seconds=60))
+        db.add(row)
+        db.commit()
+        service._check_cancelled(db, user_id, request_id)
+        assert row.lease_expires_at.replace(tzinfo=now.tzinfo) > now + timedelta(seconds=850)
+        row.lease_expires_at = now - timedelta(seconds=1)
+        db.commit()
+        with pytest.raises(ServiceError) as error:
+            service._check_cancelled(db, user_id, request_id)
+        assert error.value.code == 'finance_interrupted'
+        assert db.get(FinanceRequest, (user_id, request_id)).status == 'failed'

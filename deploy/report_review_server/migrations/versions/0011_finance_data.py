@@ -20,7 +20,10 @@ def upgrade():
                     sa.Column('request_hash', sa.String(64), nullable=False),
                     sa.Column('status', sa.String(16), nullable=False),
                     sa.Column('result_ciphertext', sa.Text(), nullable=True),
+                    sa.Column('lease_expires_at', sa.DateTime(timezone=True), nullable=True),
                     sa.Column('expires_at', sa.DateTime(timezone=True), nullable=False))
+    op.create_index('ix_finance_execution_lease', 'report_review_finance_requests',
+                    ['status', 'lease_expires_at'])
 
 
 def downgrade():

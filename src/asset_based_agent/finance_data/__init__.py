@@ -110,4 +110,7 @@ class DataGateway:
                                      arguments.get('max_pages', 5))
             return await api.query(name, arguments)
         finally:
+            # Batch/page helpers return structured failures instead of raising.
+            # Carry their HTTP client's Retry-After into the shared-key gate too.
+            self.cooldown_until = max(self.cooldown_until, api.cooldown_until)
             await api.close()

@@ -14,9 +14,11 @@ from ..finance_models import FinanceCredential, FinanceRequest
 from ..models import utc_now
 from .auth_service import ServiceError, is_expired
 from .provider_gateway import NormalizedUsage
+from .temporary_data_cleanup import recover_expired_finance_requests
 
 MAX_STEPS = 8
 MAX_RESULT_BYTES = 8_000_000
+EXECUTION_LEASE_SECONDS = 900
 _PROVENANCE = {'source', 'documentation', 'api_source', 'suggested_search'}
 
 
@@ -94,10 +96,19 @@ class FinanceService:
             .execution_options(populate_existing=True))
 
     def _check_cancelled(self, db, user_id, request_id):
+        now = utc_now()
+        recover_expired_finance_requests(db, now=now)
+        changed = db.execute(update(FinanceRequest).where(
+            FinanceRequest.user_id == user_id, FinanceRequest.request_id == request_id,
+            FinanceRequest.status == 'running', FinanceRequest.lease_expires_at > now
+        ).values(lease_expires_at=now + timedelta(seconds=EXECUTION_LEASE_SECONDS)))
+        db.commit()
         db.expire_all()
         row = self._row(db, user_id, request_id)
         if row is None or row.status == 'cancelled':
             raise ServiceError('finance_cancelled', '数据查询已取消。', 409)
+        if not changed.rowcount:
+            raise ServiceError('finance_interrupted', '原查询执行已中断，未自动重复付费调用。', 409)
 
     def cancel(self, db, user_id, request_id):
         row = self._row(db, user_id, request_id)
@@ -117,6 +128,8 @@ class FinanceService:
         return {'status': self._row(db, user_id, request_id).status}
 
     def result(self, db, user_id, request_id):
+        recover_expired_finance_requests(db)
+        db.commit()
         row = self._row(db, user_id, request_id)
         if row is None:
             raise ServiceError('finance_request_not_found', '查询记录不存在。', 404)
@@ -125,12 +138,18 @@ class FinanceService:
         if row.result_ciphertext:
             return json.loads(self.cipher.decrypt(row.result_ciphertext,
                               purpose=f'finance-result:{user_id}:{request_id}'))
+        if row.status == 'failed':
+            return {'request_id': request_id, 'status': 'failed', 'datasets': [],
+                    'error_code': 'finance_interrupted',
+                    'reply': '查询因执行中断而停止，未自动重试；如已有模型调用，请先核对原收费记录。'}
         return {'request_id': request_id, 'status': row.status, 'datasets': [],
                 'reply': '查询尚未完成；请查询状态，不要重复提交。'}
 
     def ask(self, db, user_id, request):
         request_id = request.request_id
         fingerprint = hashlib.sha256(request.model_dump_json().encode()).hexdigest()
+        recover_expired_finance_requests(db)
+        db.commit()
         old = self._row(db, user_id, request_id)
         if old:
             if old.status == 'cancelled':
@@ -141,7 +160,8 @@ class FinanceService:
                 raise ServiceError('finance_request_running', '原查询仍在处理，请查询状态。', 409)
             return self.result(db, user_id, request_id)
         db.add(FinanceRequest(user_id=user_id, request_id=request_id, request_hash=fingerprint,
-                              status='running', expires_at=utc_now() + timedelta(hours=24)))
+                              status='running', expires_at=utc_now() + timedelta(hours=24),
+                              lease_expires_at=utc_now() + timedelta(seconds=EXECUTION_LEASE_SECONDS)))
         try:
             db.commit()
         except IntegrityError:
@@ -170,10 +190,14 @@ class FinanceService:
             encoded = json.dumps(outcome, ensure_ascii=False)
         changed = db.execute(update(FinanceRequest).where(
             FinanceRequest.user_id == user_id, FinanceRequest.request_id == request_id,
-            FinanceRequest.status == 'running').values(status=outcome['status'],
+            FinanceRequest.status == 'running', FinanceRequest.lease_expires_at > utc_now()
+            ).values(status=outcome['status'],
                 result_ciphertext=self.cipher.encrypt(encoded, purpose=f'finance-result:{user_id}:{request_id}')))
         db.commit()
         if not changed.rowcount:
+            row = self._row(db, user_id, request_id)
+            if row is not None and row.status != 'cancelled':
+                raise ServiceError('finance_interrupted', '原查询执行已中断，未发布过期结果。', 409)
             raise ServiceError('finance_cancelled', '数据查询已取消，未发布结果。', 409)
 
     def _run(self, db, user_id, request, datasets):

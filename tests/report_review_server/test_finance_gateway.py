@@ -3,7 +3,7 @@ import asyncio
 import httpx
 import pytest
 
-from asset_based_agent.finance_data import QueryError, tools, validate
+from asset_based_agent.finance_data import DataGateway, QueryError, tools, validate
 from asset_based_agent.finance_data.fuyao_core import Api, batch, collect
 from asset_based_agent.finance_data.macro_core import MacroApi
 
@@ -93,3 +93,29 @@ def test_lpr_does_not_receive_company_key_and_preserves_missing_term():
         finally:
             await api.close()
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('helper', ['fuyao_query_batch', 'fuyao_collect_pages'])
+def test_helper_rate_limit_blocks_following_shared_key_request(monkeypatch, helper):
+    import time
+
+    import asset_based_agent.finance_data as gateway_module
+    calls = []
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(429, headers={'Retry-After': '60'})
+    def api_factory(**kwargs):
+        return Api(client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+                   interval=0, **kwargs)
+    monkeypatch.setattr(gateway_module, 'Api', api_factory)
+    gateway = DataGateway()
+    name = 'get_a_share_prices_snapshot'
+    arguments = ({'requests': [{'tool': name, 'arguments': {'limit': 1}}]}
+                 if helper == 'fuyao_query_batch' else
+                 {'tool': name, 'arguments': {'limit': 1}, 'mode': 'offset', 'items_path': 'data.item'})
+    gateway.query(helper, arguments, 'synthetic-key')
+    assert gateway.cooldown_until > time.monotonic() + 55
+    with pytest.raises(QueryError) as error:
+        gateway.query(name, {}, 'synthetic-key')
+    assert error.value.payload['code'] == 'RATE_LIMITED'
+    assert len(calls) == 1
