@@ -52,9 +52,9 @@ def test_age_bucket_uses_current_project_date():
     from datetime import datetime
     m = load_pipeline_module()
     # Excel stores local calendar dates without timezone information.
-    assert m.derive_age_bucket(datetime(2024, 3, 1), base_date=datetime(2024, 3, 31)) == ('1年以内', 'G')  # noqa: DTZ001
+    assert m.derive_age_bucket(datetime(2024, 3, 1), base_date=datetime(2024, 3, 31)) == ('1年以内', 'G')
     with pytest.raises(ValueError, match='after_report_date'):
-        m.derive_age_bucket(datetime(2024, 4, 1), base_date=datetime(2024, 3, 31))  # noqa: DTZ001
+        m.derive_age_bucket(datetime(2024, 4, 1), base_date=datetime(2024, 3, 31))
 
 
 def test_journal_entity_does_not_concatenate_duplicate_source_fields():

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from ..models import BalanceHold, BillingRequest, ReviewJob, utc_now
@@ -68,5 +68,9 @@ def cleanup_expired_temporary_data(
     for hold in expired_holds:
         hold.status = "released"
         counts["expired_holds"] += 1
+    from ..finance_models import FinanceRequest
+    db.execute(update(FinanceRequest).where(
+        FinanceRequest.expires_at <= cutoff,
+        FinanceRequest.result_ciphertext.is_not(None)).values(result_ciphertext=None))
     db.commit()
     return counts
