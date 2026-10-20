@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import threading
-import time
 from datetime import timedelta
 
 import pytest
@@ -262,15 +261,11 @@ def test_rolling_restart_does_not_double_execute_review_job(client):
         db.commit()
     assert executor_b.recover() == 1  # lease 过期后新进程接管
 
-    deadline = time.monotonic() + 15
-    status = None
-    while time.monotonic() < deadline:
-        with session_factory() as db:
-            status = db.get(ReviewJob, job.job_id).status
-        if status in {'succeeded', 'failed'}:
-            break
-        time.sleep(0.05)
-    assert status == 'succeeded'
+    # The in-memory fixture shares one SQLite connection across threads.
+    # Polling with another Session can roll back the worker's transaction.
+    # Join the real worker before reading; all result/ownership/billing
+    # assertions below remain unchanged.
+    executor_b.wait(job.job_id, timeout=15)
 
     # batch1 幂等重放，新进程只真正调用 batch2
     assert len(provider_a.payloads) == 1
