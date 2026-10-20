@@ -6,12 +6,12 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from asset_based_agent.report_review_server import models  # noqa: F401
+from asset_based_agent.report_review_server import finance_models, models  # noqa: F401
 from asset_based_agent.report_review_server.database import Base
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 database_url = os.environ.get("REPORT_REVIEW_DATABASE_URL")
 if database_url:

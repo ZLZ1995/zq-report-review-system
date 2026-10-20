@@ -1,0 +1,10 @@
+{
+  "source": "fuyao-finance",
+  "version": "1.1.1",
+  "files": {
+    "fuyao_core.py": "ffdb2117903d2a3e2ddd4f1ec8dd8dd7d7f0bb1c0ec6d9ea9b2079da02618322",
+    "macro_core.py": "e5b464e8bfb68ce700a07c53758f9f6819b5d2937bba0ea57b2fbe828f9ab5ec",
+    "data/catalog.json": "8dc2eb9c32a71d86eabb6b9c5910eada4c45fd68c37c296871133ee90bf57574",
+    "data/macro-catalog.json": "3bc67feec4ef850056bc1ff70695eb925e87ef2646e682acb5c5baff4549b408"
+  }
+}

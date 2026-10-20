@@ -44,5 +44,7 @@ show_error_codes = true
 "tests/technical_platform/test_material_multiperiod.py" = ["RUF059"]
 "tests/technical_platform/test_payroll_advance_ar_page_fix.py" = ["DTZ001"]
 "tests/test_detail_cover_metadata.py" = ["DTZ001"]
+# Excel calendar fixtures intentionally use timezone-naive datetimes.
+"tests/test_detail_locked_writer.py" = ["DTZ001"]
 "tests/test_detail_review_release.py" = ["C408", "DTZ001", "PLW1510"]
 "tests/test_detail_scope_first.py" = ["DTZ001"]

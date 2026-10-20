@@ -113,6 +113,7 @@ def create_app(
     *,
     engine: Engine | None = None,
 ) -> FastAPI:
+    from . import finance_models  # noqa: F401 - register tables before create_all
     actual_settings = settings or ServerSettings.from_environment()
     actual_engine = engine or build_engine(actual_settings.database_url)
     session_factory = build_session_factory(actual_engine)
@@ -202,6 +203,7 @@ def create_app(
         routes = {(route.path, method) for route in app.routes
                   for method in getattr(route, 'methods', ())}
         supported = {
+            'finance_data': ('/api/v1/finance/ask', 'POST'),
             'skill_routing': ('/api/v1/skill-route', 'POST'),
             'task_understanding': ('/api/v1/agent/understand', 'POST'),
             'material_evidence': ('/api/v1/agent/understand', 'POST'),
@@ -670,6 +672,8 @@ def create_app(
     install_admin_web(app, get_context, get_db)
     from .billing_admin_api import register_billing_admin_routes
     register_billing_admin_routes(app, get_context, get_db)
+    from .finance_api import register_finance_routes
+    register_finance_routes(app, get_context, get_db)
     return app
 
 

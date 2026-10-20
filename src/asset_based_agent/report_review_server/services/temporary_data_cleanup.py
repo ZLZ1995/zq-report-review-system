@@ -4,11 +4,22 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
 from ..models import BalanceHold, BillingRequest, ReviewJob, utc_now
 from .auth_service import is_expired
+
+
+def recover_expired_finance_requests(db: Session, *, now: datetime | None = None) -> None:
+    """Fence abandoned work; never replay a possibly paid request automatically."""
+    from ..finance_models import FinanceRequest
+    cutoff = now or utc_now()
+    db.execute(update(FinanceRequest).where(
+        FinanceRequest.status == 'running',
+        or_(FinanceRequest.lease_expires_at.is_(None),
+            FinanceRequest.lease_expires_at <= cutoff)
+    ).values(status='failed', result_ciphertext=None))
 
 
 def cleanup_expired_temporary_data(
@@ -17,6 +28,7 @@ def cleanup_expired_temporary_data(
     now: datetime | None = None,
 ) -> dict[str, int]:
     cutoff = now or utc_now()
+    recover_expired_finance_requests(db, now=cutoff)
     counts = {
         "review_contexts": 0,
         "review_results": 0,
@@ -68,5 +80,9 @@ def cleanup_expired_temporary_data(
     for hold in expired_holds:
         hold.status = "released"
         counts["expired_holds"] += 1
+    from ..finance_models import FinanceRequest
+    db.execute(update(FinanceRequest).where(
+        FinanceRequest.expires_at <= cutoff,
+        FinanceRequest.result_ciphertext.is_not(None)).values(result_ciphertext=None))
     db.commit()
     return counts

@@ -20,6 +20,11 @@
 <label>凭证引用/工单编号<input name="evidence_reference" pattern="[A-Za-z0-9][A-Za-z0-9._:-]*" maxlength="128" required autocomplete="off"></label>
 <button>核对并结算</button><button id="billing-query" type="button">查询回执（不扣款）</button></form>
 <p id="billing-result" role="status" aria-live="polite"></p></section>
+<section id="finance"><h2>上市公司与宏观数据</h2>
+<p>所有平台账号共用此数据服务 Key。模型调用按原有规则计费，取数不新增收费项。</p>
+<p id="finance-status" role="status">尚未读取配置状态。</p>
+<form id="finance-key-form"><label>数据 API Key<input id="finance-key" type="password" required maxlength="4096" autocomplete="off" spellcheck="false"></label>
+<label><input id="finance-key-visible" type="checkbox">显示本次输入</label><p id="finance-key-count">已输入 0 个字符</p><button>加密保存共享 Key</button></form></section>
 <section id="models"><h2>模型与渠道</h2><div id="model-list"></div><div id="route-list"></div><div class="forms">
 <form id="route"><h3>连接并选择模型</h3>
 <p>填写连接信息，测试后从返回清单中手动选择一个模型。不需要提前新增模型。</p>

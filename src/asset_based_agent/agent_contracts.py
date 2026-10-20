@@ -18,10 +18,10 @@ from pydantic import (
 Identifier = Annotated[str, Field(min_length=1, max_length=128, pattern=r'^\S+$')]
 ShortText = Annotated[str, Field(min_length=1, max_length=1000)]
 MessageIntent = Literal['consult', 'execute', 'clarify', 'cancel', 'unsupported']
-UnderstandingDecision = Literal['answer', 'ask', 'plan', 'browser', 'cancel', 'refuse']
+UnderstandingDecision = Literal['answer', 'ask', 'plan', 'browser', 'finance', 'cancel', 'refuse']
 Adapter = Literal['report.review', 'review.preflight', 'valuation-detail-workbook-fill',
                   'gongshang-change-history-docx', 'financial-brief-docx',
-                  'office-workflow-to-skill', 'browser.task']
+                  'office-workflow-to-skill', 'browser.task', 'finance.query']
 
 
 class Record(BaseModel):
@@ -162,7 +162,7 @@ class TaskUnderstanding(Versioned):
         for ids in (self.skill_ids, self.evidence_message_ids):
             if len(set(ids)) != len(ids):
                 raise ValueError('Duplicate decision identifiers')
-        allowed = {'consult': {'answer', 'ask'}, 'execute': {'plan', 'browser', 'ask', 'refuse'},
+        allowed = {'consult': {'answer', 'ask'}, 'execute': {'plan', 'browser', 'finance', 'ask', 'refuse'},
                    'clarify': {'ask'}, 'cancel': {'cancel'}, 'unsupported': {'refuse', 'ask'}}
         if self.next_action not in allowed[self.message_intent]:
             raise ValueError('Intent and decision disagree')
@@ -175,6 +175,10 @@ class TaskUnderstanding(Versioned):
         if self.next_action == 'plan':
             if not self.goal.strip() or not self.skill_ids or self.missing_inputs:
                 raise ValueError('Incomplete understanding cannot plan execution')
+        elif self.next_action == 'finance':
+            if (self.skill_ids != ['finance.query'] or not self.goal.strip()
+                    or self.targets or self.references or self.missing_inputs):
+                raise ValueError('Incomplete or mixed finance query proposal')
         elif self.next_action != 'browser' and self.skill_ids:
             raise ValueError('Non-execution decision must not schedule skills')
         if self.next_action == 'ask' and not self.missing_inputs:
@@ -223,6 +227,11 @@ def validate_understanding(request: UnderstandingRequest, result: TaskUnderstand
         raise ValueError('Client has not enabled browser tasks')
     if result.next_action == 'plan' and any(s.id in result.skill_ids for s in browser_candidates):
         raise ValueError('Browser capability cannot use file planning')
+    finance_candidates = [s for s in request.skills if s.id == s.adapter == 'finance.query']
+    if result.next_action == 'finance' and not finance_candidates:
+        raise ValueError('Client has not enabled financial data queries')
+    if result.next_action == 'plan' and 'finance.query' in result.skill_ids:
+        raise ValueError('Finance capability cannot use file planning')
     if not set(result.evidence_message_ids) <= {request.message_id, *(m.id for m in request.context)}:
         raise ValueError('Unknown source message')
     if request.message_id not in result.evidence_message_ids:

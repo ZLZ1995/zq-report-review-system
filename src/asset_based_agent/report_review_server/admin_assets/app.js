@@ -26,6 +26,10 @@ function clearSession() {
   routeItems = [];
   for (const id of ["users", "stats", "model-list", "route-list", "model-choice", "rate-route-choice", "release-choice", "release-list", "skill-release-choice", "skill-release-list"]) el(id).replaceChildren();
   document.querySelectorAll("form").forEach(form => form.reset());
+  el('finance-key').value = '';
+  el('finance-key').type = 'password';
+  el('finance-key-visible').checked = false;
+  el('finance-key-count').textContent = '已输入 0 个字符';
   document.querySelectorAll(".user-choice").forEach(select => select.replaceChildren());
   invalidateConnection();
 }
@@ -147,6 +151,7 @@ function cell(row, value) { const td = document.createElement("td"); td.textCont
 function option(select, id, name) { const opt = document.createElement("option"); opt.value = id; opt.textContent = name; select.append(opt); }
 async function refresh() {
   const data = await api("/admin/overview");
+  await refreshFinanceStatus();
   routeItems = data.routes;
   for (const id of ["users", "stats", "model-list", "route-list"]) el(id).replaceChildren();
   el("rate-route-choice").replaceChildren();
@@ -169,6 +174,29 @@ async function refresh() {
     option(el("rate-route-choice"), route.route_id, route.provider_type + " / " + route.provider_model + " · 优先级 " + route.priority);
   }
 }
+async function refreshFinanceStatus() {
+  const status = await api('/admin/finance/credential');
+  el('finance-status').textContent = status.api_key_configured ? '共享数据 Key 已配置（不会回显）。' : '尚未配置共享数据 Key；宏观公开数据仍可查询。';
+}
+el('finance-key').addEventListener('input', () => {
+  el('finance-key-count').textContent = '已输入 ' + el('finance-key').value.length + ' 个字符';
+});
+el('finance-key-visible').addEventListener('change', () => {
+  el('finance-key').type = el('finance-key-visible').checked ? 'text' : 'password';
+});
+el('finance-key-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const input = el('finance-key'), button = event.currentTarget.querySelector('button');
+  button.disabled = true;
+  try {
+    await api('/admin/finance/credential', 'PUT', {api_key: input.value.trim()});
+    input.value = ''; input.type = 'password'; el('finance-key-visible').checked = false;
+    el('finance-key-count').textContent = '已输入 0 个字符';
+    await refreshFinanceStatus();
+    notice('共享数据 Key 已加密保存。');
+  } catch (error) { notice(error instanceof TypeError ? '保存结果尚未确认，请刷新配置状态。' : error.message); }
+  finally { button.disabled = false; }
+});
 function bind(id, action) {
   el(id).addEventListener("submit", async event => {
     event.preventDefault();

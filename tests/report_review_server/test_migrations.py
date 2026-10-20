@@ -97,7 +97,7 @@ def test_billing_stream_lease_migration_adds_activity_columns(tmp_path):
             'PRAGMA table_info(report_review_billing_requests)')}
         assert {'started_at', 'last_activity_at', 'lease_expires_at'} <= columns
         assert db.execute('SELECT version_num FROM alembic_version').fetchone()[0] == \
-            '0010_billing_stream_lease'
+            '0011_finance_data'
     command.downgrade(config, '0009_review_job_ownership')
     with sqlite3.connect(path) as db:
         columns = {row[1] for row in db.execute(
@@ -113,6 +113,38 @@ def test_skill_release_migration_is_head_and_contains_audit_tables(tmp_path):
     with sqlite3.connect(path) as db:
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert {"report_review_skill_releases", "report_review_skill_release_audits"} <= tables
-        assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0010_billing_stream_lease"
+        assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0011_finance_data"
         columns = {row[1] for row in db.execute("PRAGMA table_info(report_review_sessions)")}
         assert {"previous_refresh_token_hash", "refresh_rotated_at"}.issubset(columns)
+        finance_columns = {row[1] for row in db.execute("PRAGMA table_info(report_review_finance_requests)")}
+        assert 'lease_expires_at' in finance_columns
+
+
+def test_finance_downgrade_refuses_to_discard_credential(tmp_path):
+    path = tmp_path / 'finance.db'
+    config = Config(str(ROOT / 'deploy' / 'report_review_server' / 'alembic.ini'))
+    config.set_main_option('sqlalchemy.url', f'sqlite+pysqlite:///{path.as_posix()}')
+    command.upgrade(config, 'head')
+    with sqlite3.connect(path) as db:
+        db.execute('''INSERT INTO report_review_finance_credentials
+            (provider,ciphertext,updated_by,updated_at)
+            VALUES ('fuyao','synthetic-ciphertext','admin',CURRENT_TIMESTAMP)''')
+    with pytest.raises(RuntimeError, match='Cannot discard financial data'):
+        command.downgrade(config, '0010_billing_stream_lease')
+    with sqlite3.connect(path) as db:
+        assert db.execute('SELECT ciphertext FROM report_review_finance_credentials').fetchone()[0] == 'synthetic-ciphertext'
+
+
+def test_migration_keeps_existing_application_diagnostics_enabled(tmp_path):
+    """Embedded migration must not silence subsequently logged request failures."""
+    import logging
+    logger = logging.getLogger('asset_based_agent.diagnostics')
+    logger.disabled = False
+    path = tmp_path / 'logging.db'
+    config = Config(str(ROOT / 'deploy' / 'report_review_server' / 'alembic.ini'))
+    config.set_main_option('sqlalchemy.url', f'sqlite+pysqlite:///{path.as_posix()}')
+    try:
+        command.upgrade(config, 'head')
+        assert logger.disabled is False
+    finally:
+        logger.disabled = False
