@@ -23,6 +23,7 @@ COPY scripts/bootstrap_report_review_admin.py /app/scripts/bootstrap_report_revi
 COPY deploy/report_review_server/start_harness.py /app/start.py
 COPY src/zq_harness_gateway /app/src/zq_harness_gateway
 ENV ZQ_HARNESS_GATEWAY_ENABLED=1
+ENV ZQ_FINANCE_JOBS_ENABLED=1
 
 RUN useradd --create-home --uid 10001 appuser
 USER appuser

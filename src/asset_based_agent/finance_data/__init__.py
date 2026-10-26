@@ -3,6 +3,9 @@
 No MCP process, desktop credential store or per-user server filesystem is used.
 """
 import asyncio
+import json
+from pathlib import Path
+from .quote_fast import latest_quote
 import threading
 import time
 
@@ -18,20 +21,10 @@ def obj(properties=None, required=None):
 
 
 TEXT = {'type': 'string', 'minLength': 1, 'maxLength': 128}
-HELPERS = {
-    'fuyao_status': ('查询数据服务状态', obj()),
-    'fuyao_tool_help': ('读取接口完整参数和分页说明', obj({'tool': TEXT}, ['tool'])),
-    'fuyao_query_batch': ('顺序执行最多20项查询', obj({
-        'requests': {'type': 'array', 'minItems': 1, 'maxItems': 20,
-                     'items': obj({'tool': TEXT, 'arguments': {'type': 'object'}}, ['tool'])},
-        'save': {'type': 'boolean'}}, ['requests'])),
-    'fuyao_collect_pages': ('按明确的数组路径收集分页数据，最多20页', obj({
-        'tool': TEXT, 'arguments': {'type': 'object'},
-        'mode': {'enum': ['offset', 'page', 'cursor']}, 'items_path': TEXT,
-        'cursor_parameter': TEXT, 'next_cursor_path': TEXT,
-        'max_pages': {'type': 'integer', 'minimum': 1, 'maximum': 20}},
-        ['tool', 'arguments', 'mode', 'items_path'])),
-}
+_CATALOG = json.loads(Path(__file__).with_name('plugin_catalog.json').read_text(encoding='utf-8'))
+HELPERS = _CATALOG['helpers']
+OFFICIAL = _CATALOG['official']
+
 
 
 def tools():
@@ -39,7 +32,7 @@ def tools():
                     item['description'], 'inputSchema': item['inputSchema']}
               for name, item in TOOLS.items()}
     result.update({name: {'name': name, 'description': desc, 'inputSchema': schema}
-                   for name, (desc, schema) in {**MACRO_TOOLS, **HELPERS}.items()})
+                   for name, (desc, schema) in {**MACRO_TOOLS, **HELPERS, **OFFICIAL}.items()})
     return result
 
 
@@ -58,7 +51,8 @@ class DataGateway:
     A request owns its event loop and clients, avoiding cross-loop AsyncClient reuse.
     The deployed application remains single-process as required by the platform.
     """
-    def __init__(self):
+    def __init__(self, official=None):
+        self.official = official
         self.lock = threading.Lock()
         self.cooldown_until = 0.0
         self.last = 0.0
@@ -67,6 +61,12 @@ class DataGateway:
         validate(name, arguments)
         if before_request is not None:
             before_request()
+        if name in OFFICIAL:
+            if name == 'fuyao_ifind_status':
+                return {'source':'official_ifind', 'configured':self.official is not None, 'live_access_verified':False}
+            if self.official is None:
+                raise QueryError('OFFICIAL_UNAVAILABLE', 'Official worker is not configured')
+            return self.official(name, arguments)
         if name == 'fuyao_status':
             return {'version': '1.1.1', 'api_key_configured': bool(key),
                     'public_tools': len(TOOLS), 'macro_tools': len(MACRO_TOOLS)}
@@ -101,6 +101,8 @@ class DataGateway:
     async def _company(self, name, arguments, key, before_request):
         api = Api(key_loader=lambda: key, before_request=before_request)
         try:
+            if name == 'fuyao_latest_quote':
+                return await latest_quote(api, arguments['query'])
             if name == 'fuyao_query_batch':
                 return await batch(api, arguments['requests'])
             if name == 'fuyao_collect_pages':

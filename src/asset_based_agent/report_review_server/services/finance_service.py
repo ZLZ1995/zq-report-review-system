@@ -19,7 +19,7 @@ from .temporary_data_cleanup import recover_expired_finance_requests
 MAX_STEPS = 8
 MAX_RESULT_BYTES = 8_000_000
 EXECUTION_LEASE_SECONDS = 900
-_PROVENANCE = {'source', 'documentation', 'api_source', 'suggested_search'}
+_PROVENANCE = {'documentation', 'suggested_search'}
 
 
 def public_data(value):
@@ -58,15 +58,37 @@ class FinanceService:
             raise ServiceError('finance_config_conflict', '配置已变化，请刷新后重试。', 409) from None
         return self.credential_status(db)
 
-    def query(self, db, tool, arguments, *, before_request=None):
+    def query(self, db, tool, arguments, *, before_request=None, user_id=None):
         if len(json.dumps(arguments, ensure_ascii=False)) > 32000:
             raise ServiceError('finance_invalid_query', '查询参数过长，请缩小范围。', 422)
         try:
             validate(tool, arguments)
         except QueryError:
             raise ServiceError('finance_invalid_query', '工具或参数不符合数据接口要求。', 422) from None
+        queue = getattr(self, 'official_queue', None)
+        if tool.startswith('fuyao_ifind_') and queue is not None:
+            if not user_id:raise ServiceError('authentication_required','Login required',401)
+            db.commit()
+            if tool == 'fuyao_ifind_status':return {'tool':tool,'parameters':arguments,'data':queue.health()}
+            import uuid
+            job=queue.submit(str(user_id),uuid.uuid4().hex,tool,arguments)
+            try:
+                deadline=time.monotonic()+240
+                while job['status'] in ('queued','running','cancel_requested'):
+                    if before_request is not None:before_request();db.commit()
+                    if time.monotonic()>=deadline:raise TimeoutError()
+                    time.sleep(.25);job=queue.get(str(user_id),job['id'])
+                result=job['result']
+                if job.get('artifact'):result=json.loads(queue.download(str(user_id),job['id']))
+                if job['status']!='succeeded' or not isinstance(result,dict) or result.get('status')!='ok':
+                    raise ServiceError('finance_official_query_failed','Official query did not succeed',502)
+                if len(json.dumps(result,ensure_ascii=False).encode())>MAX_RESULT_BYTES:
+                    raise ServiceError('finance_result_too_large','Use async jobs for large results',422)
+                return {'tool':tool,'parameters':arguments,'data':public_data(result)}
+            except BaseException:
+                queue.cancel(str(user_id),job['id']);raise
         key = None
-        if not tool.startswith('macro_') and tool != 'fuyao_tool_help':
+        if not tool.startswith(('macro_', 'fuyao_ifind_')) and tool != 'fuyao_tool_help':
             row = db.get(FinanceCredential, 'fuyao')
             if row and row.ciphertext:
                 key = self.cipher.decrypt(row.ciphertext, purpose='finance:fuyao')
@@ -86,6 +108,8 @@ class FinanceService:
                 429 if code == 'RATE_LIMITED' else 422 if code in {'INVALID_ARGUMENT', 'UNKNOWN_TOOL'} else 502) from None
         except (TimeoutError, OSError, ValueError):
             raise ServiceError('finance_unavailable', '数据源暂不可用，未返回完整数据。', 502) from None
+        if tool.startswith('fuyao_ifind_') and result.get('status', 'ok') not in ('ok', 'succeeded'):
+            raise ServiceError('finance_official_query_failed', 'Official iFinD query failed; errorcode=' + str(result.get('errorcode', 'unavailable')), 502)
         if len(json.dumps(result, ensure_ascii=False).encode('utf-8')) > MAX_RESULT_BYTES:
             raise ServiceError('finance_result_too_large', '结果过大，请分段或缩小查询范围。', 422)
         return {'tool': tool, 'parameters': arguments, 'data': public_data(clean(result, key))}
@@ -252,7 +276,7 @@ class FinanceService:
             except (ValueError, KeyError, IndexError, TypeError):
                 raise ServiceError('finance_plan_invalid', '数据查询计划无效，未继续取数。', 502) from None
             name, arguments = proposal['tool'], proposal['arguments']
-            data = self.query(db, name, arguments, before_request=lambda: self._check_cancelled(
+            data = self.query(db, name, arguments, user_id=user_id, before_request=lambda: self._check_cancelled(
                 db, user_id, request.request_id))
             if name not in {'fuyao_tool_help', 'fuyao_status', 'macro_indicator_search', 'macro_regions'}:
                 datasets.append(data)

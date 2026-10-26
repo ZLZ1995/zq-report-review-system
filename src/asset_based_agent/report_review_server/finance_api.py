@@ -59,7 +59,7 @@ def register_finance_routes(app, get_context, get_db):
     @app.post('/api/v1/finance/query')
     def query(payload: FinanceQuery, response: Response, _context=authorized, db=database):
         response.headers['Cache-Control'] = 'no-store'
-        return service.query(db, payload.tool, payload.arguments)
+        return service.query(db, payload.tool, payload.arguments, user_id=_context.user.user_id)
 
     @app.post('/api/v1/finance/ask')
     def ask(payload: FinanceAsk, response: Response, context=authorized, db=database):
