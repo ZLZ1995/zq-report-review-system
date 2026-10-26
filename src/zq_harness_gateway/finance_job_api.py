@@ -42,6 +42,9 @@ def install_finance_jobs(app,engine,authenticate,node_hashes,*,cipher=None):
         async def operation():
             user=await run_in_threadpool(owner,request);value=await body(request)
             fields(value,['request_id','tool','arguments'])
+            worker=getattr(app.state,'official_server_worker',None)
+            if worker is not None and not worker.configured():
+                return JSONResponse({'error':{'code':'SERVER_IFIND_CREDENTIALS_MISSING'}},status_code=503)
             if not isinstance(value['request_id'],str) or not isinstance(value['tool'],str) or not isinstance(value['arguments'],dict):raise JobError('INVALID_FIELDS')
             try:return await run_in_threadpool(queue.submit,str(user),value['request_id'],value['tool'],value['arguments'])
             except (TypeError,ValueError):raise JobError('INVALID_ARGUMENTS') from None

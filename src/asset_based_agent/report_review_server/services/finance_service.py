@@ -69,7 +69,9 @@ class FinanceService:
         if tool.startswith('fuyao_ifind_') and queue is not None:
             if not user_id:raise ServiceError('authentication_required','Login required',401)
             db.commit()
-            if tool == 'fuyao_ifind_status':return {'tool':tool,'parameters':arguments,'data':queue.health()}
+            health=getattr(self,'official_health',queue.health)()
+            if tool == 'fuyao_ifind_status':return {'tool':tool,'parameters':arguments,'data':health}
+            if not health['configured']:raise ServiceError('finance_official_not_configured','Server iFinD credentials are not configured',503)
             import uuid
             job=queue.submit(str(user_id),uuid.uuid4().hex,tool,arguments)
             try:

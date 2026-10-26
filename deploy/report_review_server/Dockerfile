@@ -22,7 +22,9 @@ COPY deploy/report_review_server/migrations /app/deploy/report_review_server/mig
 COPY scripts/bootstrap_report_review_admin.py /app/scripts/bootstrap_report_review_admin.py
 COPY deploy/report_review_server/start.py /app/start.py
 
+COPY scripts/install_official_sdk.py /app/scripts/install_official_sdk.py
 RUN useradd --create-home --uid 10001 appuser
+RUN python /app/scripts/install_official_sdk.py
 USER appuser
 
 EXPOSE 8000

@@ -124,7 +124,11 @@ def install_gateway(app, service):
                 'extension_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                 'capabilities': {'completions': 1, 'request_reconciliation': 1, 'account': 1, 'finance': 1,
                     'official_finance_jobs': int(getattr(app.state,'finance_jobs',None) is not None)},
-                'official_node_online': app.state.finance_jobs.health()['node_online'] if getattr(app.state,'finance_jobs',None) is not None else False}
+                'official_node_online': app.state.finance_jobs.health()['node_online'] if getattr(app.state,'finance_jobs',None) is not None else False,
+                'official_execution_location':'server', 'desktop_relay_required':False,
+                'official_server_configured':app.state.official_server_worker.configured() if getattr(app.state,'official_server_worker',None) else False,
+                'official_server_sdk_verified':app.state.official_server_worker.verified_at is not None if getattr(app.state,'official_server_worker',None) else False,
+                'official_server_error':app.state.official_server_worker.last_error if getattr(app.state,'official_server_worker',None) else None}
 
     @app.get('/api/v1/harness/finance/tools')
     def finance_catalog(request: Request):
@@ -151,7 +155,7 @@ def install_gateway(app, service):
                 if query.tool != 'fuyao_ifind_status' or getattr(app.state, 'finance_jobs', None) is None:
                     return app.state.finance_service.query(db, query.tool, query.arguments, user_id=user_id)
             return {'tool':query.tool,'parameters':query.arguments,'status':'succeeded',
-                    'provider':'official_ifind','data':app.state.finance_jobs.health()}
+                    'provider':'official_ifind','data':app.state.official_server_worker.health()}
         return await run_in_threadpool(execute_query)
 
     @app.get('/api/v1/harness/account')
@@ -217,18 +221,12 @@ def install_gateway(app, service):
                     "billing_request_id": row.billing_request_id,
                     "charged_amount": format(row.charged_amount, 'f'), "error_code": row.error_code}
     import os
-    # A packaged node registration enables the official queue even when the
-    # hosting platform reuses its own build/start configuration. An explicit
-    # zero remains the operator's rollback switch.
-    registered_node = Path(__file__).with_name('node_hashes.json').is_file()
-    if os.environ.get('ZQ_FINANCE_JOBS_ENABLED', '1' if registered_node else '0') == '1':
+    if os.environ.get('ZQ_FINANCE_JOBS_ENABLED', '1') == '1':
         from .finance_job_api import install_finance_jobs
-        default_hashes = Path(__file__).with_name('node_hashes.json')
-        node_hashes = json.loads(os.environ.get('ZQ_FINANCE_NODE_HASHES', default_hashes.read_text() if default_hashes.exists() else '{}'))
-        if not isinstance(node_hashes, dict) or not node_hashes or any(
-                not isinstance(k, str) or not isinstance(v, str) or not re.fullmatch('[a-f0-9]{64}', v)
-                for k, v in node_hashes.items()):
-            raise RuntimeError('INVALID_FINANCE_NODE_CONFIGURATION')
-        app.state.finance_jobs = install_finance_jobs(app, engine, finance_user, node_hashes)
+        from .server_finance_worker import install_server_worker
+        # Empty node authorization permanently rejects the former desktop relay.
+        app.state.finance_jobs = install_finance_jobs(app, engine, finance_user, {})
         app.state.finance_service.official_queue = app.state.finance_jobs
+        worker=install_server_worker(app,app.state.finance_jobs)
+        app.state.finance_service.official_health=worker.health
     app.state.zq_harness_gateway_installed = True

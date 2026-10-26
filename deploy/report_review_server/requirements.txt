@@ -9,3 +9,6 @@ PyJWT==2.15.0
 argon2-cffi==25.1.0
 cryptography==50.0.1
 jsonschema==4.23.0
+iFinDAPI==0.0.8
+numpy==2.2.6
+pandas==2.3.2

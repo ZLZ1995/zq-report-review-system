@@ -25,7 +25,9 @@ COPY src/zq_harness_gateway /app/src/zq_harness_gateway
 ENV ZQ_HARNESS_GATEWAY_ENABLED=1
 ENV ZQ_FINANCE_JOBS_ENABLED=1
 
+COPY scripts/install_official_sdk.py /app/scripts/install_official_sdk.py
 RUN useradd --create-home --uid 10001 appuser
+RUN python /app/scripts/install_official_sdk.py
 USER appuser
 
 EXPOSE 8000
