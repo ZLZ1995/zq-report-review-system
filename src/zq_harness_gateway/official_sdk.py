@@ -24,7 +24,10 @@ def run(request,sdk=None):
         return {'status':'invalid_arguments','errorcode':'INVALID_ARGUMENT_COUNT'}
     if not os.environ.get('IFIND_USERNAME') or not os.environ.get('IFIND_PASSWORD'):
         return {'status':'not_configured','errorcode':'SERVER_IFIND_CREDENTIALS_MISSING'}
-    if sdk is None:import iFinDPy as sdk
+    if sdk is None:
+        from .sdk_native import ensure_native
+        ensure_native()
+        import iFinDPy as sdk
     login=code(sdk.THS_iFinDLogin(os.environ['IFIND_USERNAME'],os.environ['IFIND_PASSWORD']))
     if login not in (0,-201):return {'status':'login_failed','login_code':login}
     try:
@@ -45,6 +48,10 @@ if __name__=='__main__':
     with open(os.devnull,'w') as null:
         os.dup2(null.fileno(),1);os.dup2(null.fileno(),2)
         try:result=run(json.load(sys.stdin))
+        except ModuleNotFoundError as error:
+            name=error.name if error.name in ('iFinDPy','iFinDAPI','pandas','numpy') else 'DEPENDENCY'
+            result={'status':'failed','errorcode':'SDK_MODULE_MISSING_'+name}
+        except OSError:result={'status':'failed','errorcode':'SDK_NATIVE_LOAD_FAILED'}
         except Exception:result={'status':'failed','errorcode':'SERVER_SDK_ERROR'}
         result['source']='official_ifind'
         output.write(json.dumps(result,ensure_ascii=False,allow_nan=False));output.flush()
