@@ -29,7 +29,7 @@ def run(request,sdk=None):
         ensure_native()
         import iFinDPy as sdk
     login=code(sdk.THS_iFinDLogin(os.environ['IFIND_USERNAME'],os.environ['IFIND_PASSWORD']))
-    if login not in (0,-201):return {'status':'login_failed','login_code':login}
+    if login not in (0,-201):return {'status':'login_failed','login_code':login,'errorcode':login}
     try:
         result=getattr(sdk,api)(*args)
         if isinstance(result,str):result=json.loads(result)

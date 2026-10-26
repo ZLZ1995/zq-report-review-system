@@ -126,7 +126,7 @@ def install_gateway(app, service):
                     'official_finance_jobs': int(getattr(app.state,'finance_jobs',None) is not None)},
                 'official_node_online': app.state.finance_jobs.health()['node_online'] if getattr(app.state,'finance_jobs',None) is not None else False,
                 'official_execution_location':'server', 'desktop_relay_required':False,
-                'official_runtime_version':2,
+                'official_runtime_version':3,
                 'official_server_configured':app.state.official_server_worker.configured() if getattr(app.state,'official_server_worker',None) else False,
                 'official_server_sdk_verified':app.state.official_server_worker.verified_at is not None if getattr(app.state,'official_server_worker',None) else False,
                 'official_server_error':app.state.official_server_worker.last_error if getattr(app.state,'official_server_worker',None) else None}
