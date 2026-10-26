@@ -217,7 +217,11 @@ def install_gateway(app, service):
                     "billing_request_id": row.billing_request_id,
                     "charged_amount": format(row.charged_amount, 'f'), "error_code": row.error_code}
     import os
-    if os.environ.get('ZQ_FINANCE_JOBS_ENABLED', '0') == '1':
+    # A packaged node registration enables the official queue even when the
+    # hosting platform reuses its own build/start configuration. An explicit
+    # zero remains the operator's rollback switch.
+    registered_node = Path(__file__).with_name('node_hashes.json').is_file()
+    if os.environ.get('ZQ_FINANCE_JOBS_ENABLED', '1' if registered_node else '0') == '1':
         from .finance_job_api import install_finance_jobs
         default_hashes = Path(__file__).with_name('node_hashes.json')
         node_hashes = json.loads(os.environ.get('ZQ_FINANCE_NODE_HASHES', default_hashes.read_text() if default_hashes.exists() else '{}'))
