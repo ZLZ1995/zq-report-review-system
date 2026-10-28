@@ -34,8 +34,6 @@ def validate_payload(payload):
         calls = message.get('tool_calls')
         if not isinstance(content, str) and not (role == 'assistant' and content is None and calls):
             invalid()
-        if isinstance(content, str) and len(content) > 200000:
-            invalid()
         if 'reasoning_content' in message and (role != 'assistant' or not isinstance(message['reasoning_content'], str)):
             invalid()
         if role == 'tool':
@@ -199,8 +197,6 @@ def install_gateway(app, service):
         body = bytearray()
         async for chunk in request.stream():
             body.extend(chunk)
-            if len(body) > 1024 * 1024:
-                raise ServiceError("payload_too_large", "Request too large", 413)
         try:
             data = json.loads(body)
         except (ValueError, UnicodeError, RecursionError):
